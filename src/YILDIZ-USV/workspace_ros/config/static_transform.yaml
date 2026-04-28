@@ -1,0 +1,20 @@
+static_transforms:
+  - parent: "lidar_link"
+    child: "roboboat/base_link/sensor_lidar"
+    translation: [0.0, 0.0, 0.0]
+    rotation_rpy: [0.0, 0.0, 0.0]
+
+  - parent: "imu_link"
+    child: "roboboat/base_link/sensor_imu"
+    translation: [0.0, 0.0, 0.0]
+    rotation_rpy: [0.0, 0.0, 0.0]
+
+  - parent: "gps_link"
+    child: "roboboat/base_link/sensor_gps"
+    translation: [0.0, 0.0, 0.0]
+    rotation_rpy: [0.0, 0.0, 0.0]
+
+  - parent: "camera_link"
+    child: "roboboat/base_link/sensor_camera"
+    translation: [0.0, 0.0, 0.0]
+    rotation_rpy: [0.0, 0.0, 0.0]

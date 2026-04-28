@@ -1,0 +1,34 @@
+<?xml version="1.0"?>
+<sdf version="1.6">
+  <model name="waves">
+    <static>true</static>
+    <link name="link">
+      <visual name="wave_visual">
+        <geometry>
+          <mesh>
+            <uri>meshes/waterlow.dae</uri>
+          </mesh>
+        </geometry>
+        <plugin filename="libWaveVisual.so" name="vrx::WaveVisual">
+          <shader>
+            <vertex>materials/programs/GerstnerWaves_vs_330.glsl</vertex>
+            <fragment>materials/programs/GerstnerWaves_fs_330.glsl</fragment>
+            <parameters>
+              <rescale>0.5</rescale>
+              <bumpScale>250 250</bumpScale>
+              <bumpSpeed>0.08 0.04</bumpSpeed>
+              <hdrMultiplier>0.6</hdrMultiplier>
+              <fresnelPower>3.0</fresnelPower>
+              <shallowColor>0.04 0.09 0.24 1.0</shallowColor>
+              <deepColor>0.01 0.02 0.10 1.0</deepColor>
+            </parameters>
+          </shader>
+          <wavefield>
+            <topic>/vrx/wavefield/parameters</topic>
+          </wavefield>
+        </plugin>
+        <visibility_flags>8</visibility_flags>
+      </visual>
+    </link>
+  </model>
+</sdf>

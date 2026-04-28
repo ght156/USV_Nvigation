@@ -1,0 +1,570 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://ros.org/wiki/xacro" name="roboboat">
+
+  <link name="base_link">
+
+    <!-- Visual appearance of the roboboat object -->
+    <visual name="visual_roboboat">
+      <geometry>
+        <mesh filename="file://$(find workspace_gz)/models/roboboat/meshes/roboboat.dae"/>
+      </geometry>
+    </visual>
+
+    <!-- Inertia definition of the roboboat object -->
+    <inertial>
+      <origin xyz="0 0 -0.2" rpy="0 0 0"/>
+      <mass value="10"/>
+      <inertia 
+         ixx="0.5666666666666668" ixy="0" ixz="0" 
+         iyy="1.0416666666666667" iyz="0" 
+         izz="1.5416666666666667"/>
+    </inertial>
+
+    <!-- Collision area definition of the roboboat object -->
+    <collision name="Box011">
+      <origin xyz="0.110046 0.314338 0.0352701" rpy="0.0 0.0 0.0"/>
+      <geometry>
+        <box size="1.14985 0.223203 0.202172"/>
+      </geometry>
+    </collision>
+
+    <!-- Collision area definition of the roboboat object -->
+    <collision name="Box012">
+      <origin xyz="0.110046 -0.31434 0.0352701" rpy="0.0 0.0 0.0"/>
+      <geometry>
+        <box size="1.14985 0.223203 0.202172"/>
+      </geometry>
+    </collision>
+
+    <!-- Collision area definition of the roboboat object -->
+    <collision name="Box013">
+      <origin xyz="0.0549115 0.0 0.240029" rpy="0.0 0.0 0.0"/>
+      <geometry>
+        <box size="0.598409 0.459244 0.0260934"/>
+      </geometry>
+    </collision>
+
+    <!-- Collision area definition of the roboboat object -->
+    <collision name="Cylinder262">
+      <origin xyz="-0.158378 0.290814 0.162712" rpy="1.0472 0.0 0.0"/>
+      <geometry>
+        <cylinder length="0.222664" radius="0.0222591"/>
+      </geometry>
+    </collision>
+
+    <!-- Collision area definition of the roboboat object -->
+    <collision name="Cylinder263">
+      <origin xyz="-0.158378 -0.290814 0.162712" rpy="-1.0472 0.0 0.0"/>
+      <geometry>
+        <cylinder length="0.222664" radius="0.0222591"/>
+      </geometry>
+    </collision>
+
+    <!-- Collision area definition of the roboboat object -->
+    <collision name="Cylinder264">
+      <origin xyz="0.12101 0.290814 0.162712" rpy="1.0472 0.0 0.0"/>
+      <geometry>
+        <cylinder length="0.222664" radius="0.0222591"/>
+      </geometry>
+    </collision>
+
+    <!-- Collision area definition of the roboboat object -->
+    <collision name="Cylinder265">
+      <origin xyz="0.12101 -0.290814 0.162712" rpy="-1.0472 0.0 0.0"/>
+      <geometry>
+        <cylinder length="0.222664" radius="0.0222591"/>
+      </geometry>
+    </collision>
+
+    <!-- Collision area definition of the roboboat object -->
+    <collision name="Cylinder266">
+      <origin xyz="0.12101 -0.000654578 0.21655" rpy="1.5708 0.0 0.0"/>
+      <geometry>
+        <cylinder length="0.409041" radius="0.0155011"/>
+      </geometry>
+    </collision>
+
+    <!-- Collision area definition of the roboboat object -->
+    <collision name="Cylinder267">
+      <origin xyz="-0.15838 -0.000654578 0.21655" rpy="1.5708 0.0 0.0"/>
+      <geometry>
+        <cylinder length="0.409041" radius="0.0155011"/>
+      </geometry>
+    </collision>
+
+    <!-- Visual appearance of the drybox object -->
+    <visual name="visual_drybox">
+      <origin xyz="0.0 0.0 0.25" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="file://$(find workspace_gz)/models/roboboat/sensors/drybox/meshes/drybox.dae"/>
+      </geometry>
+    </visual>
+    
+    <!-- Collision area definition of the drybox object -->
+    <collision name="collision_drybox">
+      <origin xyz="0 0 0.32" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.2 0.3 0.15"/>
+      </geometry>
+    </collision>
+
+  </link>
+
+  <link name="left_housing_link">
+
+    <!-- Visual appearance of the left propeller housing object -->
+    <visual name="visual_left_housing">
+      <geometry>
+        <mesh filename="file://$(find workspace_gz)/models/roboboat/meshes/housing.dae"/>
+      </geometry>
+    </visual>
+    
+    <!-- Inertia definition of the left propeller housing object -->
+    <inertial>
+      <mass value="1.0"/>
+      <inertia
+        ixx="0.0020290833333333333" ixy="0.0" ixz="0.0"
+        iyy="0.002408333333333333" iyz="0.0"
+        izz="0.0006874166666666666" />
+    </inertial>
+
+    <!-- Visual appearance of the left mounting object -->
+    <visual name="visual_left_mount">
+      <origin xyz="0 0 -0.01" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="file://$(find workspace_gz)/models/roboboat/meshes/mount.dae"/>
+      </geometry>
+    </visual>
+
+    <!-- Collision area definition of the left mounting object -->
+    <collision name="Box011d">
+      <origin xyz="0.0 0.0 0.100951" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.0810453 0.0430519 0.070925"/>
+      </geometry>
+    </collision>
+
+    <!-- Collision area definition of the left propeller housing object -->
+    <collision name="Cylinder263d">
+      <origin xyz="0.0166537 -0.00013299 0.0" rpy="1.5708 0  -1.5708"/>
+      <geometry>
+        <cylinder length="0.14376" radius="0.0243692"/>
+      </geometry>
+    </collision>
+
+    <!-- Collision area definition of the left propeller housing object -->
+    <collision name="Cylinder264d">
+      <origin xyz="0.0 0.0 0.0628066" rpy="0 0 0"/>
+      <geometry>
+        <cylinder length="0.125613" radius="0.014703"/>
+      </geometry>
+    </collision>
+
+  </link>
+
+  <link name="left_prop_link">
+
+    <!-- Visual appearance of the left propeller object -->
+    <visual name="visual_left_prop">
+      <geometry>
+        <mesh filename="file://$(find workspace_gz)/models/roboboat/meshes/prop.dae"/>
+      </geometry>
+    </visual>
+    
+    <!-- Inertia definition of the left propeller object -->
+    <inertial>
+      <mass value="0.1"/>
+      <inertia 
+        ixx="0.000105625" ixy="0.0" ixz="0.0"
+        iyy="0.000105625" iyz="0.0" 
+        izz="0.00015125"/>
+    </inertial>
+
+    <!-- Collision area definition of the left propeller object -->
+    <collision name="Cylinder262d">
+      <origin xyz="0.0 0.0 0.0" rpy="1.5708 0.0 -1.5708"/>
+      <geometry>
+        <cylinder length="0.0608172" radius="0.0553844"/>
+      </geometry>
+    </collision>
+
+  </link>
+
+  <link name="right_housing_link">
+
+    <!-- Visual appearance of the right propeller housing object -->
+    <visual name="visual_right_housing">
+      <geometry>
+        <mesh filename="file://$(find workspace_gz)/models/roboboat/meshes/housing.dae"/>
+      </geometry>
+    </visual>
+    
+    <!-- Inertia definition of the right propeller housing object -->
+    <inertial>
+      <mass value="1.0"/>
+      <inertia
+        ixx="0.0020290833333333333" ixy="0.0" ixz="0.0"
+        iyy="0.002408333333333333" iyz="0.0"
+        izz="0.0006874166666666666" />
+    </inertial>
+
+    <!-- Visual appearance of the right mounting object -->
+    <visual name="visual_right_mount">
+      <origin xyz="0 0 -0.01" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="file://$(find workspace_gz)/models/roboboat/meshes/mount.dae"/>
+      </geometry>
+    </visual>
+
+    <!-- Collision area definition of the right mounting object -->
+    <collision name="Box011i">
+      <origin xyz="0.0 0.0 0.100951" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.0810453 0.0430519 0.070925"/>
+      </geometry>
+    </collision>
+
+    <!-- Collision area definition of the right propeller housing object -->
+    <collision name="Cylinder263i">
+      <origin xyz="0.0166537 0.00013299 0.0" rpy="1.5708 0  -1.5708"/>
+      <geometry>
+        <cylinder length="0.14376" radius="0.0243692"/>
+      </geometry>
+    </collision>
+
+    <!-- Collision area definition of the right propeller housing object -->
+    <collision name="Cylinder264i">
+      <origin xyz="0.0 0.0 0.0628066" rpy="0 0 0"/>
+      <geometry>
+        <cylinder length="0.125613" radius="0.014703"/>
+      </geometry>
+    </collision>
+
+  </link>
+
+  <link name="right_prop_link">
+
+    <!-- Visual appearance of the right propeller object -->
+    <visual name="visual_right_prop">
+      <geometry>
+        <mesh filename="file://$(find workspace_gz)/models/roboboat/meshes/prop.dae"/>
+      </geometry>
+    </visual>
+
+    <!-- Inertia definition of the right propeller object -->
+    <inertial>
+      <mass value="0.1"/>
+      <inertia 
+        ixx="0.000105625" ixy="0.0" ixz="0.0"
+        iyy="0.000105625" iyz="0.0" 
+        izz="0.00015125"/>
+    </inertial>
+
+    <!-- Collision area definition of the right propeller object -->
+    <collision name="Cylinder262i">
+      <origin xyz="0.0 0.0 0.0" rpy="1.5708 0.0 -1.5708"/>
+      <geometry>
+        <cylinder length="0.0608172" radius="0.0553844"/>
+      </geometry>
+    </collision>
+
+  </link>
+
+  <link name="gps_link">
+
+    <!-- Visual appearance of the GPS sensor -->
+    <visual name="visual_gps">
+      <geometry>
+        <mesh filename="file://$(find workspace_gz)/models/roboboat/sensors/gps/meshes/gps.dae"/>
+      </geometry>
+    </visual>
+
+    <!-- Collision area definition of the GPS sensor -->
+    <collision name="collision_gps">
+      <origin xyz="0.0 0.0 0.0275" rpy="0.0 0.0 0.0"/>
+      <geometry>
+        <cylinder length="0.0285" radius="0.04"/>
+      </geometry>
+    </collision>
+
+  </link>
+
+  <link name="imu_link">
+
+  </link>
+
+  <link name="lidar_link">
+
+    <!-- Visual appearance of the LIDAR sensor -->
+    <visual name="visual_lidar">
+      <geometry>
+        <mesh filename="file://$(find workspace_gz)/models/roboboat/sensors/lidar/meshes/lidar.dae"/>
+      </geometry>
+    </visual>
+
+    <!-- Visual appearance of the LIDAR sensor post -->
+    <visual name="visual_lidar_post">
+      <geometry>
+        <mesh filename="file://$(find workspace_gz)/models/roboboat/sensors/lidar_post/meshes/post.dae"/>
+      </geometry>
+    </visual>
+
+    <!-- Collision area definition of the LIDAR sensor -->
+    <collision name="collision_lidar">
+      <origin xyz="0.0 0.0 0.0175" rpy="0.0 0.0 0.0"/>
+      <geometry>
+        <cylinder length="0.0375" radius="0.0275"/>
+      </geometry>
+    </collision>
+
+    <!-- Collision area definition of the LIDAR sensor post -->
+    <collision name="collision_lidar_post">
+      <origin xyz="0.0 0.0 -0.1" rpy="0.0 0.0 0.0"/>
+      <geometry>
+        <cylinder length="0.225" radius="0.005"/>
+      </geometry>
+    </collision>
+
+  </link>
+
+  <link name="camera_link">
+
+    <!-- Visual appearance of the CAMERA sensor -->
+    <visual name="visual_camera">
+      <origin xyz="-0.005 0.0 0.005" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="file://$(find workspace_gz)/models/roboboat/sensors/camera/meshes/camera.dae"/>
+      </geometry>
+    </visual>
+
+    <!-- Visual appearance of the CAMERA sensor post -->
+    <visual name="visual_camera_post">
+      <origin xyz="0.0 0.0 0.0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="file://$(find workspace_gz)/models/roboboat/sensors/camera_post/meshes/post.dae"/>
+      </geometry>
+    </visual>
+
+    <!-- Collision area definition of the CAMERA sensor -->
+    <collision name="collision_camera_1">
+      <origin xyz="0.002 0.0 0.005" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.0165 0.0165 0.0165"/>
+      </geometry>
+    </collision>
+
+    <!-- Collision area definition of the CAMERA sensor -->
+    <collision name="collision_camera_2">
+      <origin xyz="0.02 0.0 0.005" rpy="0 1.5708 0"/>
+      <geometry>
+        <cylinder length="0.0225" radius="0.0075"/>
+      </geometry>
+    </collision>
+
+    <!-- Collision area definition of the CAMERA sensor post -->
+    <collision name="collision_camera_post">
+      <origin xyz="0.0 0.0 -0.05" rpy="0.0 0.0 0.0"/>
+      <geometry>
+        <cylinder length="0.1" radius="0.005"/>
+      </geometry>
+    </collision>
+
+  </link>
+
+  <gazebo reference="gps_link">
+
+    <!-- Definition of the GPS sensor -->
+    <sensor name="sensor_gps" type="navsat">
+      <always_on>1</always_on>
+      <update_rate>20.0</update_rate>
+    </sensor>
+
+  </gazebo>
+
+  <gazebo reference="imu_link">
+
+    <!-- Definition of the IMU sensor -->
+    <sensor name="sensor_imu" type="imu">
+      <always_on>1</always_on>
+      <update_rate>100.0</update_rate>
+    </sensor>
+
+  </gazebo>
+
+  <gazebo reference="lidar_link">
+
+    <!-- Definition of the LIDAR sensor -->
+    <sensor name="sensor_lidar" type="gpu_ray">
+      <pose>0.2 0.0 0.45 0 0 0</pose>
+      <visualize>true</visualize>
+      <update_rate>10</update_rate>
+      <ray>
+        <scan>
+          <horizontal>
+            <samples>360</samples>
+            <resolution>1</resolution>
+            <min_angle>-3.14</min_angle>
+            <max_angle>3.14</max_angle>
+          </horizontal>
+        </scan>
+        <range>
+          <min>0.1</min>
+          <max>30</max>
+        </range>
+      </ray>
+    </sensor>
+
+  </gazebo>
+
+  <gazebo reference="camera_link">
+
+    <!-- Definition of the CAMERA sensor -->
+    <sensor name='sensor_camera' type='camera'>
+      <camera name='front_camera'>
+        <horizontal_fov>1.3962634</horizontal_fov>
+        <image>
+          <width>1280</width>
+          <height>720</height>
+          <format>R8G8B8</format>
+        </image>
+        <clip>
+          <near>0.050000000000000003</near>
+          <far>400</far>
+        </clip>
+      </camera>  
+    </sensor>
+
+  </gazebo>
+
+  <gazebo>
+    <plugin
+      filename="gz-sim-thruster-system"
+      name="gz::sim::systems::Thruster">
+      <joint_name>left_housing_link_to_left_prop_link</joint_name>
+      <thrust_coefficient>0.1</thrust_coefficient>
+      <fluid_density>1025</fluid_density>
+      <propeller_diameter>0.1</propeller_diameter>
+      <velocity_control>false</velocity_control>
+    </plugin>
+
+    <plugin
+      filename="gz-sim-thruster-system"
+      name="gz::sim::systems::Thruster">
+      <joint_name>right_housing_link_to_right_prop_link</joint_name>
+      <thrust_coefficient>0.1</thrust_coefficient>
+      <fluid_density>1025</fluid_density>
+      <propeller_diameter>0.1</propeller_diameter>
+      <velocity_control>false</velocity_control>
+    </plugin>
+
+    <plugin
+      filename="libSurface.so"
+      name="vrx::Surface">
+      <link_name>base_link</link_name>
+      <hull_length>1.15</hull_length>
+      <hull_radius>0.12</hull_radius>
+      <fluid_level>0.075</fluid_level>
+      <points>
+        <point>0.68 0.314338 0.0352701</point>
+        <point>-0.465 0.314338 0.0352701</point>
+      </points>
+      <wavefield>
+        <topic>/vrx/wavefield/parameters</topic>
+      </wavefield>
+    </plugin>
+
+    <plugin
+      filename="libSurface.so"
+      name="vrx::Surface">
+      <link_name>base_link</link_name>
+      <hull_length>1.15</hull_length>
+      <hull_radius>0.12</hull_radius>
+      <fluid_level>0.075</fluid_level>
+      <points>
+        <point>0.68 -0.314338 0.0352701</point>
+        <point>-0.465 -0.314338 0.0352701</point>
+      </points>
+      <wavefield>
+        <topic>/vrx/wavefield/parameters</topic>
+      </wavefield>
+    </plugin>
+
+    <plugin
+      filename="libSimpleHydrodynamics.so"
+      name="vrx::SimpleHydrodynamics">
+      <link_name>base_link</link_name>
+      
+      <xDotU>0.0</xDotU>
+      <yDotV>0.0</yDotV>
+      <nDotR>0.0</nDotR>
+
+      <xU>4.0</xU>
+      <xUU>6.0</xUU>
+      <yV>4.0</yV>
+      <yVV>4.0</yVV>
+      <zW>20.0</zW>
+      <kP>12.0</kP>
+      <kPP>24.0</kPP>
+      <mQ>36.0</mQ>
+      <mQQ>35.0</mQQ>
+      <nR>32.0</nR>
+      <nRR>32.0</nRR>
+    </plugin>
+
+  </gazebo>
+
+  <joint name="base_link_to_gps_link" type="fixed">
+    <origin xyz="0.325 0 0.25" rpy="0 0 0"/>
+    <parent link="base_link"/>
+    <child  link="gps_link"/>
+  </joint>
+
+  <joint name="base_link_to_imu_link" type="fixed">
+    <origin xyz="0.325 0 0.25" rpy="0 0 0"/>
+    <parent link="base_link"/>
+    <child  link="imu_link"/>
+  </joint>
+
+  <joint name="base_link_to_lidar_link" type="fixed">
+    <origin xyz="0.2 0.0 0.45" rpy="0 0 0"/>
+    <parent link="base_link"/>
+    <child  link="lidar_link"/>
+  </joint>
+
+  <joint name="base_link_to_camera_link" type="fixed">
+    <origin xyz="0.25 0.0 0.35" rpy="0 0 0"/>
+    <parent link="base_link"/>
+    <child  link="camera_link"/>
+  </joint>
+
+  <joint name="base_link_to_left_housing_link" type="fixed">
+    <origin xyz="-0.3 0.33 -0.15" rpy="0 0 0"/>
+    <parent link="base_link"/>
+    <child  link="left_housing_link"/>
+  </joint>
+
+  <joint name="left_housing_link_to_left_prop_link" type="revolute">
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <parent link="left_housing_link"/>
+    <child link="left_prop_link"/>
+    <axis xyz="1 0 0"/>
+    <limit effort="10" velocity="10" lower="-3.14" upper="3.14"/>
+    <dynamics damping="0.01" friction="0.01"/>
+  </joint>
+
+  <joint name="base_link_to_right_housing_link" type="fixed">
+    <origin xyz="-0.3 -0.33 -0.15" rpy="0 0 0"/>
+    <parent link="base_link"/>
+    <child  link="right_housing_link"/>
+  </joint>
+
+  <joint name="right_housing_link_to_right_prop_link" type="revolute">
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <parent link="right_housing_link"/>
+    <child link="right_prop_link"/>
+    <axis xyz="1 0 0"/>
+    <limit effort="10" velocity="10" lower="-3.14" upper="3.14"/>
+    <dynamics damping="0.01" friction="0.01"/>
+  </joint>
+
+</robot>

@@ -1,0 +1,37 @@
+# Colcon / ROS 2 workspace — 编译与安装产物
+build/
+install/
+log/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+*.egg
+dist/
+
+# 测试与覆盖率
+.pytest_cache/
+.coverage
+htmlcov/
+
+# CMake 生成物（若出现在源码树中）
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.a
+
+# IDE / 编辑器
+.idea/
+.vscode/
+*.swp
+*~
+
+# 系统
+.DS_Store
+Thumbs.db
