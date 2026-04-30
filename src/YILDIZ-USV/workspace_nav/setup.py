@@ -19,7 +19,7 @@ def collect_files(dirpath, extensions):
 
 config_files = collect_files('config', ['.yaml'])
 launch_files = collect_files('launch', ['.launch.py'])
-script_files = collect_files('scripts', ['.py'])
+script_files = collect_files('workspace_nav', ['.py'])
 map_files = collect_files('map', ['.pgm'])
 json_files = collect_files('json', ['.json'])
 
@@ -42,7 +42,7 @@ if json_files:
 setup(
     name=package_name,
     version='0.0.0',
-    packages=find_packages(include=['scripts', 'scripts.*']),
+    packages=find_packages(include=['workspace_nav', 'workspace_nav.*']),
     data_files=data_files,
     install_requires=['setuptools'],
     zip_safe=True,
@@ -52,8 +52,8 @@ setup(
     license='Apache-2.0',
     entry_points={
         'console_scripts': [
-            'waypoint_transform = scripts.waypoint_transform:main',
-            'waypoint_with_state = scripts.waypoint_with_state:main',
+            'waypoint_transform = workspace_nav.waypoint_transform:main',
+            'waypoint_with_state = workspace_nav.waypoint_with_state:main',
         ],
     },
 )

@@ -1,7 +1,24 @@
 image: ../map/map.pgm
-mode: trinary
-resolution: 0.1
-origin: [-50, -50, 0]
+resolution: 1.0
+origin:
+- 0.0
+- 0.0
+- 0.0
 negate: 0
 occupied_thresh: 0.65
-free_thresh: 0.25
+free_thresh: 0.196
+ref_gnss:
+- 119.92304646
+- 30.64534831
+ref_gnss_00:
+- 119.92304646
+- 30.68900035
+ref_gnss_01:
+- 119.95181591
+- 30.68900035
+ref_gnss_10:
+- 119.92304646
+- 30.64534831
+ref_gnss_11:
+- 119.95181591
+- 30.64534831
