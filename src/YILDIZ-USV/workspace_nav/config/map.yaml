@@ -1,5 +1,6 @@
 image: ../map/map.pgm
 resolution: 1.0
+# ref_gnss_*：每条为 [longitude, latitude]（度）。须与 workspace_ros/config/navsat.yaml 中 datum 一致（同一地图角点）。
 origin:
 - 0.0
 - 0.0

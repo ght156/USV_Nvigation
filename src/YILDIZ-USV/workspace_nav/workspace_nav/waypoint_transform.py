@@ -1,13 +1,9 @@
 #!/usr/bin/env python3
 
 # ----------------------------------------------------------------------------------------------- #
-#  Node that subscribes to GPS fixes and waypoint messages, transforms geographic coordinates
-#  into local UTM-relative coordinates using an acquired GPS datum, and atomically persists the
-#  resulting waypoints and datum to `waypoints.json`. It resolves the output path from the
-#  workspace or environment, validates incoming waypoint payloads, performs a safe write using a
-#  temporary file with fsync and atomic replace, verifies the integrity and structure of the
-#  written JSON, logs detailed progress and error states, and performs a graceful shutdown after
-#  successful completion.
+#  地面站 /waypoint（经纬度）→ waypoints.json 中 map 平面 x,y。
+#  datum 默认来自 map.yaml 的 ref_gnss_10 / ref_gnss（与 navsat_transform 固定 datum 一致），
+#  不再使用「第一次 /gps/filtered」作原点（可通过参数 datum_source:=first_gps 恢复旧行为）。
 # ----------------------------------------------------------------------------------------------- #
 
 import json
@@ -17,6 +13,7 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 import utm
+import yaml
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy
@@ -79,6 +76,21 @@ def make_output_paths() -> Tuple[Path, Path]:
 
 OUTPUT_DIR, OUTPUT_PATH = make_output_paths()
 
+
+def _read_map_datum_lon_lat(map_yaml: Path) -> Tuple[float, float]:
+    """返回 (latitude, longitude)。yaml 中 ref 列表为 [longitude, latitude]。"""
+    with map_yaml.open("r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
+    for key in ("ref_gnss_10", "ref_gnss"):
+        if key not in cfg:
+            continue
+        arr = cfg[key]
+        lon = float(arr[0])
+        lat = float(arr[1])
+        return lat, lon
+    raise ValueError(f"map.yaml 中未找到 ref_gnss_10 或 ref_gnss: {map_yaml}")
+
+
 class GPSToFile(Node):
     def __init__(self):
         super().__init__('waypoint_transform')
@@ -90,13 +102,55 @@ class GPSToFile(Node):
         self.waypoint_received = False
         self.is_done = False
 
+        self.declare_parameter('datum_source', 'map_yaml')
+        self.declare_parameter('map_yaml_path', '')
+        self.declare_parameter('gps_topic', '/gps/filtered')
+
+        source = self.get_parameter('datum_source').get_parameter_value().string_value
+        map_yaml_param = self.get_parameter('map_yaml_path').get_parameter_value().string_value
+        gps_topic = self.get_parameter('gps_topic').get_parameter_value().string_value
+
         qos = QoSProfile(depth=10)
         qos.reliability = QoSReliabilityPolicy.BEST_EFFORT
 
-        self.gps_sub = self.create_subscription(NavSatFix, '/gps/filtered', self.gps_callback, qos_profile=qos)
+        if source == 'map_yaml':
+            if map_yaml_param.strip():
+                map_path = Path(map_yaml_param).expanduser().resolve()
+            else:
+                try:
+                    share = Path(get_package_share_directory('workspace_nav'))
+                    map_path = (share / 'config' / 'map.yaml').resolve()
+                except Exception as e:
+                    self.get_logger().fatal(f'无法解析 map.yaml 路径: {e}')
+                    raise SystemExit(1) from e
+            if not map_path.is_file():
+                self.get_logger().fatal(f'map.yaml 不存在: {map_path}')
+                raise SystemExit(1)
+            try:
+                lat, lon = _read_map_datum_lon_lat(map_path)
+            except Exception as e:
+                self.get_logger().fatal(f'读取地图 datum 失败: {e}')
+                raise SystemExit(1) from e
+            easting, northing, _, _ = utm.from_latlon(lat, lon)
+            self.datum_lat = lat
+            self.datum_lon = lon
+            self.datum_easting = easting
+            self.datum_northing = northing
+            self._log_info_green(
+                f'datum_source=map_yaml，基准与地图一致: lat={lat}, lon={lon}（来自 {map_path}）'
+            )
+        elif source == 'first_gps':
+            self.gps_sub = self.create_subscription(
+                NavSatFix, gps_topic, self.gps_callback, qos_profile=qos
+            )
+            self.get_logger().info(f'datum_source=first_gps，等待 {gps_topic} 首帧作为 datum')
+        else:
+            self.get_logger().fatal(f'未知 datum_source: {source}，请使用 map_yaml 或 first_gps')
+            raise SystemExit(1)
+
         self.waypoint_sub = self.create_subscription(String, '/waypoint', self.waypoint_callback, 10)
         self.shutdown_timer = self.create_timer(1.0, self.check_shutdown)
-        self.get_logger().info('GPS-to-file node initialized; awaiting GPS datum and waypoint input.')
+        self.get_logger().info('GPS-to-file node 已启动；等待航点消息 /waypoint')
 
     def _log_info_green(self, text: str):
         self.get_logger().info(f"{GREEN}{text}{RESET}")

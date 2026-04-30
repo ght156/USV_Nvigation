@@ -2,7 +2,7 @@
 
 本文档面向复盘与二次开发，梳理 RoboBoat 仿真栈的**包结构、数据流、定位、执行器**以及 **Navigation2 的规划–避障–控制**链路。对应代码路径以工作空间根目录 `yildiz_ws/` 为参照。
 
-**补充（工作空间 `docs/`）**：栅格图与 GNSS / 仿真锚点 / `map` 北向与 `map.yaml` 的对齐结论，见仓库根目录 [`docs/地图与GNSS-Nav2对齐说明.md`](../../../docs/地图与GNSS-Nav2对齐说明.md)。
+**补充（工作空间 `docs/`）**：栅格图与 GNSS / 仿真锚点 / `map` 北向与 `map.yaml` 的对齐结论，见仓库根目录 [`docs/地图与GNSS-Nav2对齐说明.md`](../../../docs/地图与GNSS-Nav2对齐说明.md)。**进度台账**见 [`docs/工作进度汇报.md`](../../../docs/工作进度汇报.md)。
 
 ---
 
@@ -217,7 +217,7 @@
 
 | 模块 | 作用 |
 |------|------|
-| **`workspace_nav/workspace_nav/waypoint_transform.py`** | 订阅 `/gps/filtered` 与 String 话题 **`/waypoint`**（JSON：航点经纬度），用 UTM 与 datum 转为局部坐标，**原子写入** `waypoints.json`（路径可通过 `WAYPOINT_OUTPUT_PATH` 或包内 `json/` 解析） |
+| **`workspace_nav/workspace_nav/waypoint_transform.py`** | 默认从 **`map.yaml`** 与 **`navsat_transform`** 共用 **地图角点 datum**，将 **`/waypoint`** JSON 经纬度转为 **`x,y`** 写入 **`waypoints.json`**；参数 **`datum_source:=first_gps`** 可恢复「首帧 GPS 作原点」 |
 | **`workspace_nav/workspace_nav/waypoint_with_state.py`** | 监控 `waypoints.json`，加载后对 Nav2 的 **`FollowWaypoints` action**（`follow_waypoints`）**逐点发送**；可结合里程计跳过已接近点；全部完成后可触发后续任务（如 `kamikaze` 脚本） |
 
 **开发注意**：`waypoint_with_state` 在首次成功加载航点后会进入“已加载”状态，**不会自动反复监视文件更新**；重复任务往往需 **重启节点** 或扩展逻辑。

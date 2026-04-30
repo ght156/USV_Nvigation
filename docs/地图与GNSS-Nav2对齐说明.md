@@ -2,7 +2,7 @@
 
 本文为**复盘与改版**用：归纳栅格地图、仿真世界锚点、经纬度航点与 Nav2 `map` 系之间的关系，避免误解「只改一处即可全局生效」。
 
-**相关**：日常启动步骤见 [`项目运行与联调.md`](./项目运行与联调.md)；功能包内更细的架构说明见 [`../src/YILDIZ-USV/docs/PROJECT_ARCHITECTURE_AND_NAV2.md`](../src/YILDIZ-USV/docs/PROJECT_ARCHITECTURE_AND_NAV2.md)。
+**相关**：日常启动步骤见 [`项目运行与联调.md`](./项目运行与联调.md)；功能包内更细的架构说明见 [`../src/YILDIZ-USV/docs/PROJECT_ARCHITECTURE_AND_NAV2.md`](../src/YILDIZ-USV/docs/PROJECT_ARCHITECTURE_AND_NAV2.md)；进度台账见 [`工作进度汇报.md`](./工作进度汇报.md)。
 
 ---
 
@@ -54,10 +54,8 @@
 这不是「在 RViz 里点栅格取点」，而是 **经纬度 → 平面 `x,y` → JSON → Nav2 多点跟随**（与 **地面站 GROUND CONTROL STATION** 的任务链路一致：UI 保存 `backend/data/waypoints.json` 后，通过 API 启动的 **`waypoint_publisher`** 向 **`/waypoint`** 周期发布含 `latitude`/`longitude` 的 JSON，供下游消费）。
 
 1. **`waypoint_transform`**（`workspace_nav`）  
-   - 订阅 **`/gps/filtered`**：取**第一帧**作为 **datum（基准经纬度）**。  
-   - 订阅 **`/waypoint`**（字符串）：解析 JSON 中的经纬度列表。  
-   - 使用 **UTM**：由各点与 datum 的东向/北向坐标差得到 **局部 `x,y`**。  
-   - 写入 **`workspace_nav/json/waypoints.json`**（含 `datum` 与各点的 `latitude`、`longitude`、`x`、`y`）。
+   - **默认**从 **`workspace_nav/config/map.yaml`** 读取 **`ref_gnss_10` / `ref_gnss`** 作为 **datum**（与 **`navsat_transform` 固定 `datum`** 一致），将地面站发来的经纬度转为 **UTM 米制偏移**，写入 **`waypoints.json`**。  
+   - 兼容旧仿真：节点参数 **`datum_source:=first_gps`** 时仍可用 **首帧 `/gps/filtered`** 作为 datum。  
 2. **`waypoint_with_state`**  
    - 读取 **`waypoints.json`** 中的 **`x`、`y`**，发布 **`frame_id: map`** 的 **`PoseStamped`**，调用 Nav2 **`FollowWaypoints`**。
 
