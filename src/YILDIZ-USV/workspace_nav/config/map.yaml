@@ -1,6 +1,8 @@
 image: ../map/map.pgm
 resolution: 1.0
-# ref_gnss_*：每条为 [longitude, latitude]（度）。须与 workspace_ros/config/navsat.yaml 中 datum 一致（同一地图角点）。
+# ref_gnss_*：每条为 [longitude, latitude]（度）。须与 workspace_ros/config/navsat.yaml 中 datum 一致。
+# 航点转换 waypoint_transform 默认用 ref_gnss_10 作为与地图 (0,0) 重合的角点；若你的 PGM (0,0) 对应其它角点，请改参数 map_datum_ref_key 或修改此处。
+# origin：map_server 中栅格 (0,0) 在 map 世界系位姿 [x_m, y_m, yaw_rad]；航点输出的 map x,y 会叠加该平移与旋转。
 origin:
 - 0.0
 - 0.0

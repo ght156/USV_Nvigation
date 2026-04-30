@@ -217,7 +217,7 @@
 
 | 模块 | 作用 |
 |------|------|
-| **`workspace_nav/workspace_nav/waypoint_transform.py`** | 默认从 **`map.yaml`** 与 **`navsat_transform`** 共用 **地图角点 datum**，将 **`/waypoint`** JSON 经纬度转为 **`x,y`** 写入 **`waypoints.json`**；参数 **`datum_source:=first_gps`** 可恢复「首帧 GPS 作原点」 |
+| **`workspace_nav/workspace_nav/waypoint_transform.py`** | 默认从 **`map.yaml`** 与 **`navsat_transform`** 共用 **地图角点 datum**（`map_datum_ref_key`，默认 `ref_gnss_10`）；将 **`/waypoint`** JSON 经纬度转为 **Nav2 `map` 系 `x,y`** 写入 **`waypoints.json`**：**局部平面**默认 **ENU**（`projection:=enu`，可选 `utm`），再叠加 **`map.yaml` 的 `origin`** 平移与旋转；输出含 **`map_frame_meta`**。参数 **`datum_source:=first_gps`** 恢复「首帧 GPS 作原点」且**不**套用 `origin` |
 | **`workspace_nav/workspace_nav/waypoint_with_state.py`** | 监控 `waypoints.json`，加载后对 Nav2 的 **`FollowWaypoints` action**（`follow_waypoints`）**逐点发送**；可结合里程计跳过已接近点；全部完成后可触发后续任务（如 `kamikaze` 脚本） |
 
 **开发注意**：`waypoint_with_state` 在首次成功加载航点后会进入“已加载”状态，**不会自动反复监视文件更新**；重复任务往往需 **重启节点** 或扩展逻辑。
@@ -267,7 +267,7 @@
 
 **结论**：在同一 ROS 域内跑通仿真与地面站后端时，**界面上的船舶经纬度即为当前 ROS 里的 GPS**，会随 **`world.sdf` 球形原点与船位** 更新；仅在 **尚未收到有效 GPS** 时，前端可能仍显示代码里写的 **占位默认坐标**，收到数据后会被覆盖。
 
-**改仿真原点后请务必**：重置或 **按新地理范围重新保存** 地面站 `waypoints.json`（及任务文件中经纬航点）；否则任务点仍贴在旧经纬上，会与 `waypoint_transform` 使用的 datum/UTM **不一致**。**`waypoint_transform`** 使用 **`/gps/filtered`** 建立 datum——改世界原点后应先让滤波/GPS **稳定**，再发航点。
+**改仿真原点后请务必**：重置或 **按新地理范围重新保存** 地面站 `waypoints.json`（及任务文件中经纬航点）；否则任务点仍贴在旧经纬上，会与 `waypoint_transform` 使用的 datum/投影 **不一致**。默认 **`datum_source:=map_yaml`** 时 **不依赖首帧 `/gps/filtered`** 建原点；若仍使用 **`first_gps`**，改世界原点后应先让滤波/GPS **稳定**，再发航点。
 
 ### 11.3 纯白 `map.pgm`、LiDAR 与「GPS 航点导航」各管什么？
 
@@ -309,7 +309,7 @@
                  ▼
   ┌──────────────────────────────────────┐
   │  waypoint_transform → waypoints.json  │
-  │  （订阅 /gps/filtered 作 datum）       │
+  │  map.yaml datum + origin → map 系 x,y │
   │  workspace_nav/json/waypoints.json    │
   └──────────────┬───────────────────────┘
                  ▼
@@ -326,7 +326,8 @@
 **使用前注意**：
 
 - 地面站与仿真/真机需在 **同一 `ROS_DOMAIN_ID`**，且 **先起定位与 Nav2**，再 **「保存航点」** 后通过 API **下发任务**（启动 `waypoint_publisher`）。  
-- **`waypoint_transform`** 依赖 **`/gps/filtered`** 与 **`/waypoint`** 的语义一致；改动 **`world.sdf` 球形原点** 或任务区后，应 **清空或重存** 地面站 `waypoints.json` 并重新标定航点。  
+- **`waypoint_transform`**：默认 **`datum_source:=map_yaml`**，与 **`/waypoint`**、**`map.yaml`** 的语义一致；**`first_gps`** 时首帧 GPS 作平面原点。改动 **`world.sdf` 球形原点**、**`map.yaml` 的 ref/origin** 或任务区后，应 **清空或重存** 地面站航点并核对 **`map_frame_meta`** / RViz。  
+- **地面站罗盘（GCS）**：遥测 **航向显示** 使用 **ENU → 罗经角** 与优先 **`/odometry/filtered`** 的说明见 GCS 仓库 `README` / 提交记录；与航点 map 投影无关。
 - HTTP/话题列表见地面站仓库 **`README.md`**；地图–GNSS–Nav2 对齐见 **`docs/地图与GNSS-Nav2对齐说明.md`**。
 
 ---

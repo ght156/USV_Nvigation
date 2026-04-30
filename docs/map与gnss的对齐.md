@@ -650,9 +650,24 @@ global EKF:
 | 项 | 状态 | 说明 |
 |----|------|------|
 | `workspace_ros/config/navsat.yaml` | 已改 | `wait_for_datum: true`，`datum: [lat, lon, heading_rad]` 与 `map.yaml` 的 `ref_gnss_10` 一致；`heading=0` 表示 ENU 下 x 朝东。 |
-| `workspace_nav/workspace_nav/waypoint_transform.py` | 已改 | 默认 `datum_source:=map_yaml`，从 `map.yaml` 读 `ref_gnss_10` / `ref_gnss`；旧行为可设 `datum_source:=first_gps`。 |
+| `workspace_nav/workspace_nav/waypoint_transform.py` | 已改 | 默认 `datum_source:=map_yaml`；读 **`map.yaml` 的 `origin`**，将 **ENU/UTM 平面偏移**变换为 **Nav2 `map` 世界坐标**；**`projection`**：`enu`（默认，贴近 navsat 小范围平面）或 `utm`；**`map_datum_ref_key`** 指定与 **栅格 (0,0)** 对应的 `ref_gnss_*`（默认 `ref_gnss_10`）；输出 JSON 含 **`map_frame_meta`**。`first_gps` 时**不**套用 map origin（与 map 不一定一致）。 |
 | `workspace_nav/config/map.yaml` | 已注 | `ref_gnss_*` 为 `[lon, lat]`，须与 `navsat.yaml` 的 `datum` 同步。 |
 | 地图相对正北的旋转 | 未自动 | 若栅格 x 不朝东，需统一改 `datum[2]` 与航点投影旋转。 |
 | 双 EKF、动态 `map→odom` | 未实施 | 仍为静态 `map→odom` 恒等。 |
 
 **脚本路径**：`workspace_nav/workspace_nav/waypoint_transform.py`。
+
+### 补充：`map` 帧航点（与「仅 UTM 差分」的区别）
+
+**现象复盘**：地面站/Cesium 上经纬度正确，但 **`waypoints.json` 的 x,y** 与 RViz `map` 帧不符（如符号反号、象限错、与 navsat+EKF 船位不一致）。
+
+**根因**：Nav2 目标在 **`frame_id: map`**，必须同 **`map_server`/`map.yaml` 定义的世界系**。仅做「航点与 datum 的 UTM 东/北差」**未**叠加 **`origin: [ox, oy, yaw]`**，或未确认 **datum 角点 = PGM (0,0) 角点**，会与定位栈脱节。
+
+**已落地逻辑**（摘要）：
+
+1. 以 `map_datum_ref_key` 从 `map.yaml` 取 **(lat₀, lon₀)**，与 **`navsat.yaml` datum** 一致。  
+2. 对每个航点求相对 **ENU 米**（默认）或 **UTM 差分**（`projection:=utm`）。  
+3. 若 `datum_source=map_yaml`：`map_x, map_y = origin + R(yaw)·(east, north)`（与 costmap/map_server 常用平面关系一致）。  
+4. 写出 **`map_frame_meta`**（`origin_*`、`applied_origin_transform`、`projection` 等）便于对照 RViz。
+
+**地面站 UI 罗盘 90° 偏置**（简要）：ROS **`map`/odom ENU** 的 **`yaw`** 为 **0 朝东**；航空罗经为 **0 朝北顺时针**。显示时需 **`π/2 - yaw`**（再归一化）。该修正落在独立 **GCS** 仓库（前端 Redux + `/odometry/filtered` 的 `yaw` 写入 `data_store`），与本仓库航点数学独立。

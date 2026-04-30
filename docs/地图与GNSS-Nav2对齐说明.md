@@ -54,8 +54,10 @@
 这不是「在 RViz 里点栅格取点」，而是 **经纬度 → 平面 `x,y` → JSON → Nav2 多点跟随**（与 **地面站 GROUND CONTROL STATION** 的任务链路一致：UI 保存 `backend/data/waypoints.json` 后，通过 API 启动的 **`waypoint_publisher`** 向 **`/waypoint`** 周期发布含 `latitude`/`longitude` 的 JSON，供下游消费）。
 
 1. **`waypoint_transform`**（`workspace_nav`）  
-   - **默认**从 **`workspace_nav/config/map.yaml`** 读取 **`ref_gnss_10` / `ref_gnss`** 作为 **datum**（与 **`navsat_transform` 固定 `datum`** 一致），将地面站发来的经纬度转为 **UTM 米制偏移**，写入 **`waypoints.json`**。  
-   - 兼容旧仿真：节点参数 **`datum_source:=first_gps`** 时仍可用 **首帧 `/gps/filtered`** 作为 datum。  
+   - **默认**从 **`workspace_nav/config/map.yaml`** 读取 **`map_datum_ref_key`**（默认 `ref_gnss_10`，与 `ref_gnss` 择一）作为 **datum**，与 **`navsat_transform` 固定 `datum`** 一致。  
+   - 将地面站经纬度转为 **Nav2 `map` 平面 `x,y`**：先做 **相对 datum 的局部平面**（默认 **ENU 米** `projection:=enu`，可选 **`utm`**），再叠加 **`map.yaml` 的 `origin: [ox, oy, yaw]`**（平移 + 绕 z 旋转），与 **`map_server` 栅格在 `map` 系下的位姿**一致。  
+   - 写出 **`waypoints.json`**，内含 **`datum_source_meta`**、**`map_frame_meta`**（便于与 RViz 核对）。若 **PGM 的 (0,0)** 对应**另一地理角点**，改 **`map_datum_ref_key`** 为 `ref_gnss_00` 等，而非改经纬算法。  
+   - 兼容旧仿真：节点参数 **`datum_source:=first_gps`** 时仍可用 **首帧 `/gps/filtered`** 作平面原点，且 **不**套用 `map.yaml` 的 `origin`（与 `map` 帧不一定一致，仅用于旧流程）。  
 2. **`waypoint_with_state`**  
    - 读取 **`waypoints.json`** 中的 **`x`、`y`**，发布 **`frame_id: map`** 的 **`PoseStamped`**，调用 Nav2 **`FollowWaypoints`**。
 
@@ -83,7 +85,7 @@
 
 | 链路 | 作用 |
 |------|------|
-| **GNSS / 航点** | datum + UTM 差分 → **`waypoints.json` 的 `x,y`**，在 **`map`** 中用 |
+| **GNSS / 航点** | 固定 datum + **ENU/UTM 平面** → 叠加 **`map.yaml` 的 `origin`** → **`waypoints.json` 的 `x,y`**（**`map` 帧**） |
 | **地图** | `map.yaml` 把 **PGM 栅格**放到 **`map`** 中；**`static_layer`** 给全局代价 |
 
 **`map.yaml` 不会因修改 `world.sdf` 而自动更新。**  
