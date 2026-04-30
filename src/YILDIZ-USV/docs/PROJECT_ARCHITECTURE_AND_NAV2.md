@@ -2,6 +2,8 @@
 
 本文档面向复盘与二次开发，梳理 RoboBoat 仿真栈的**包结构、数据流、定位、执行器**以及 **Navigation2 的规划–避障–控制**链路。对应代码路径以工作空间根目录 `yildiz_ws/` 为参照。
 
+**补充（工作空间 `docs/`）**：栅格图与 GNSS / 仿真锚点 / `map` 北向与 `map.yaml` 的对齐结论，见仓库根目录 [`docs/地图与GNSS-Nav2对齐说明.md`](../../../docs/地图与GNSS-Nav2对齐说明.md)。
+
 ---
 
 ## 1. 仓库与 ROS 2 包概览
@@ -10,7 +12,7 @@
 |------|------|
 | `workspace_gz` | Gazebo Garden 仿真：`world`、`roboboat` 模型、`xacro`、`ros_gz` 桥（时钟、传感器、推进器指令） |
 | `workspace_ros` | 传感器协方差重发布、`robot_localization`（EKF + `navsat_transform`）、静态 TF、`converter`（速度→推力）、视觉/任务节点（如 `target_buoy`、`kamikaze`） |
-| `workspace_nav` | Nav2 参数与地图资源、`nav2.launch.py` 引入上游 `nav2_bringup`，航点 JSON 管线（`waypoint_transform` / `waypoint_with_state`） |
+| `workspace_nav` | Nav2 参数与地图资源、`nav2.launch.py` 引入上游 `nav2_bringup`，航点 JSON 管线（`workspace_nav/workspace_nav/waypoint_transform.py`、`waypoint_with_state.py` 等） |
 
 三个包在逻辑上形成：**仿真（真值与传感器）→ 定位（odom/map）→ 导航（Nav2）→ 执行（推力）**。
 
@@ -54,7 +56,24 @@
   └─────────────────────┘
 ```
 
-**关键点**：Nav2 `bt_navigator` 使用 **`/odometry/filtered`** 作为里程计话题（见 `nav2_params.yaml`）；仿真里该话题由 **`ekf_node`** 输出。全局 **`map`** 与 **`odom`** 在当前启动里通过 **`static_transform_publisher` 对齐（零位姿）** 连接；若你以后改为 **`amcl`/SLAM 动态 map↔odom**，需替换该静态 TF 策略。
+**关键点**：Nav2 `bt_navigator` 使用 **`/odometry/filtered`** 作为里程计话题（见 `nav2_params.yaml`）；仿真里该话题由 **`ekf_node`** 输出。全局 **`map`** 与 **`odom`** 在当前启动里通过 **`static_transform_publisher` 对齐（零位姿）** 连接；若你以后改为 **`amcl`/SLAM 动态 map↔odom** 或实船「重定位」校正 **`map`→`odom`**，需替换该静态 TF 策略。
+
+### 2.1 RViz2「Nav2 Goal」与地面站任务：是否都会出速度指令？
+
+**会。** 两种入口只是**谁来提交导航目标**不同，进入 Nav2 之后**共用同一套规划–控制–速度输出链路**：
+
+| 入口 | 典型 ROS 接口 | 说明 |
+|------|----------------|------|
+| **RViz2** | `NavigateToPose`（`nav2` 的 action）或等价插件 | 单点目标 → `bt_navigator` 行为树 → `planner_server` + `controller_server` |
+| **地面站 + 航点管线** | GCS 发 **`/waypoint`** → `waypoint_transform` 写 JSON → `waypoint_with_state` → **`FollowWaypoints`** | 多点序列同样由 `bt_navigator` / `waypoint_follower` 协调，底层仍是规划器 + `controller_server` |
+
+只要行为树处于**跟线（FollowPath）**等会驱动底座的阶段，`controller_server` 就会按控制频率生成 **`geometry_msgs/Twist`**。在 **`nav2_bringup`** 的默认重映射下（与本栈一致）：
+
+1. **控制器**对外发布到话题 **`/cmd_vel_nav`**（节点内部话题名 `cmd_vel` 被 remap 到该全局名）。  
+2. **`velocity_smoother`** 订阅 **`/cmd_vel_nav`**，平滑后发布 **`/cmd_vel`**（供需要「官方平滑后速度」的节点使用）。  
+3. 本项目的 **`converter`** 订阅 **`/cmd_vel_nav`**，把角/线速度换算为左右 **`/roboboat/thrusters/.../thrust`**。  
+
+因此：**用 RViz2 设单点目标时，同样会有 `/cmd_vel_nav`（以及通常在跑的 `/cmd_vel`）**；地面站不替代这一层，它主要管**任务/遥测/可视化**（见 §11.5）。
 
 ---
 
@@ -158,7 +177,7 @@
 
 **全局 costmap `global_costmap`**
 
-- **坐标系**：`global_frame: map`，**滚动窗口** `300×300`，分辨率 **`0.5 m`**（比局部粗，利于大范围规划）
+- **坐标系**：`global_frame: map`，**`rolling_window: false`**（覆盖静态地图全幅），分辨率 **`0.5 m`**（与 `map.yaml` 中 PGM 分辨率可不同，由 static 层融合）
 - **图层**：`static_layer`（来自 `map_server` 的地图）+ `obstacle_layer`（同一激光）+ `inflation_layer`
 - **`track_unknown_space: true`**：区分未知/自由/障碍，与规划器 `allow_unknown` 搭配
 
@@ -189,17 +208,17 @@
 
 ## 7. 地图（`workspace_nav/config/map.yaml`）
 
-- 栅格图：`image: ../map/map.pgm`，`resolution: 0.1`，`origin: [-50, -50, 0]`  
-- Nav2 **global costmap** 使用 **0.5 m** 分辨率，与 **map 文件 0.1 m** 不同属常见配置（静态层会按各自分辨率融合）；若改 `origin` 或换图，需重新核对 **RViz 中地图与仿真是否对齐**。
+- 栅格图：`image: ../map/map.pgm`；**`resolution`、`origin` 以仓库中当前 YAML 为准**（勿死记某一组数字）。  
+- Nav2 **global costmap** 使用 **0.5 m** 分辨率，与 **PGM 元数据中的分辨率**可以不同（`static_layer` 会处理尺度差异）；若改 `origin`、分辨率或换图，需重新核对 **RViz 中地图与仿真是否对齐**（详见仓库根目录 [`docs/地图与GNSS-Nav2对齐说明.md`](../../../docs/地图与GNSS-Nav2对齐说明.md)）。
 
 ---
 
 ## 8. 航点任务管线（`workspace_nav`）
 
-| 脚本 | 作用 |
+| 模块 | 作用 |
 |------|------|
-| **`waypoint_transform`** | 订阅 `/gps/filtered` 与 String 话题 **`/waypoint`**（JSON：航点经纬度），用 UTM 与 datum 转为局部坐标，**原子写入** `waypoints.json`（路径可通过 `WAYPOINT_OUTPUT_PATH` 或包内 `json/` 解析） |
-| **`waypoint_with_state`** | 监控 `waypoints.json`，加载后对 Nav2 的 **`FollowWaypoints` action**（`follow_waypoints`）**逐点发送**；可结合里程计跳过已接近点；全部完成后可触发后续任务（如 `kamikaze` 脚本） |
+| **`workspace_nav/workspace_nav/waypoint_transform.py`** | 订阅 `/gps/filtered` 与 String 话题 **`/waypoint`**（JSON：航点经纬度），用 UTM 与 datum 转为局部坐标，**原子写入** `waypoints.json`（路径可通过 `WAYPOINT_OUTPUT_PATH` 或包内 `json/` 解析） |
+| **`workspace_nav/workspace_nav/waypoint_with_state.py`** | 监控 `waypoints.json`，加载后对 Nav2 的 **`FollowWaypoints` action**（`follow_waypoints`）**逐点发送**；可结合里程计跳过已接近点；全部完成后可触发后续任务（如 `kamikaze` 脚本） |
 
 **开发注意**：`waypoint_with_state` 在首次成功加载航点后会进入“已加载”状态，**不会自动反复监视文件更新**；重复任务往往需 **重启节点** 或扩展逻辑。
 
@@ -225,7 +244,7 @@
 | 改到达精度 | `general_goal_checker` 容差、`converter` 比例 |
 | 改仿真传感器名字 | `workspace_gz/launch/simulation.launch.py`、`nav2_params.yaml` obstacle_layer、`static_transform.yaml` |
 | 改滤波与帧关系 | `ekf.yaml`、`navsat.yaml`、`localization.launch.py` |
-| 多航点 JSON 与地面站接口 | `waypoint_transform.py`、`waypoint_with_state.py`、`json/waypoints.json` |
+| 多航点 JSON 与地面站接口 | `workspace_nav/workspace_nav/waypoint_transform.py`、`waypoint_with_state.py`、`json/waypoints.json`；地面站配合见 §11.5 |
 | 改仿真经纬参考点（影响 GPS 话题与地面站显示） | `workspace_gz/worlds/world.sdf` → `<spherical_coordinates>` |
 | 地面站航点格式与任务存储 | GCS 仓库 `backend/data/waypoints.json`、ROS 话题 **`/waypoint`** |
 
@@ -265,6 +284,50 @@
 - **全局规划**：**Smac Planner 2D**（`nav2_smac_planner/SmacPlanner2D`），在 **global costmap** 上搜索。  
 - **局部跟线**：**Regulated Pure Pursuit**（`nav2_regulated_pure_pursuit_controller`），含与障碍相关的限速/碰撞检测等参数。  
 - **避障数据来源**：**代价地图 = 静态层（PGM）+ 激光障碍层 + 膨胀**；另由 **行为树** 触发 **Spin / Backup** 等恢复。
+
+### 11.5 地面站（GROUND CONTROL STATION）与本导航栈的配合
+
+独立仓库 **GROUND CONTROL STATION**（开发目录示例：`/home/ght/GROUND-CONTROL-STATION-dev`；若克隆到其它路径，以本机为准）与当前栈通过 **同一 ROS 2 域**联调。**不启动地面站也可以**用 RViz2 设目标完成导航；地面站提供 **任务编辑、持久化、遥测与 Cesium 可视化**，而不是替代 Nav2 算法。
+
+**与本栈相关的数据流（摘要）**：
+
+```
+  ┌──────────────────────────────────────┐
+  │  GCS Electron UI                     │
+  │  航点编辑 → 保存 backend/data/        │
+  │  waypoints.json                      │
+  └──────────────┬───────────────────────┘
+                 │ POST /api/run_mission（拉起 waypoint_publisher）
+                 ▼
+  ┌──────────────────────────────────────┐
+  │  backend/ros_nodes/waypoint_publisher│
+  │  定时发布 std_msgs/String：topic      │
+  │  「waypoint」（相对名，默认即 /waypoint）│
+  │  载荷为 JSON（含 latitude/longitude）  │
+  └──────────────┬───────────────────────┘
+                 │
+                 ▼
+  ┌──────────────────────────────────────┐
+  │  waypoint_transform → waypoints.json  │
+  │  （订阅 /gps/filtered 作 datum）       │
+  │  workspace_nav/json/waypoints.json    │
+  └──────────────┬───────────────────────┘
+                 ▼
+  ┌──────────────────────────────────────┐
+  │  waypoint_with_state → FollowWaypoints│
+  └──────────────────────────────────────┘
+
+  并行：GCS backend/server/ros_subscriber.py 订阅 ROS 遥测，供 HTTP API / 前端：
+  · /imu/fixed_cov、/odometry/filtered、/gps/fixed_cov
+  · /plan（Nav2 全局路径）
+  · 线速度等与 Nav2 相关的量见 GCS README（后端实现以 /cmd_vel_nav 等为准）
+```
+
+**使用前注意**：
+
+- 地面站与仿真/真机需在 **同一 `ROS_DOMAIN_ID`**，且 **先起定位与 Nav2**，再 **「保存航点」** 后通过 API **下发任务**（启动 `waypoint_publisher`）。  
+- **`waypoint_transform`** 依赖 **`/gps/filtered`** 与 **`/waypoint`** 的语义一致；改动 **`world.sdf` 球形原点** 或任务区后，应 **清空或重存** 地面站 `waypoints.json` 并重新标定航点。  
+- HTTP/话题列表见地面站仓库 **`README.md`**；地图–GNSS–Nav2 对齐见 **`docs/地图与GNSS-Nav2对齐说明.md`**。
 
 ---
 
