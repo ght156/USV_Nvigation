@@ -109,6 +109,8 @@ class GPSToFile(Node):
         source = self.get_parameter('datum_source').get_parameter_value().string_value
         map_yaml_param = self.get_parameter('map_yaml_path').get_parameter_value().string_value
         gps_topic = self.get_parameter('gps_topic').get_parameter_value().string_value
+        self._datum_source = source
+        self._map_yaml_resolved = ''
 
         qos = QoSProfile(depth=10)
         qos.reliability = QoSReliabilityPolicy.BEST_EFFORT
@@ -139,6 +141,7 @@ class GPSToFile(Node):
             self._log_info_green(
                 f'datum_source=map_yaml，基准与地图一致: lat={lat}, lon={lon}（来自 {map_path}）'
             )
+            self._map_yaml_resolved = str(map_path)
         elif source == 'first_gps':
             self.gps_sub = self.create_subscription(
                 NavSatFix, gps_topic, self.gps_callback, qos_profile=qos
@@ -211,7 +214,11 @@ class GPSToFile(Node):
                 "datum": {
                     "latitude": float(self.datum_lat),
                     "longitude": float(self.datum_lon)
-                }
+                },
+                "datum_source_meta": {
+                    "datum_source": self._datum_source,
+                    "map_yaml": self._map_yaml_resolved or None,
+                },
             }
             for lat, lon in self.waypoints:
                 easting, northing, _, _ = utm.from_latlon(float(lat), float(lon))
