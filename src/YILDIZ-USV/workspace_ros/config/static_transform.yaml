@@ -1,5 +1,8 @@
+# 仿真与 localization.launch.py 默认使用：与 Gazebo/URDF 侧传感器 frame 约定配套。
+# （lidar_link → roboboat/base_link/sensor_*）。实船仅用 MAVROS base_link 链时请用
+# static_transform_real_boat.yaml，见 real_boat_mavros_tf.launch.py 默认。
 static_transforms:
-  - parent: "lidar_link"
+  - parent: "livox_frame"
     child: "roboboat/base_link/sensor_lidar"
     translation: [0.0, 0.0, 0.0]
     rotation_rpy: [0.0, 0.0, 0.0]

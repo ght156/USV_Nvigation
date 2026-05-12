@@ -1,0 +1,30 @@
+# USV / Nav2 用 MAVROS 覆盖项（须在官方 px4_config.yaml 之后加载，见 mavros_px4_usv.launch.py）
+#
+# 目标：补齐 TF 链  map → odom → base_link  中的  odom → base_link
+#（本仓库 real_boat_mavros_tf：默认 gnss_odom_map_tf 发 map→odom，或恒等静态；不再起 EKF 时须有其它来源发 odom→base_link）
+#
+# 说明：PX4 内部仍多为 NED；MAVROS 在部分话题/TF 上做 ENU 旋转。若仍出现 *_ned 断树，
+# 用 ros2 topic echo /mavros/local_position/odom 看 header.frame_id / child_frame_id，并核对
+# ros2 run tf2_tools view_frames。键名随 mavros 版本可能略有差异，以本机
+# ros2 param list | grep local_position 为准。
+
+/**/local_position:
+  ros__parameters:
+    # 局域里程话题与 TF 父帧应对齐为 odom（与 Nav2、本仓库 map→odom 静态一致）
+    frame_id: "odom"
+    tf.send: true
+    tf.frame_id: "odom"
+    tf.child_frame_id: "base_link"
+    tf.send_fcu: false
+
+/**/global_position:
+  ros__parameters:
+    # 避免与 local_position 再发一套 map→base_link 叠冲突
+    tf.send: false
+
+/**/odometry:
+  ros__parameters:
+    # 与 /mavros/local_position/odom 常用命名一致（上游默认多为 odom/base_link）
+    fcu.odom_parent_id_des: "odom"
+    fcu.odom_child_id_des: "base_link"
+    fcu.map_id_des: "map"

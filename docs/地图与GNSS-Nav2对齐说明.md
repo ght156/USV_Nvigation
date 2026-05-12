@@ -8,8 +8,9 @@
 
 ## 1. 栅格地图：白板 vs 岸线 / 水库
 
-- **当前 Nav2** 在 `global_costmap` 里使用 **`static_layer`**，会加载 `workspace_nav/config/map.yaml` 所指的 PGM。
-- **整图可通行（如纯白或近似均匀）** 时，全局代价几乎处处为「自由」，全局规划主要在「空图」上算路径；**避障更依赖 `local_costmap` 的激光**（如 `/roboboat/sensors/lidar/scan`）。`nav2_params.yaml` 中全局规划器对 unknown 的处理（如 `allow_unknown`）需与制图方式一致。
+- **当前仿真 Nav2（`nav2.launch.py`）** 默认加载 **`workspace_nav/config/map.yaml`** 所指的 PGM。
+- **实船 MAVROS（`nav2_real_mavros.launch.py`）** 默认 **`config/map_real_boat_hk.yaml`** + **`map/hk_map.pgm`**；仿真地图备份 **`map.simulation.backup.*`** 见 [`实船配置修改清单.md`](../src/YILDIZ-USV/docs/实船配置修改清单.md) §1。
+- **整图可通行（如纯白或近似均匀）** 时，全局代价几乎处处为「自由」，全局规划主要在「空图」上算路径；**避障更依赖 `local_costmap` 的动态障碍层**（**仿真**：`/roboboat/sensors/lidar/scan` 等 **`LaserScan`**；**实船 `nav2_params_real_mavros`**：默认 **`PointCloud2`** 如 **`/livox/lidar`**）。`nav2_params.yaml` 中全局规划器对 unknown 的处理（如 `allow_unknown`）需与制图方式一致。
 - **水库、岸线、禁航区** 等场景：若希望全局路径**不要穿陆岸或禁区**，应用**水陆分界清晰**的 PGM（或海图/测绘成果栅格化），把岸线标为**占据**或配合 **inflation** 留出安全带宽。
 - **结论**：白板可用于快速联调；要与地理或任务语义一致，需要**带几何约束**的栅格，并与下文 **origin / yaw / GNSS** 一并核对。
 
@@ -67,6 +68,12 @@
 
 - **需要任务级地理一致时**：制图原点、**北向**、datum 与 **WGS84/UTM** 带号等必须与**真实库区/赛场**及 **GNSS 数据源**一致（或明确采用纯仿真约定）。
 - **仅仿真自洽**：可只保证「仿真 GNSS + 航点 + 当前 PGM」在**同一套平面约定**下自洽，不必对标真实水库；但一旦对接真机或真图，必须收紧对齐条件。
+
+### 4.1 实船（模式 B）：PX4 HOME 与 **`ref_gnss*`**
+
+- **`nav2_real_mavros.launch.py`** + **`localization_backend:=mavros_odom`** 时常 **恒等 `map→odom`**；在此约定下 **`/mavros/local_position/odom`** 局域原点一般为 **PX4 HOME**，不会仅因载入海图就与 **`map.yaml` / `map_real_boat_hk.yaml` 里的 `ref_gnss*`** 自动重合。
+- **对齐方式**：地面站 **QGroundControl「设 HOME」**，或在 ROS 2 上调 **`/mavros/cmd/set_home`**（**`mavros_msgs/srv/CommandHome`**）。**必须用 `current_gps: false` 才能按你指定的经纬度高程写角点**（`current_gps: true` 为「当前船位」，会忽略填入的经纬度）；完整命令、`/mavros/home_position/home` 核验与常见误区见 **[`src/YILDIZ-USV/docs/实船调试.md`](../src/YILDIZ-USV/docs/实船调试.md)** §「用 ROS 2 服务设置 PX4 HOME」。
+- **`waypoint_transform`** 默认 **`map_datum_ref_key:=ref_gnss_10`**（与仿真 `map.yaml` 文档约定一致）；**设 PX4 HOME 时须与 PGM (0,0) 所选地理角点为同一约定**。不要混用不同 `ref_gnss_*`（例如 **`ref_gnss_00`** 与 **`ref_gnss_10`**）作为同一 **(0,0)** 锚点，除非已同步修改 **`waypoint_transform`** 与海图语义。
 
 ---
 
@@ -132,11 +139,13 @@
 |------|-------------------|
 | 仿真世界锚点 | `src/YILDIZ-USV/workspace_gz/worlds/world.sdf` |
 | 仿真启动 / 船生成 | `src/YILDIZ-USV/workspace_gz/launch/simulation.launch.py` |
-| 地图 YAML / PGM | `src/YILDIZ-USV/workspace_nav/config/map.yaml`、`map/map.pgm`（或 `map.yaml` 内 `image` 所指路径） |
+| 仿真地图 YAML / PGM | `src/YILDIZ-USV/workspace_nav/config/map.yaml`、`map/map.pgm`；备份 **`config/map.simulation.backup.yaml`**、**`map/map.simulation.backup.pgm`** |
+| 实船 NAV2 默认 HK | **`workspace_nav/config/map_real_boat_hk.yaml`**、**`workspace_nav/map/hk_map.pgm`**（**`nav2_real_mavros.launch.py`**） |
 | Nav2 参数 | `src/YILDIZ-USV/workspace_nav/config/nav2_params.yaml` |
 | `map`↔`odom`、EKF、navsat | `src/YILDIZ-USV/workspace_ros/launch/localization.launch.py`、`config/ekf.yaml`、`config/navsat.yaml` |
 | 经纬度 → `waypoints.json` | `src/YILDIZ-USV/workspace_nav/workspace_nav/waypoint_transform.py` |
 | `waypoints.json` → Nav2 | `src/YILDIZ-USV/workspace_nav/workspace_nav/waypoint_with_state.py` |
+| **实船：PX4 HOME / MAVROS `set_home`** | [**`src/YILDIZ-USV/docs/实船调试.md`**](../src/YILDIZ-USV/docs/实船调试.md) §「用 ROS 2 服务设置 PX4 HOME」；服务类型 `mavros_msgs/srv/CommandHome`；指定经纬度时须 `current_gps: false`。 |
 
 > **说明**：若 `map.yaml` 中含 **`ref_gnss*`** 等非 `map_server` 标准字段，可能为工程内**制图参考/文档**；改版 world 或任务区时，应人工确认这些参考是否仍有效，避免岸线/角点与地球位置脱节。
 
@@ -148,6 +157,7 @@
 - [ ] 改 `world.sdf` 锚点后，已重启仿真并核对 **GNSS 话题**是否与预期经纬度一致。  
 - [ ] **`map.yaml` 的 `origin`（尽量 `yaw=0` 纠旋转）** 与 PGM、ENU 一致；RViz **`/map`** 与 **`global_costmap/costmap`** 几何对照无整体拧转。  
 - [ ] **`ref_gnss*`**（若使用）与当前仿真/实场一致。  
+- [ ] 实船 **模式 B**（`localization_backend:=mavros_odom`、恒等 **`map→odom`**）：**PX4 HOME** 已与载入海图的约定角点一致（**QGC** 或 MAVROS **`/mavros/cmd/set_home`**，且与 **`waypoint_transform`** 的 **`map_datum_ref_key`** 不冲突）；参见 **§4.1** 与 **[`实船调试.md`](../src/YILDIZ-USV/docs/实船调试.md)**。  
 - [ ] 地面站或测试用例中的 **经纬度航点** 与当前锚点、datum 逻辑一致。  
 - [ ] 岸线/禁航 **PGM** 与 `static_layer`、全局规划参数（如 `allow_unknown`）匹配。  
 - [ ] 文档与版本控制中记录 **本次锚点、地图版本、UTM 带** 等元数据，便于回滚对比。

@@ -47,11 +47,15 @@ setup(
     license='Apache-2.0',
     entry_points={
         'console_scripts': [
+            'gnss_odom_map_tf = scripts.gnss_odom_map_tf:main',
             'converter = scripts.converter:main',
             'gps_covariance_repub = scripts.gps_covariance_repub:main',
             'imu_covariance_repub = scripts.imu_covariance_repub:main',
             'kamikaze = scripts.kamikaze:main',
             'manual_control = scripts.manual_control:main',
+            'mavros_keyboard_teleop = scripts.mavros_keyboard_teleop:main',
+            'mavros_roboboat_relay = scripts.mavros_roboboat_relay:main',
+            'nav2_cmd_vel_to_mavros = scripts.nav2_cmd_vel_to_mavros:main',
             'static_transform_publisher = scripts.static_transform_publisher:main',
             'target_buoy = scripts.target_buoy:main',
         ],

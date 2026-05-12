@@ -214,15 +214,20 @@ This repository provides a Gazebo Garden-based simulation and ROS 2 Humble toolc
 │       └── world.sdf
 ├── workspace_nav
 │   ├── config
-│   │   ├── map.yaml
+│   │   ├── map.yaml                    # 仿真 Nav2 默认
+│   │   ├── map_real_boat_hk.yaml      # 实船 nav2_real_mavros 默认
+│   │   ├── map.simulation.backup.yaml
 │   │   └── nav2_params.yaml
 │   ├── json
 │   │   ├── target_buoy.json
 │   │   └── waypoints.json
 │   ├── launch
-│   │   └── nav2.launch.py
+│   │   ├── nav2.launch.py
+│   │   └── nav2_real_mavros.launch.py
 │   ├── map
-│   │   └── map.pgm
+│   │   ├── hk_map.pgm                 # 实船 HK 栅格（与 map_real_boat_hk.yaml）
+│   │   ├── map.pgm                    # 仿真
+│   │   └── map.simulation.backup.pgm
 │   ├── package.xml
 │   ├── resource
 │   │   └── workspace_nav

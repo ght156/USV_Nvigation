@@ -25,10 +25,13 @@
   <depend>geometry_msgs</depend>
   <depend>sensor_msgs</depend>
   <depend>std_msgs</depend>
+  <depend>mavros_msgs</depend>
+  <exec_depend>mavros</exec_depend>
   <depend>tf2</depend>
   <depend>tf2_ros</depend>
   <depend>robot_localization</depend>
-  
+  <exec_depend>python3-yaml</exec_depend>
+
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
   <test_depend>ament_pep257</test_depend>

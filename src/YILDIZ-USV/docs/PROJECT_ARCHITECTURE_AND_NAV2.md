@@ -2,7 +2,10 @@
 
 本文档面向复盘与二次开发，梳理 RoboBoat 仿真栈的**包结构、数据流、定位、执行器**以及 **Navigation2 的规划–避障–控制**链路。对应代码路径以工作空间根目录 `yildiz_ws/` 为参照。
 
-**补充（工作空间 `docs/`）**：栅格图与 GNSS / 仿真锚点 / `map` 北向与 `map.yaml` 的对齐结论，见仓库根目录 [`docs/地图与GNSS-Nav2对齐说明.md`](../../../docs/地图与GNSS-Nav2对齐说明.md)。**进度台账**见 [`docs/工作进度汇报.md`](../../../docs/工作进度汇报.md)。
+**补充（工作空间 `docs/`）**：栅格图与 GNSS / 仿真锚点 / `map` 北向与 `map.yaml` 的对齐结论，见仓库根目录 [`docs/地图与GNSS-Nav2对齐说明.md`](../../../docs/地图与GNSS-Nav2对齐说明.md)。**进度台账**见 [`docs/工作进度汇报.md`](../../../docs/工作进度汇报.md)。  
+**真船按文件逐项修改（话题/YAML/launch 参数）**：[`实船配置修改清单.md`](./实船配置修改清单.md)。  
+**船体尺度 / Gazebo 质量与流体 / Nav2 footprint / converter 差速**：[`船体与导航参数索引.md`](./船体与导航参数索引.md)（`workspace_nav/config/boat_parameters_index.yaml`）。  
+**真船迁移（必须/建议/重构）、MAVROS PX4 话题语义表**：[`实船迁移与MAVROS话题.md`](./实船迁移与MAVROS话题.md)；实机启动与 **TF 复盘**见 [`实船调试.md`](./实船调试.md)（「TF 坐标系总览与复盘调试」）。
 
 ---
 
@@ -56,7 +59,7 @@
   └─────────────────────┘
 ```
 
-**关键点**：Nav2 `bt_navigator` 使用 **`/odometry/filtered`** 作为里程计话题（见 `nav2_params.yaml`）；仿真里该话题由 **`ekf_node`** 输出。全局 **`map`** 与 **`odom`** 在当前启动里通过 **`static_transform_publisher` 对齐（零位姿）** 连接；若你以后改为 **`amcl`/SLAM 动态 map↔odom** 或实船「重定位」校正 **`map`→`odom`**，需替换该静态 TF 策略。
+**关键点**：默认配置下 Nav2 `bt_navigator` 使用 **`/odometry/filtered`**（由 `workspace_ros` 的 **`ekf_node`** 输出，默认见 `nav2_params.yaml`）。全局 **`map`** 与 **`odom`** 在 `localization.launch.py`（恒等 **`map`→`odom`**）或 **`real_boat_mavros_tf.launch.py`**（模式 B：默认 **`gnss_odom_map_tf`** 动态 **`map`→`odom`**，锚点取自 **`map_config_yaml`** 内 **`map_origin_ref_key`**，须与 **`map_server` 的 `map:=`** 同源；可关 **`use_gnss_map_odom_tf`** 改用静态 **`map→odom`（含可选 `map_odom_yaw_deg`）**）里对齐；薄封装旧名 **`real_boat_tf_static.launch.py`**。若你以后改为 **`amcl`/SLAM**、实船重定位或使用 **MAVROS 里程计**，需按需调整 **`map↔odom`** 与里程计话题，详见 **§4.3** 与 **`docs/实船调试.md`**。
 
 ### 2.1 RViz2「Nav2 Goal」与地面站任务：是否都会出速度指令？
 
@@ -85,11 +88,23 @@
   - 左右推力：`.../cmd_thrust` ↔ `/roboboat/thrusters/left/thrust`、`/roboboat/thrusters/right/thrust`
   - GPS、`Imu`、`LaserScan`、点云、`Camera`、`CameraInfo`
 
-**改模型/传感器**：优先改 `workspace_gz/description/`、`workspace_gz/models/`，并与 **Nav2 `nav2_params.yaml` 中 `scan` 的话题名**、`workspace_ros/config/static_transform.yaml` 中的链路一致。
+**改模型/传感器**：优先改 `workspace_gz/description/`、`workspace_gz/models/`，并与 **Nav2 `nav2_params.yaml` 中 `scan` 的话题名**、`workspace_ros/config/static_transform.yaml`（仿真/模式 A）或 **`static_transform_real_boat.yaml`**（实船模式 B）中的链路一致。
 
 ---
 
 ## 4. 定位层（`workspace_ros`）
+
+### 4.0 TF 树总览（复盘）
+
+Nav2 需要连贯的 **`map`→`odom`→`base_link`**，且 costmap 能把 **`LaserScan`** 或 **`PointCloud2`** 的 **`header.frame_id`** 变回 **`map`/`odom`**。
+
+| 环节 | 本仓库要点 |
+|------|------------|
+| **`map`→`odom`** | 恒等静态（**`localization.launch.py`**）；模式 B：**`real_boat_mavros_tf.launch.py`** 默认 **`gnss_odom_map_tf`**（**`map_config_yaml`** + **`map_origin_ref_key`**），可选 **`use_gnss_map_odom_tf:=false`** 静态 `tf2`。 |
+| **`odom`→`base_link`** | 模式 B：**MAVROS** + **`mavros_px4_overrides_usv.yaml`**；模式 A：**`ekf_node`**。仿真同模式 A。 |
+| **`base_link`→传感器** | 模式 B：**`static_transform_real_boat.yaml`**；仿真 / 模式 A：**URDF** + **`static_transform.yaml`**。 |
+
+调试命令与故障表：**[`实船调试.md`](./实船调试.md)**「TF 坐标系总览与复盘调试」。
 
 ### 4.1 `localization.launch.py` 内含节点
 
@@ -98,7 +113,7 @@
 | `imu_covariance_repub` / `gps_covariance_repub` | 固定协方差的话题重发布（供下游滤波使用） |
 | `navsat_transform_node`（`robot_localization`） | GNSS ↔ `utm`/`map` 相关变换，输出 `/odometry/gps` 等（具体以 `navsat.yaml` 为准） |
 | `ekf_node` | 融合 IMU 与 GPS 里程计，输出 **`/odometry/filtered`** 并发布 **odom→base_link** TF |
-| `static_transform_publisher`（自定义） | 按 `static_transform.yaml` 发布 **传感器仿真 frame** 到 `*_link` 的静态关系 |
+| `static_transform_publisher`（自定义） | **`localization.launch`**：读 **`static_transform.yaml`**（仿真/Gazebo 链路）。**`real_boat_mavros_tf`**：默认 **`static_transform_real_boat.yaml`**（**`base_link`→传感器**，接 MAVROS TF） |
 | **另一个** `static_transform_publisher` | **`map` → `odom`** 零变换（固定重叠） |
 
 ### 4.2 `config/ekf.yaml`（摘要）
@@ -109,6 +124,22 @@
 - **GPS 里程计** `/odometry/gps`：位置与偏航等按 `odom0_config` 接入
 
 若导航中“车在图上不动/乱飘”，首先查 **`/odometry/filtered`** 与 **TF 树**（`map`→`odom`→`base_link`）。
+
+### 4.3 实船暂行：沿用 MAVROS / PX4 融合里程计（`mavros_odom`）
+
+当 **暂不跑本仓库 `robot_localization`**、而使用飞控侧已融合的定位时：
+
+| 事项 | 说明 |
+|------|------|
+| 里程话题 | **`/mavros/local_position/odom`**（`nav_msgs/Odometry`）。通常为 PX4 **EKF/ECL 融合 GNSS、IMU** 等的输出，不是单独的「纯 `/gps`/经纬度推导」ROS 话题，但满足 Nav2 对 **`nav_msgs/Odometry`** 的接口。|
+| Bringup | `… real_boat_bringup.launch.py localization_backend:=mavros_odom …`：起 **`real_boat_mavros_tf`**（**`map`→`odom`** + 默认 **`static_transform_real_boat.yaml`**），不跑 EKF/navsat。|
+| MAVROS→`/roboboat` | **`mavros_roboboat_relay`** 仍可将 MAVROS IMU/GPS/LiDAR 映到 **`/roboboat/sensors/*`**（例如 Nav2 激光仍用 **`nav2_params.yaml`** 约定话题）；这些数据在 **不写 EKF 时一般不进入** **`/odometry/filtered`**。|
+| Nav2 覆盖参数 | **`nav2_real_mavros.launch.py`**（默认 **`nav2_params_real_mavros.yaml`**）或 **`nav2.launch.py use_mavros_odometry:=true`**（合并 **`nav2_mavros_odom_overlay.yaml`**），把 **`bt_navigator`/`velocity_smoother`** 的 **`odom_topic`** 指到 **`/mavros/local_position/odom`**。|
+| TF 冲突 | MAVROS **`local_pose`** 常附带 **`odom`→车体** 广播。若已与 **`map`→`odom`** 组成完整链，**勿再同时起 `ekf_node`（`publish_tf`）**。若车架名不是 **`base_link`**，需对齐 Nav2 **`robot_base_frame`** 或增加静态 TF。若只见 **`map_ned`/`odom_ned`**，而 **`odom` 下无 `base_link`**：本仓库 **`real_boat_mavros_tf`** 负责 **`map`→`odom`**，**`odom`→车体**须由 MAVROS 配好帧名或由 **`ekf`/中继**接上；详见 **`docs/实船调试.md`**。 |
+
+**与海图 / `map` 对齐（不写 `navsat_transform` 时必读）**：**`/mavros/local_position/odom`** 的原点一般是 **PX4 HOME**，**不会自动**与 **`map.yaml` 参考 GNSS角点**一致；**默认 `gnss_odom_map_tf`** 用 **与同一份 `map_server` YAML** 一致的 **`map_config_yaml`** 读 **`map_origin_ref_key`**，并在首帧（或连续，见 **`initialize_once`**）用 GNSS+局域 odom 装订 **`map`→`odom`**（**数学表达式与源码入口**见 **`docs/实船调试.md`**「**算法与实现要点（复盘／改代码时从这里对）**」）。关 **`gnss`** 仅用静态 **`map`→`odom`**（**`use_gnss_map_odom_tf:=false`）时，HOME 与 **`ref_gnss*`** / 制图原点仍要对齐**。否则 **`map`** 上会整体偏。对策：**`map:=` 与 `map_config_yaml` 同源**、**选对 `map_origin_ref_key`**、**QGC 对齐 HOME**、关掉 **`initialize_once` 持续跟 drift**、或 **回到模式 A**。完整说明见 **`docs/实船调试.md`** 专节与 **`docs/实船迁移与MAVROS话题.md`** §1.1。
+
+**简注**：**`datum`/`map.yaml`**（仿真）、**`map_real_boat_hk.yaml`**（实船 NAV2 默认）与 **`navsat_transform`**：模式 A 下须一致；**模式 B** 仅作 **HOME 与图上 `ref_gnss*`** 的手工参照。
 
 ---
 
@@ -168,25 +199,33 @@
 
 ### 6.5 代价地图与避障语义
 
+**仿真（`nav2_params.yaml` + `nav2.launch.py`）**
+
 **局部 costmap `local_costmap`**
 
 - **坐标系**：`global_frame: odom`，**滚动窗口** `20×15 m`，分辨率 `0.05 m`
-- **图层**：`obstacle_layer`（LaserScan）+ `inflation_layer`
+- **图层**：`obstacle_layer`（**`LaserScan`**）+ `inflation_layer`
 - **传感器**：`/roboboat/sensors/lidar/scan`
 - **机器人足迹**：`footprint` 多边形（与船体尺寸相关）
 
 **全局 costmap `global_costmap`**
 
 - **坐标系**：`global_frame: map`，**`rolling_window: false`**（覆盖静态地图全幅），分辨率 **`0.5 m`**（与 `map.yaml` 中 PGM 分辨率可不同，由 static 层融合）
-- **图层**：`static_layer`（来自 `map_server` 的地图）+ `obstacle_layer`（同一激光）+ `inflation_layer`
+- **图层**：`static_layer`（来自 `map_server` 的地图）+ `obstacle_layer`（**同一 `LaserScan`**）+ `inflation_layer`
 - **`track_unknown_space: true`**：区分未知/自由/障碍，与规划器 `allow_unknown` 搭配
+
+**实船 MAVROS（`nav2_params_real_mavros.yaml` + `nav2_real_mavros.launch.py`）**
+
+- **局部 / 全局动态障碍层**：**`voxel_layer`（`nav2_costmap_2d::VoxelLayer`）** + **`inflation_layer`**；全局在 **`static_layer`** 之后同样接 **`voxel_layer`**。
+- **传感器**：**`sensor_msgs/PointCloud2`**，默认话题 **`/livox/lidar`**（Livox MID-360 等）；体内 **3D 体素** 标记/清除后 **投影为 2D costmap**，膨胀仍为 **2D `InflationLayer`**，规划器与行为树语义与仿真栈一致。
+- **改话题**：同步修改 **两处** **`voxel_layer`** 下观测源（如 **`livox_cloud.topic`**）；**改回二维激光** 需恢复 **`obstacle_layer` + `LaserScan`** 或改用 **`pointcloud_to_laserscan`**（见 **`docs/实船调试.md`**）。
 
 **“避障”在 Nav2 中的分工**：
 
-1. **全局**：Smac 在 **global costmap** 上搜索低代价路径（静态图障碍 + 激光标记 + 膨胀带）。  
+1. **全局**：Smac 在 **global costmap** 上搜索低代价路径（静态图障碍 + 动态障碍层标记 + 膨胀带）。  
 2. **局部**：Regulated Pure Pursuit 根据 **local costmap** 与 **碰撞检测** 调节速度/路径跟踪，避免贴障过快；**Behavior 行为**（旋转、后退等）处理卡死。
 
-**改激光话题或换传感器**：必须同时更新 **两处 `obstacle_layer` 的 `scan.topic`**，并确认数据在 `map`/`odom` 下时间同步与 TF 正确。
+**换传感器或话题**：除更新 **代价地图观测配置** 外，**必须**确认 **`map`→`odom`→`base_link`→传感器** TF 与消息 **时间戳** 在 **`use_sim_time`** 约定下正确。
 
 ### 6.6 行为恢复（`behavior_server`）
 
@@ -206,10 +245,19 @@
 
 ---
 
-## 7. 地图（`workspace_nav/config/map.yaml`）
+## 7. 地图（`workspace_nav`）
 
-- 栅格图：`image: ../map/map.pgm`；**`resolution`、`origin` 以仓库中当前 YAML 为准**（勿死记某一组数字）。  
-- Nav2 **global costmap** 使用 **0.5 m** 分辨率，与 **PGM 元数据中的分辨率**可以不同（`static_layer` 会处理尺度差异）；若改 `origin`、分辨率或换图，需重新核对 **RViz 中地图与仿真是否对齐**（详见仓库根目录 [`docs/地图与GNSS-Nav2对齐说明.md`](../../../docs/地图与GNSS-Nav2对齐说明.md)）。
+### 7.1 仿真（`nav2.launch.py`）
+
+- 默认 **`config/map.yaml`**，栅格 **`map/map.pgm`**。
+- **备份**（改实船图前的快照，便于恢复）：**`config/map.simulation.backup.yaml`**、**`map/map.simulation.backup.pgm`**。恢复步骤见 [`实船配置修改清单.md`](./实船配置修改清单.md) §1。
+
+### 7.2 实船 MAVROS（`nav2_real_mavros.launch.py`）
+
+- 默认 **`config/map_real_boat_hk.yaml`**，栅格 **`map/hk_map.pgm`**（HK 园区海图）；launch 可 **`map:=/其它路径.yaml`** 覆盖。
+- **`resolution`、`origin`、`ref_gnss*`** 以该 YAML 为准；**模式 B** 下船上位置与图是否重合仍取决于 **PX4 HOME** 与 **`map→odom`**，见 [`实船调试.md`](./实船调试.md)。
+
+通用：Nav2 **global costmap** 使用 **0.5 m** 分辨率，可与 **PGM 的 `resolution`** 不同（`static_layer` 处理尺度）；改动后核对 **RViz** 与 **`docs/地图与GNSS-Nav2对齐说明.md`**。
 
 ---
 
@@ -217,7 +265,7 @@
 
 | 模块 | 作用 |
 |------|------|
-| **`workspace_nav/workspace_nav/waypoint_transform.py`** | 默认从 **`map.yaml`** 与 **`navsat_transform`** 共用 **地图角点 datum**（`map_datum_ref_key`，默认 `ref_gnss_10`）；将 **`/waypoint`** JSON 经纬度转为 **Nav2 `map` 系 `x,y`** 写入 **`waypoints.json`**：**局部平面**默认 **ENU**（`projection:=enu`，可选 `utm`），再叠加 **`map.yaml` 的 `origin`** 平移与旋转；输出含 **`map_frame_meta`**。参数 **`datum_source:=first_gps`** 恢复「首帧 GPS 作原点」且**不**套用 `origin` |
+| **`workspace_nav/workspace_nav/waypoint_transform.py`** | 默认读 **`config/map.yaml`**（仿真）的 **`map_datum_ref_key`**（默认 **`ref_gnss_10`**）与 **`origin`**；与 **`navsat_transform`** datum 一致时，将 **`/waypoint`** JSON 经纬度→**Nav2 `map` 系 `x,y`** 写入 **`waypoints.json`**。**实船 Nav2 若用 `map_real_boat_hk.yaml`**：`waypoint_transform` 必须把**所用地图 YAML**与 **`map_server` 载入的那份**对齐（同源 **`ref_gnss*`**/`origin`），否则航点与 HK 栅格错位。**`datum_source:=first_gps`** 为旧仿真流程（首帧 GPS 原点）。 |
 | **`workspace_nav/workspace_nav/waypoint_with_state.py`** | 监控 `waypoints.json`，加载后对 Nav2 的 **`FollowWaypoints` action**（`follow_waypoints`）**逐点发送**；可结合里程计跳过已接近点；全部完成后可触发后续任务（如 `kamikaze` 脚本） |
 
 **开发注意**：`waypoint_with_state` 在首次成功加载航点后会进入“已加载”状态，**不会自动反复监视文件更新**；重复任务往往需 **重启节点** 或扩展逻辑。
@@ -240,9 +288,9 @@
 |------|----------------|
 | 改全局路径/规划器 | `nav2_params.yaml` → `planner_server` / `GridBased` |
 | 改跟线手感、碰撞检测 | `nav2_params.yaml` → `controller_server` / `FollowPath` |
-| 改障碍物来源、膨胀、局部窗口 | `nav2_params.yaml` → `local_costmap` / `global_costmap` |
+| 改障碍物来源、膨胀、局部窗口 | **仿真**：`nav2_params.yaml` → `local_costmap` / `global_costmap`。**实船 MAVROS**：`nav2_params_real_mavros.yaml`（**`voxel_layer` + `PointCloud2`** 与 **`inflation_layer`** 等） |
 | 改到达精度 | `general_goal_checker` 容差、`converter` 比例 |
-| 改仿真传感器名字 | `workspace_gz/launch/simulation.launch.py`、`nav2_params.yaml` obstacle_layer、`static_transform.yaml` |
+| 改仿真传感器名字 | `workspace_gz/launch/simulation.launch.py`、`nav2_params.yaml` **`obstacle_layer`**、**`static_transform.yaml`**。**实船点云话题**：`nav2_params_real_mavros.yaml` **`voxel_layer`** |
 | 改滤波与帧关系 | `ekf.yaml`、`navsat.yaml`、`localization.launch.py` |
 | 多航点 JSON 与地面站接口 | `workspace_nav/workspace_nav/waypoint_transform.py`、`waypoint_with_state.py`、`json/waypoints.json`；地面站配合见 §11.5 |
 | 改仿真经纬参考点（影响 GPS 话题与地面站显示） | `workspace_gz/worlds/world.sdf` → `<spherical_coordinates>` |
@@ -274,7 +322,7 @@
 | 环节 | 作用 |
 |------|------|
 | **PGM + `map.yaml`** | **`map_server` 静态层**：几乎全白 ≈ **几乎无静态障碍**，全局路径主要不受「岸线」约束，除非你在图里画上障碍灰度。 |
-| **全局/局部 `ObstacleLayer`** | **激光 `/roboboat/sensors/lidar/scan`** 在代价地图上画 **动态障碍**；**膨胀层**推开路径。仿真里若没有有效障碍物，表现会接近「空地绕路」。 |
+| **全局/局部动态障碍层** | **仿真**：**`ObstacleLayer`** + **`/roboboat/sensors/lidar/scan`**（**`LaserScan`**）。**实船 `nav2_params_real_mavros`**：**`VoxelLayer`** + **`PointCloud2`**（默认 **`/livox/lidar`**），再经 **2D 膨胀** 推开路径。仿真里若没有有效障碍物，表现会接近「空地绕路」。 |
 | **地面站经纬航点 → `waypoint_transform`** | 把 **经纬度** 转为 **`map`/工程平面内的 x,y**，写入 **`workspace_nav/json/waypoints.json`**，再由 **`waypoint_with_state`** 调 Nav2 **`follow_waypoints`**。目标几何 **不是** 在 RViz 里点 PGM 得到，而是 **经纬任务链**。 |
 
 若需要 **真实岸线/禁区** 参与全局规划，需 **更换或编辑 PGM** 并保证 **`map` 原点与 GPS datum/TF 策略一致**；**仅改 `world.sdf` 经纬** 不会自动把「某段真实河道」画进栅格。
@@ -283,7 +331,7 @@
 
 - **全局规划**：**Smac Planner 2D**（`nav2_smac_planner/SmacPlanner2D`），在 **global costmap** 上搜索。  
 - **局部跟线**：**Regulated Pure Pursuit**（`nav2_regulated_pure_pursuit_controller`），含与障碍相关的限速/碰撞检测等参数。  
-- **避障数据来源**：**代价地图 = 静态层（PGM）+ 激光障碍层 + 膨胀**；另由 **行为树** 触发 **Spin / Backup** 等恢复。
+- **避障数据来源**：**代价地图 = 静态层（PGM）+ 动态障碍层（仿真：`ObstacleLayer`+激光；实船：`VoxelLayer`+点云）+ 膨胀**；另由 **行为树** 触发 **Spin / Backup** 等恢复。
 
 ### 11.5 地面站（GROUND CONTROL STATION）与本导航栈的配合
 
@@ -326,7 +374,7 @@
 **使用前注意**：
 
 - 地面站与仿真/真机需在 **同一 `ROS_DOMAIN_ID`**，且 **先起定位与 Nav2**，再 **「保存航点」** 后通过 API **下发任务**（启动 `waypoint_publisher`）。  
-- **`waypoint_transform`**：默认 **`datum_source:=map_yaml`**，与 **`/waypoint`**、**`map.yaml`** 的语义一致；**`first_gps`** 时首帧 GPS 作平面原点。改动 **`world.sdf` 球形原点**、**`map.yaml` 的 ref/origin** 或任务区后，应 **清空或重存** 地面站航点并核对 **`map_frame_meta`** / RViz。  
+- **`waypoint_transform`**：默认 **`datum_source:=map_yaml`**，读 **`config/map.yaml`**；**实船 NAV2** 若用 **`map_real_boat_hk`**，须把节点参数里的地图路径改为 **与同一份 HK YAML**。**`first_gps`** 时首帧 GPS 作平面原点。改动 **`world.sdf` 球形原点**、地图 **ref/origin** 或任务区后，应 **清空或重存** 地面站航点并核对 **`map_frame_meta`** / RViz。  
 - **地面站罗盘（GCS）**：遥测 **航向显示** 使用 **ENU → 罗经角** 与优先 **`/odometry/filtered`** 的说明见 GCS 仓库 `README` / 提交记录；与航点 map 投影无关。
 - HTTP/话题列表见地面站仓库 **`README.md`**；地图–GNSS–Nav2 对齐见 **`docs/地图与GNSS-Nav2对齐说明.md`**。
 
@@ -352,4 +400,4 @@ source install/setup.bash
 - 记录每次改动时的 **ROS 2 发行版**、**Nav2 版本**及 `nav2_params.yaml` 的 git 提交说明。  
 - 大改 BT 或恢复逻辑时，在 RViz 打开 **ParticleCloud/Trajectory**（若适用）并对照 **`ros2 topic echo /local_costmap`**、**`/plan`** 做联合验证。
 
-本文档随仓库演进可继续补充：**自定义行为树 XML 路径**、**实船与仿真的参数分叉**、`bringup_launch` 中与命名空间相关的重映射表等。
+本文档随仓库演进可继续补充：**自定义行为树 XML 路径**、**实船与仿真的参数分叉**（含 **`use_mavros_odometry`/`nav2_mavros_odom_overlay.yaml`**）、`bringup_launch` 中与命名空间相关的重映射表等。

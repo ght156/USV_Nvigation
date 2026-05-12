@@ -7,6 +7,8 @@
 
 **只改 `navsat.yaml` 不够，目标点转换逻辑也必须一起改。否则船的位置用“地图左下角 datum”，目标点却还在用“船第一次 GPS datum”，两套坐标系会错开。**
 
+> **仓库维护备忘（Nav2 避障，可与本文 GNSS/地图对齐一并阅读）**：当栅格**近白板、全局占据约束弱**时，**动态避障主要依赖 `local_costmap`**。**仿真**（`workspace_nav/config/nav2_params.yaml`）：**`ObstacleLayer`** + **`LaserScan`**（约定 **`/roboboat/sensors/lidar/scan`**）。**实船 MAVROS**（`workspace_nav/config/nav2_params_real_mavros.yaml`）：**`VoxelLayer`** + **`sensor_msgs/PointCloud2`**（默认 **`/livox/lidar`**）；体内 3D 体素仍**投影为 2D costmap**，**`InflationLayer` 未改**。现场须核对 **点云 `header.frame_id`→`base_link`（及 map/odom 链）**、**时间戳与 `use_sim_time`**，并标定 **`origin_z`、`z_voxels`、`min/max_obstacle_height`、量程** 等。更细的说明见 [`地图与GNSS-Nav2对齐说明.md`](./地图与GNSS-Nav2对齐说明.md) §1、[`../src/YILDIZ-USV/docs/实船调试.md`](../src/YILDIZ-USV/docs/实船调试.md)「避障传感器（模式 B）」。
+
 ------
 
 这个项目现在的定位链路确实是你说的那样。README 里启动顺序是先启动仿真、再启动 localization、再启动 Nav2，后面再跑 `converter`、`waypoint_transform` 和 `waypoint_with_state`。([GitHub](https://github.com/YILDIZ-USV/YILDIZ-USV/tree/main))
@@ -671,3 +673,9 @@ global EKF:
 4. 写出 **`map_frame_meta`**（`origin_*`、`applied_origin_transform`、`projection` 等）便于对照 RViz。
 
 **地面站 UI 罗盘 90° 偏置**（简要）：ROS **`map`/odom ENU** 的 **`yaw`** 为 **0 朝东**；航空罗经为 **0 朝北顺时针**。显示时需 **`π/2 - yaw`**（再归一化）。该修正落在独立 **GCS** 仓库（前端 Redux + `/odometry/filtered` 的 `yaw` 写入 `data_store`），与本仓库航点数学独立。
+
+---
+
+## 实船补充：MAVROS 用 `CommandHome` 对齐 PX4 HOME（模式 B）
+
+真机仅用 **`/mavros/local_position/odom`** 且 **`map→odom` 恒等**时，局域里程原点随 **PX4 HOME**；需与当前 **`nav2`** 载入的 **`map.yaml` / `map_real_boat_hk.yaml`** 中约定的 **`ref_gnss*`** 角点一致。除 **QGroundControl「设 HOME」** 外，可在 ROS 2 调用服务 **`/mavros/cmd/set_home`**（**`mavros_msgs/srv/CommandHome`**）：**指定经纬度高程时必须 `current_gps: false`**（**`current_gps: true`** 为用**当前船位**，会忽略你填写的经纬度）。可复制命令、自检 **`/mavros/home_position/home`**、以及与 **`home_position/set` 话题**的区别，均以 **[`src/YILDIZ-USV/docs/实船调试.md`](../src/YILDIZ-USV/docs/实船调试.md)**「用 ROS 2 服务设置 PX4 HOME」为准。

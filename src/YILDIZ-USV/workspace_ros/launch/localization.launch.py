@@ -8,40 +8,47 @@
 #  static transforms required for consistent frame alignment across the system.
 # ----------------------------------------------------------------------------------------------- #
 
+from launch.actions import DeclareLaunchArgument
 from launch_ros.actions import Node
 from launch import LaunchDescription
-from launch.substitutions import PathJoinSubstitution
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.substitutions import FindPackageShare
 
 def generate_launch_description():
     package_name = 'workspace_ros'
     package_share = FindPackageShare(package_name)
+    use_sim_time = LaunchConfiguration('use_sim_time')
 
     ekf_path = PathJoinSubstitution([package_share, 'config', 'ekf.yaml'])
     navsat_path = PathJoinSubstitution([package_share, 'config', 'navsat.yaml'])
     static_transform_path = PathJoinSubstitution([package_share, 'config', 'static_transform.yaml'])
 
     return LaunchDescription([
+        DeclareLaunchArgument(
+            'use_sim_time',
+            default_value='true',
+            description='false on real boat; true in Gazebo when /clock is published',
+        ),
 
         Node(
             package=package_name,
             executable='imu_covariance_repub',
             name='imu_covariance_repub',
-            parameters=[{'use_sim_time': True}],
+            parameters=[{'use_sim_time': use_sim_time}],
         ),
 
         Node(
             package=package_name,
             executable='gps_covariance_repub',
             name='gps_covariance_repub',
-            parameters=[{'use_sim_time': True}],
+            parameters=[{'use_sim_time': use_sim_time}],
         ),
 
         Node(
             package='robot_localization',
             executable='navsat_transform_node',
             name='navsat_transform_node',
-            parameters=[navsat_path, {'use_sim_time': True}],
+            parameters=[navsat_path, {'use_sim_time': use_sim_time}],
             remappings=[
                 ('imu', '/imu/fixed_cov'),
                 ('gps/fix', '/gps/fixed_cov')
@@ -52,7 +59,7 @@ def generate_launch_description():
             package='robot_localization',
             executable='ekf_node',
             name='ekf_node',
-            parameters=[ekf_path, {'use_sim_time': True}]
+            parameters=[ekf_path, {'use_sim_time': use_sim_time}]
         ),
 
         Node(
@@ -61,7 +68,7 @@ def generate_launch_description():
             name='static_transforms_publisher',
             parameters=[
                 {'static_transform_file': static_transform_path},
-                {'use_sim_time': True}
+                {'use_sim_time': use_sim_time}
             ],
             output='screen'
         ),
@@ -70,7 +77,7 @@ def generate_launch_description():
             package='tf2_ros',
             executable='static_transform_publisher',
             name='map_to_odom_tf',
-            parameters=[{'use_sim_time': True}],
+            parameters=[{'use_sim_time': use_sim_time}],
             arguments=[
                '--x', '0.0',
                '--y', '0.0',

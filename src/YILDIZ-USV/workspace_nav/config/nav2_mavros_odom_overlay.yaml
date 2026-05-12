@@ -1,0 +1,10 @@
+# 覆盖片段：启用后应与 nav2_params.yaml 合并。
+# Nav2 bt_navigator 与 velocity_smoother 的里程计输入改为 MAVROS 本地里程计话题。
+# PX4 中该估算通常融合 GNSS / IMU 等（以飞控滤波器为准），不等同于“纯经纬度推算”。
+bt_navigator:
+  ros__parameters:
+    odom_topic: "/mavros/local_position/odom"
+
+velocity_smoother:
+  ros__parameters:
+    odom_topic: "/mavros/local_position/odom"
