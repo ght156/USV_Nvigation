@@ -2,7 +2,7 @@
 # （lidar_link → roboboat/base_link/sensor_*）。实船仅用 MAVROS base_link 链时请用
 # static_transform_real_boat.yaml，见 real_boat_mavros_tf.launch.py 默认。
 static_transforms:
-  - parent: "livox_frame"
+  - parent: "lidar_link"
     child: "roboboat/base_link/sensor_lidar"
     translation: [0.0, 0.0, 0.0]
     rotation_rpy: [0.0, 0.0, 0.0]

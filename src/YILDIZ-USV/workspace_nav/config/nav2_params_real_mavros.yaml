@@ -54,7 +54,7 @@ controller_server:
   ros__parameters:
     use_sim_time: false
     # —— 控制器频率 (Hz)。实船建议 5~10 Hz；过高易与水面惯量叠加导致扭动 ——
-    controller_frequency: 10.0
+    controller_frequency: 20.0
     # —— 速度死区：低于此阈值的指令视为零（与 velocity_smoother.deadband_velocity 对齐）——
     min_x_velocity_threshold: 0.05
     min_y_velocity_threshold: 0.05
@@ -67,43 +67,43 @@ controller_server:
     progress_checker:
       plugin: "nav2_controller::SimpleProgressChecker"
       # —— 在 movement_time_allowance 秒内至少移动 required_movement_radius 米，否则视为卡住 ——
-      required_movement_radius: 0.5
-      movement_time_allowance: 30.0
+      required_movement_radius: 0.00001
+      movement_time_allowance: 300000.0
 
     general_goal_checker:
       stateful: true
       plugin: "nav2_controller::SimpleGoalChecker"
       # —— 到达判定容差：xy (米) / yaw (弧度)。船体 1.6 m，容差略大于船体半长 ——
       xy_goal_tolerance: 1.5
-      yaw_goal_tolerance: 0.5
+      yaw_goal_tolerance: 1.0
     FollowPath:
       plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
       # —— 期望线速度 (m/s)。下水首试偏保守 (0.2)；稳定后可逐步放宽 ——
-      desired_linear_vel: 0.2
+      desired_linear_vel: 0.5
       # —— 最大角加速度 (rad/s²)。水面惯量大，小值抑制摇头 ——
-      max_angular_accel: 0.05
+      max_angular_accel: 2.0
       # —— 是否允许倒车（本船若不能倒车务必 false）——
       allow_reversing: false
 
       # —— 前视距离 (m)：base_link 距船头 1.4 m，min 须 >1.4 否则 carrot 落在船内 ——
-      lookahead_time: 1.5
+      lookahead_time: 2.0
       use_velocity_scaled_lookahead_dist: true
       min_lookahead_dist: 1.6
       max_lookahead_dist: 3.5
 
       # —— 速度缩放：弯道自动减速 ——
       use_regulated_linear_velocity_scaling: true
-      regulated_linear_scaling_min_speed: 0.05       # 弯道减速下限 (m/s)
-      regulated_linear_scaling_min_radius: 5.0       # 触发减速的转弯半径 (m)，略大于船宽
+      regulated_linear_scaling_min_speed: 0.1       # 弯道减速下限 (m/s)
+      regulated_linear_scaling_min_radius: 2.0       # 触发减速的转弯半径 (m)，略大于船宽
 
       # —— 代价缩放：接近高代价区域 (障碍/膨胀) 时自动减速 ——
       use_cost_regulated_linear_velocity_scaling: true
-      cost_scaling_dist: 2.5        # 开始减速的代价距离 (m)，≈ 船头前伸 1.4 + 余量 1.1
-      cost_scaling_gain: 0.5        # 减速强度 (0~1, 越大越激进)
+      cost_scaling_dist: 4.0        # 开始减速的代价距离 (m)，≈ 船头前伸 1.4 + 余量 1.1
+      cost_scaling_gain: 0.8        # 减速强度 (0~1, 越大越激进)
       inflation_cost_scaling_factor: 1.0
 
       # —— 接近目标时减速。距离须 ≥ 船头前伸量，否则到达前已全速冲过 ——
-      min_approach_linear_velocity: 0.05
+      min_approach_linear_velocity: 0.1
       approach_velocity_scaling_dist: 2.0
 
       # —— 转向控制 ——
@@ -221,7 +221,7 @@ global_costmap:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 1.0
         # —— 全局膨胀半径 (m)。比 local 略大以保守规划；不可过大否则全局路径绕行过度 ——
-        inflation_radius: 1.8
+        inflation_radius: 2.0
       always_send_full_costmap: True
       
 map_server:
@@ -291,9 +291,9 @@ behavior_server:
     # —— 恢复行为参数 ——
     simulate_ahead_time: 3.0
     # —— 旋转恢复速度限制 (rad/s) ——
-    max_rotational_vel: 0.15
-    min_rotational_vel: 0.03
-    rotational_acc_lim: 0.05
+    max_rotational_vel: 1.0
+    min_rotational_vel: 0.2
+    rotational_acc_lim: 2.0
 
 robot_state_publisher:
   ros__parameters:
@@ -316,16 +316,16 @@ velocity_smoother:
   ros__parameters:
     use_sim_time: false
     # —— 平滑频率 (Hz)，≥ controller_frequency ——
-    smoothing_frequency: 10.0
+    smoothing_frequency: 20.0
     scale_velocities: true
     feedback: "CLOSED_LOOP"
 
     # —— [vx, vy, wz] 速度/加速度限幅，水面惯量大取小值抑制 cmd_vel 抖动 ——
-    max_velocity: [0.2, 0.0, 0.15]
-    min_velocity: [0.0, 0.0, -0.15]
+    max_velocity: [0.5, 0.0, 0.5]
+    min_velocity: [0.0, 0.0, -0.5]
     # —— 加速度上限 ([ax, ay, awz])。首次下水 0.05 偏保守，稳定后可逐步放大 ——
-    max_accel: [0.05, 0.0, 0.05]
-    max_decel: [-0.05, 0.0, -0.05]   # 减速度 (<0)
+    max_accel: [0.5, 0.0, 0.5]
+    max_decel: [-0.5, 0.0, -0.5]   # 减速度 (<0)
 
     odom_topic: "/mavros/local_position/odom"
     odom_duration: 0.1

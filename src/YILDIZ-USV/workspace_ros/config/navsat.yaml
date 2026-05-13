@@ -11,4 +11,5 @@ navsat_transform_node:
     broadcast_utm_transform: false
     publish_filtered_gps: true
     wait_for_datum: true
-    datum: [30.64534831, 119.92304646, 0.0]
+    #datum: [30.64534831, 119.92304646, 0.0]
+    datum: [31.48551322, 120.36783085, 0.0]
