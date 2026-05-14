@@ -13,7 +13,7 @@ from pathlib import Path
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, GroupAction, IncludeLaunchDescription, OpaqueFunction
+from launch.actions import DeclareLaunchArgument, GroupAction, IncludeLaunchDescription
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import EqualsSubstitution, LaunchConfiguration, PathJoinSubstitution
@@ -21,8 +21,6 @@ from launch_ros.substitutions import FindPackageShare
 
 
 def generate_launch_description():
-    relay = PathJoinSubstitution(
-        [FindPackageShare('workspace_ros'), 'launch', 'mavros_roboboat_relay.launch.py'])
     loc_launch = PathJoinSubstitution(
         [FindPackageShare('workspace_ros'), 'launch', 'localization.launch.py'])
     mavros_tf_launch = PathJoinSubstitution(
@@ -34,11 +32,11 @@ def generate_launch_description():
     default_static_real_boat = str(ws_share / 'config' / 'static_transform_real_boat.yaml')
 
     use_sim_time = LaunchConfiguration('use_sim_time')
-    scan_src = LaunchConfiguration('scan_src')
-    enable_nav2_to_mavros_cmd_vel = LaunchConfiguration('enable_nav2_to_mavros_cmd_vel')
     enable_nav2_cmd_vel_to_mavros = LaunchConfiguration('enable_nav2_cmd_vel_to_mavros')
     localization_backend = LaunchConfiguration('localization_backend')
     static_transform_file = LaunchConfiguration('static_transform_file')
+    imu_src = LaunchConfiguration('imu_src')
+    gps_src = LaunchConfiguration('gps_src')
     use_gnss_map_odom_tf = LaunchConfiguration('use_gnss_map_odom_tf')
     map_config_yaml = LaunchConfiguration('map_config_yaml')
     map_origin_ref_key = LaunchConfiguration('map_origin_ref_key')
@@ -53,27 +51,6 @@ def generate_launch_description():
     default_map_yaml = PathJoinSubstitution(
         [FindPackageShare('workspace_nav'), 'config', 'map_real_boat_hk.yaml'])
 
-    def _forbid_dual_mavros_setpoint_bridge(context, *args, **kwargs):
-        a = (
-            LaunchConfiguration('enable_nav2_to_mavros_cmd_vel')
-            .perform(context)
-            .strip()
-            .lower()
-        )
-        b = (
-            LaunchConfiguration('enable_nav2_cmd_vel_to_mavros')
-            .perform(context)
-            .strip()
-            .lower()
-        )
-        truthy = {'true', '1', 'yes', 'on'}
-        if a in truthy and b in truthy:
-            raise RuntimeError(
-                'enable_nav2_to_mavros_cmd_vel and enable_nav2_cmd_vel_to_mavros '
-                'cannot both be true (would duplicate MAVROS setpoint_velocity).'
-            )
-        return []
-
     return LaunchDescription([
         DeclareLaunchArgument(
             'use_sim_time',
@@ -81,25 +58,9 @@ def generate_launch_description():
             description='Must be false when not using Gazebo /clock',
         ),
         DeclareLaunchArgument(
-            'scan_src',
-            default_value='',
-            description='LaserScan topic if lidar is not under /roboboat/...',
-        ),
-        DeclareLaunchArgument(
-            'enable_nav2_to_mavros_cmd_vel',
-            default_value='false',
-            description=(
-                'mavros_roboboat_relay: relay /cmd_vel_nav → MAVROS setpoint_velocity (legacy). '
-                'Do not enable together with enable_nav2_cmd_vel_to_mavros.'
-            ),
-        ),
-        DeclareLaunchArgument(
             'enable_nav2_cmd_vel_to_mavros',
             default_value='false',
-            description=(
-                'Nav2 smoothed /cmd_vel → MAVROS setpoint_velocity (OFFBOARD velocity path). '
-                'Do not enable together with enable_nav2_to_mavros_cmd_vel.'
-            ),
+            description='Nav2 /cmd_vel_nav (controller raw, bypass smoother) → MAVROS setpoint_velocity',
         ),
         DeclareLaunchArgument(
             'localization_backend',
@@ -110,6 +71,16 @@ def generate_launch_description():
             'static_transform_file',
             default_value=default_static_real_boat,
             description='仅 mavros_odom：传给 real_boat_mavros_tf 的 YAML（默认 static_transform_real_boat.yaml）',
+        ),
+        DeclareLaunchArgument(
+            'imu_src',
+            default_value='/mavros/imu/data',
+            description='模式 A (robot_localization) 的 IMU 源话题',
+        ),
+        DeclareLaunchArgument(
+            'gps_src',
+            default_value='/mavros/global_position/raw/fix',
+            description='模式 A (robot_localization) 的 GPS NavSatFix 源话题',
         ),
         DeclareLaunchArgument(
             'use_gnss_map_odom_tf',
@@ -147,17 +118,6 @@ def generate_launch_description():
             description='map→odom 固定绕 z 偏角（度）；栅格与 ENU 差常 ±90 时可设 90 或 -90 试',
         ),
 
-        OpaqueFunction(function=_forbid_dual_mavros_setpoint_bridge),
-
-        IncludeLaunchDescription(
-            PythonLaunchDescriptionSource(relay),
-            launch_arguments={
-                'use_sim_time': use_sim_time,
-                'scan_src': scan_src,
-                'enable_nav2_to_mavros_cmd_vel': enable_nav2_to_mavros_cmd_vel,
-            }.items(),
-        ),
-
         GroupAction(
             actions=[
                 IncludeLaunchDescription(
@@ -172,7 +132,11 @@ def generate_launch_description():
             actions=[
                 IncludeLaunchDescription(
                     PythonLaunchDescriptionSource(loc_launch),
-                    launch_arguments={'use_sim_time': use_sim_time}.items(),
+                    launch_arguments={
+                        'use_sim_time': use_sim_time,
+                        'imu_src': imu_src,
+                        'gps_src': gps_src,
+                    }.items(),
                 ),
             ],
             condition=IfCondition(use_robot_loc),

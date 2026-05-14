@@ -18,9 +18,12 @@ class ImuCovarianceRepub(Node):
         except rclpy.exceptions.ParameterAlreadyDeclaredException:
             pass
 
+        self.declare_parameter('imu_topic', '/roboboat/sensors/imu/imu')
+        imu_topic = self.get_parameter('imu_topic').get_parameter_value().string_value
+
         self.subscription = self.create_subscription(
             Imu,
-            '/roboboat/sensors/imu/imu',
+            imu_topic,
             self.imu_callback,
             10
         )

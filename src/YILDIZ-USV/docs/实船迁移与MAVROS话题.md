@@ -26,7 +26,7 @@ Nav2 →（可选平滑）geometry_msgs/Twist 或自建轨迹/LOS 输出
      → PX4 → 电调/舵机/推进器
 ```
 
-短期联调可把 **Twist 直接送进 MAVROS 速度设定点**；正式航行往往还要 ** LOS / MPC / Mixer**（见下文「架构建议」）。本仓库已提供：`mavros_roboboat_relay` 可选用 **`enable_nav2_to_mavros_cmd_vel`**，以及 **`use_mavros_odometry`** 走 **`/mavros/local_position/odom`**，均属「减少重复造轮子」的过渡手段，不等于最终船控形态。
+短期联调可把 **Twist 直接送进 MAVROS 速度设定点**；正式航行往往还要 ** LOS / MPC / Mixer**（见下文「架构建议」）。本仓库已提供：**`nav2_cmd_vel_to_mavros`**（`/cmd_vel` → MAVROS setpoint_velocity），以及 **`use_mavros_odometry`** 走 **`/mavros/local_position/odom`**，均属「减少重复造轮子」的过渡手段，不等于最终船控形态。
 
 ---
 

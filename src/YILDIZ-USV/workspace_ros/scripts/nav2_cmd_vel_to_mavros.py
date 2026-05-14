@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 
 # ----------------------------------------------------------------------------------------------- #
-# Nav2 smoothed /cmd_vel → MAVROS /mavros/setpoint_velocity/cmd_vel_unstamped (Twist).
+# Nav2 controller raw /cmd_vel_nav → MAVROS /mavros/setpoint_velocity/cmd_vel_unstamped (Twist).
+# 绕过 velocity_smoother，直接取 controller_server 输出，由本节点自行限幅/死区/超时。
+# 与仿真 converter.py 订阅同一话题 /cmd_vel_nav，控制链一致。
 # - Surge + yaw only (差速船常用；无 lateral)。PX4 OFFBOARD 侧再做闭环与推进分配。
 # - 可选「只前进、禁止原地转向」：forbid_reverse + min_surge_for_turn（见参数）。
 # - Nav2 在恢复 / RotateToGoal 等情况下仍可能短暂给出 linear.x<0 或低速大角速度；勿假定恒非负。
@@ -71,7 +73,7 @@ class Nav2CmdVelToMavros(Node):
         if not self.has_parameter('use_sim_time'):
             self.declare_parameter('use_sim_time', False)
 
-        self.declare_parameter('cmd_vel_src', '/cmd_vel')
+        self.declare_parameter('cmd_vel_src', '/cmd_vel_nav')
         self.declare_parameter('mavros_cmd_vel_dst', '/mavros/setpoint_velocity/cmd_vel_unstamped')
         self.declare_parameter('min_linear_x', 0.0)
         self.declare_parameter('max_linear_x', 0.2)

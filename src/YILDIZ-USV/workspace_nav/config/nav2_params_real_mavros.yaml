@@ -312,13 +312,24 @@ waypoint_follower:
       waypoint_pause_duration: 50
 
 
+# —— velocity_smoother ——————————————————————————————————————————————————————
+# 本文件的 velocity_smoother 参数在实船默认控制链中 **不再使用**：
+#   nav2_cmd_vel_to_mavros 直接订阅 controller_server 的原始 /cmd_vel_nav
+# （绕过 smoother），由节点自身做限幅/死区/超时/OFFBOARD 门控。
+# 与仿真 converter.py 订阅同一话题 /cmd_vel_nav，控制链一致。
+#
+# 若希望恢复 smoother（提供加速度率限制），将 nav2_cmd_vel_mavros.launch.py
+# 的 cmd_vel_src 改回 /cmd_vel 即可。下方参数保留作为恢复参考。
+# ————————————————————————————————————————————————————————————————————————————
 velocity_smoother:
   ros__parameters:
     use_sim_time: false
     # —— 平滑频率 (Hz)，≥ controller_frequency ——
     smoothing_frequency: 20.0
     scale_velocities: true
-    feedback: "CLOSED_LOOP"
+    #船静止时 odom 速度几乎为 0，平滑器会按闭环反馈慢慢爬升；你手动推动船以后 odom 有速度反馈，所以 /cmd_vel 和 MAVROS 接收速度才变大。
+    #feedback: "CLOSED_LOOP"
+    feedback: "OPEN_LOOP"
 
     # —— [vx, vy, wz] 速度/加速度限幅，水面惯量大取小值抑制 cmd_vel 抖动 ——
     max_velocity: [0.5, 0.0, 0.5]

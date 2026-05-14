@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 
-"""Nav2 /cmd_vel → MAVROS velocity setpoint with limits, deadband, timeout republish."""
+"""Nav2 /cmd_vel_nav (controller raw) → MAVROS velocity setpoint with limits, deadband, timeout republish.
+绕过 velocity_smoother，直接订阅 controller_server 原始输出 /cmd_vel_nav，
+由本节点自行做限幅/死区/超时保护，避免 smoother OPEN_LOOP 引入额外延迟。
+仿真 converter.py 同样订阅 /cmd_vel_nav，两边行为一致。"""
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, OpaqueFunction
@@ -57,8 +60,8 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'cmd_vel_src',
-            default_value='/cmd_vel',
-            description='Nav2 velocity_smoother output',
+            default_value='/cmd_vel_nav',
+            description='Nav2 controller_server raw output (bypass velocity_smoother)',
         ),
         DeclareLaunchArgument(
             'mavros_cmd_vel_dst',

@@ -23,25 +23,38 @@ def generate_launch_description():
     navsat_path = PathJoinSubstitution([package_share, 'config', 'navsat.yaml'])
     static_transform_path = PathJoinSubstitution([package_share, 'config', 'static_transform.yaml'])
 
+    imu_src = LaunchConfiguration('imu_src')
+    gps_src = LaunchConfiguration('gps_src')
+
     return LaunchDescription([
         DeclareLaunchArgument(
             'use_sim_time',
             default_value='true',
             description='false on real boat; true in Gazebo when /clock is published',
         ),
+        DeclareLaunchArgument(
+            'imu_src',
+            default_value='/roboboat/sensors/imu/imu',
+            description='IMU topic for covariance republish',
+        ),
+        DeclareLaunchArgument(
+            'gps_src',
+            default_value='/roboboat/sensors/gps/navsat',
+            description='GPS NavSatFix topic for covariance republish',
+        ),
 
         Node(
             package=package_name,
             executable='imu_covariance_repub',
             name='imu_covariance_repub',
-            parameters=[{'use_sim_time': use_sim_time}],
+            parameters=[{'use_sim_time': use_sim_time, 'imu_topic': imu_src}],
         ),
 
         Node(
             package=package_name,
             executable='gps_covariance_repub',
             name='gps_covariance_repub',
-            parameters=[{'use_sim_time': use_sim_time}],
+            parameters=[{'use_sim_time': use_sim_time, 'gps_topic': gps_src}],
         ),
 
         Node(

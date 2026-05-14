@@ -54,7 +54,7 @@ setup(
             'kamikaze = scripts.kamikaze:main',
             'manual_control = scripts.manual_control:main',
             'mavros_keyboard_teleop = scripts.mavros_keyboard_teleop:main',
-            'mavros_roboboat_relay = scripts.mavros_roboboat_relay:main',
+
             'nav2_cmd_vel_to_mavros = scripts.nav2_cmd_vel_to_mavros:main',
             'static_transform_publisher = scripts.static_transform_publisher:main',
             'target_buoy = scripts.target_buoy:main',

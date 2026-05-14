@@ -18,9 +18,12 @@ class GpsCovarianceRepub(Node):
         except rclpy.exceptions.ParameterAlreadyDeclaredException:
             pass
 
+        self.declare_parameter('gps_topic', '/roboboat/sensors/gps/navsat')
+        gps_topic = self.get_parameter('gps_topic').get_parameter_value().string_value
+
         self.subscription = self.create_subscription(
             NavSatFix,
-            '/roboboat/sensors/gps/navsat',
+            gps_topic,
             self.gps_callback,
             10
         )

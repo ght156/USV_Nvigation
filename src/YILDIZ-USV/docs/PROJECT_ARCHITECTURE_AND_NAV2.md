@@ -76,6 +76,29 @@
 2. **`velocity_smoother`** 订阅 **`/cmd_vel_nav`**，平滑后发布 **`/cmd_vel`**（供需要「官方平滑后速度」的节点使用）。  
 3. 本项目的 **`converter`** 订阅 **`/cmd_vel_nav`**，把角/线速度换算为左右 **`/roboboat/thrusters/.../thrust`**。  
 
+**`/cmd_vel_nav` 与 `/cmd_vel` 对比**：
+
+| | `/cmd_vel_nav` | `/cmd_vel` |
+|---|---|---|
+| **来源** | Nav2 `controller_server` 直接输出 | `velocity_smoother` 平滑后输出 |
+| **特点** | 原始速度，未经平滑处理 | 经过加减速限制、死区过滤 |
+| **仿真中** | **使用** — `converter.py` 订阅，转为推力发往 Gazebo | 未使用（仿真执行链路不消费） |
+| **实船中** | **使用** — `nav2_cmd_vel_to_mavros.py` 订阅，转发至 PX4 OFFBOARD | 未使用（已绕过 smoother，与仿真链路一致） |
+| **其他发布者** | `kamikaze.py`（视觉浮标追逐，与 Nav2 同时运行会指令冲突） | 仅 `velocity_smoother` |
+
+**仿真控制链**（绕过 smoother，直接使用原始速度）：
+```
+Nav2 controller_server → /cmd_vel_nav → converter.py → /roboboat/thrusters/.../thrust → ros_gz_bridge → Gazebo
+```
+
+**实船控制链**（同样绕过 smoother，与仿真一致）：
+```
+Nav2 controller_server → /cmd_vel_nav → nav2_cmd_vel_to_mavros.py → /mavros/setpoint_velocity/cmd_vel_unstamped → PX4 OFFBOARD
+```
+`nav2_cmd_vel_to_mavros.py` 自带限幅/死区/超时/OFFBOARD 门控，不再依赖 velocity_smoother 做平滑。若需加速度率限制，可将 `cmd_vel_src` 改回 `/cmd_vel` 恢复 smoother。
+
+**注意**：`converter.py` 与 `nav2_cmd_vel_to_mavros.py` 均订阅 `/cmd_vel_nav`，前者输出 Gazebo 推力话题（仿真专用），后者转发 MAVROS 速度设定点（实船专用）。两者不可混用。`kamikaze.py` 同样发布到 `/cmd_vel_nav`，与 Nav2 同时运行会指令冲突。
+
 因此：**用 RViz2 设单点目标时，同样会有 `/cmd_vel_nav`（以及通常在跑的 `/cmd_vel`）**；地面站不替代这一层，它主要管**任务/遥测/可视化**（见 §11.5）。
 
 ---
@@ -133,7 +156,7 @@ Nav2 需要连贯的 **`map`→`odom`→`base_link`**，且 costmap 能把 **`La
 |------|------|
 | 里程话题 | **`/mavros/local_position/odom`**（`nav_msgs/Odometry`）。通常为 PX4 **EKF/ECL 融合 GNSS、IMU** 等的输出，不是单独的「纯 `/gps`/经纬度推导」ROS 话题，但满足 Nav2 对 **`nav_msgs/Odometry`** 的接口。|
 | Bringup | `… real_boat_bringup.launch.py localization_backend:=mavros_odom …`：起 **`real_boat_mavros_tf`**（**`map`→`odom`** + 默认 **`static_transform_real_boat.yaml`**），不跑 EKF/navsat。|
-| MAVROS→`/roboboat` | **`mavros_roboboat_relay`** 仍可将 MAVROS IMU/GPS/LiDAR 映到 **`/roboboat/sensors/*`**（例如 Nav2 激光仍用 **`nav2_params.yaml`** 约定话题）；这些数据在 **不写 EKF 时一般不进入** **`/odometry/filtered`**。|
+| MAVROS→`/roboboat` | 模式 A (EKF) 下 **`imu_covariance_repub`** / **`gps_covariance_repub`** 可直接订阅 MAVROS 话题（通过 **`imu_src`** / **`gps_src`** 参数），不再需要中继节点。模式 B (mavros_odom) 不经过此链。|
 | Nav2 覆盖参数 | **`nav2_real_mavros.launch.py`**（默认 **`nav2_params_real_mavros.yaml`**）或 **`nav2.launch.py use_mavros_odometry:=true`**（合并 **`nav2_mavros_odom_overlay.yaml`**），把 **`bt_navigator`/`velocity_smoother`** 的 **`odom_topic`** 指到 **`/mavros/local_position/odom`**。|
 | TF 冲突 | MAVROS **`local_pose`** 常附带 **`odom`→车体** 广播。若已与 **`map`→`odom`** 组成完整链，**勿再同时起 `ekf_node`（`publish_tf`）**。若车架名不是 **`base_link`**，需对齐 Nav2 **`robot_base_frame`** 或增加静态 TF。若只见 **`map_ned`/`odom_ned`**，而 **`odom` 下无 `base_link`**：本仓库 **`real_boat_mavros_tf`** 负责 **`map`→`odom`**，**`odom`→车体**须由 MAVROS 配好帧名或由 **`ekf`/中继**接上；详见 **`docs/实船调试.md`**。 |
 

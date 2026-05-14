@@ -35,7 +35,7 @@ class Nav2ThrusterController(Node):
 
     def cmd_vel_callback(self, msg):
         self.get_logger().info(
-            f"Received cmd_vel: linear_x = {msg.linear.x}, angular_z = {msg.angular.z}"
+            f"Received /cmd_vel_nav: linear_x = {msg.linear.x}, angular_z = {msg.angular.z}"
         )
 
         left_thrust = self.linear_scale * msg.linear.x - self.angular_scale * msg.angular.z
