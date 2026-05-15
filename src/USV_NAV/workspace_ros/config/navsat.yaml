@@ -1,0 +1,15 @@
+# 与 workspace_nav/config/map.yaml 中 ref_gnss_10（或 ref_gnss）一致，保证 GNSS→odom 与地图左下角对齐。
+# datum: [latitude_deg, longitude_deg, heading_rad]，heading 为 ENU 下绕 z，0 表示 x 朝东（见 robot_localization 官方说明）。
+navsat_transform_node:
+  ros__parameters:
+    frequency: 15.0
+    delay: 1.0
+    use_odometry_yaw: true
+    magnetic_declination_radians: 0.0
+    yaw_offset: 0.0
+    zero_altitude: true
+    broadcast_utm_transform: false
+    publish_filtered_gps: true
+    wait_for_datum: true
+    #datum: [30.64534831, 119.92304646, 0.0]
+    datum: [31.48618175, 120.36793468, 0.0]

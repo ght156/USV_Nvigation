@@ -1,0 +1,849 @@
+{
+  "exported_at": "2026-04-29T05:30:12.437821+00:00",
+  "tiled": true,
+  "force_tiled": true,
+  "area_m2": 6659128.434726277,
+  "resolution_m": 1.0,
+  "full_grid": {
+    "width": 2679,
+    "height": 2487
+  },
+  "tile_extent_m": 400,
+  "overlap_cells": 10,
+  "index_origin": "left_bottom",
+  "tiles": [
+    {
+      "id": "tile_0_0",
+      "ix": 0,
+      "iy": 0,
+      "col0": 0,
+      "row0": 0,
+      "width": 401,
+      "height": 400,
+      "bbox": [
+        120.32315397,
+        31.47031214,
+        120.32736739253254,
+        31.473905384699965
+      ],
+      "pgm_path": "outputs/huazhuang/tiles/tile_0_0/map.pgm",
+      "yaml_path": "outputs/huazhuang/tiles/tile_0_0/map.yaml"
+    },
+    {
+      "id": "tile_1_0",
+      "ix": 1,
+      "iy": 0,
+      "col0": 390,
+      "row0": 0,
+      "width": 401,
+      "height": 400,
+      "bbox": [
+        120.32726205696923,
+        31.47031214,
+        120.33147547950176,
+        31.473905384699965
+      ],
+      "pgm_path": "outputs/huazhuang/tiles/tile_1_0/map.pgm",
+      "yaml_path": "outputs/huazhuang/tiles/tile_1_0/map.yaml"
+    },
+    {
+      "id": "tile_2_0",
+      "ix": 2,
+      "iy": 0,
+      "col0": 780,
+      "row0": 0,
+      "width": 401,
+      "height": 400,
+      "bbox": [
+        120.33137014393846,
+        31.47031214,
+        120.33558356647099,
+        31.473905384699965
+      ],
+      "pgm_path": "outputs/huazhuang/tiles/tile_2_0/map.pgm",
+      "yaml_path": "outputs/huazhuang/tiles/tile_2_0/map.yaml"
+    },
+    {
+      "id": "tile_3_0",
+      "ix": 3,
+      "iy": 0,
+      "col0": 1170,
+      "row0": 0,
+      "width": 401,
+      "height": 400,
+      "bbox": [
+        120.33547823090768,
+        31.47031214,
+        120.33969165344021,
+        31.473905384699965
+      ],
+      "pgm_path": "outputs/huazhuang/tiles/tile_3_0/map.pgm",
+      "yaml_path": "outputs/huazhuang/tiles/tile_3_0/map.yaml"
+    },
+    {
+      "id": "tile_4_0",
+      "ix": 4,
+      "iy": 0,
+      "col0": 1560,
+      "row0": 0,
+      "width": 401,
+      "height": 400,
+      "bbox": [
+        120.33958631787691,
+        31.47031214,
+        120.34379974040944,
+        31.473905384699965
+      ],
+      "pgm_path": "outputs/huazhuang/tiles/tile_4_0/map.pgm",
+      "yaml_path": "outputs/huazhuang/tiles/tile_4_0/map.yaml"
+    },
+    {
+      "id": "tile_5_0",
+      "ix": 5,
+      "iy": 0,
+      "col0": 1950,
+      "row0": 0,
+      "width": 401,
+      "height": 400,
+      "bbox": [
+        120.34369440484613,
+        31.47031214,
+        120.34790782737866,
+        31.473905384699965
+      ],
+      "pgm_path": "outputs/huazhuang/tiles/tile_5_0/map.pgm",
+      "yaml_path": "outputs/huazhuang/tiles/tile_5_0/map.yaml"
+    },
+    {
+      "id": "tile_6_0",
+      "ix": 6,
+      "iy": 0,
+      "col0": 2340,
+      "row0": 0,
+      "width": 339,
+      "height": 400,
+      "bbox": [
+        120.34780249181536,
+        31.47031214,
+        120.35136521,
+        31.473905384699965
+      ],
+      "pgm_path": "outputs/huazhuang/tiles/tile_6_0/map.pgm",
+      "yaml_path": "outputs/huazhuang/tiles/tile_6_0/map.yaml"
+    },
+    {
+      "id": "tile_0_1",
+      "ix": 0,
+      "iy": 1,
+      "col0": 0,
+      "row0": 390,
+      "width": 401,
+      "height": 400,
+      "bbox": [
+        120.32315397,
+        31.473815553582465,
+        120.32736739253254,
+        31.47740879828243
+      ],
+      "pgm_path": "outputs/huazhuang/tiles/tile_0_1/map.pgm",
+      "yaml_path": "outputs/huazhuang/tiles/tile_0_1/map.yaml"
+    },
+    {
+      "id": "tile_1_1",
+      "ix": 1,
+      "iy": 1,
+      "col0": 390,
+      "row0": 390,
+      "width": 401,
+      "height": 400,
+      "bbox": [
+        120.32726205696923,
+        31.473815553582465,
+        120.33147547950176,
+        31.47740879828243
+      ],
+      "pgm_path": "outputs/huazhuang/tiles/tile_1_1/map.pgm",
+      "yaml_path": "outputs/huazhuang/tiles/tile_1_1/map.yaml"
+    },
+    {
+      "id": "tile_2_1",
+      "ix": 2,
+      "iy": 1,
+      "col0": 780,
+      "row0": 390,
+      "width": 401,
+      "height": 400,
+      "bbox": [
+        120.33137014393846,
+        31.473815553582465,
+        120.33558356647099,
+        31.47740879828243
+      ],
+      "pgm_path": "outputs/huazhuang/tiles/tile_2_1/map.pgm",
+      "yaml_path": "outputs/huazhuang/tiles/tile_2_1/map.yaml"
+    },
+    {
+      "id": "tile_3_1",
+      "ix": 3,
+      "iy": 1,
+      "col0": 1170,
+      "row0": 390,
+      "width": 401,
+      "height": 400,
+      "bbox": [
+        120.33547823090768,
+        31.473815553582465,
+        120.33969165344021,
+        31.47740879828243
+      ],
+      "pgm_path": "outputs/huazhuang/tiles/tile_3_1/map.pgm",
+      "yaml_path": "outputs/huazhuang/tiles/tile_3_1/map.yaml"
+    },
+    {
+      "id": "tile_4_1",
+      "ix": 4,
+      "iy": 1,
+      "col0": 1560,
+      "row0": 390,
+      "width": 401,
+      "height": 400,
+      "bbox": [
+        120.33958631787691,
+        31.473815553582465,
+        120.34379974040944,
+        31.47740879828243
+      ],
+      "pgm_path": "outputs/huazhuang/tiles/tile_4_1/map.pgm",
+      "yaml_path": "outputs/huazhuang/tiles/tile_4_1/map.yaml"
+    },
+    {
+      "id": "tile_5_1",
+      "ix": 5,
+      "iy": 1,
+      "col0": 1950,
+      "row0": 390,
+      "width": 401,
+      "height": 400,
+      "bbox": [
+        120.34369440484613,
+        31.473815553582465,
+        120.34790782737866,
+        31.47740879828243
+      ],
+      "pgm_path": "outputs/huazhuang/tiles/tile_5_1/map.pgm",
+      "yaml_path": "outputs/huazhuang/tiles/tile_5_1/map.yaml"
+    },
+    {
+      "id": "tile_6_1",
+      "ix": 6,
+      "iy": 1,
+      "col0": 2340,
+      "row0": 390,
+      "width": 339,
+      "height": 400,
+      "bbox": [
+        120.34780249181536,
+        31.473815553582465,
+        120.35136521,
+        31.47740879828243
+      ],
+      "pgm_path": "outputs/huazhuang/tiles/tile_6_1/map.pgm",
+      "yaml_path": "outputs/huazhuang/tiles/tile_6_1/map.yaml"
+    },
+    {
+      "id": "tile_0_2",
+      "ix": 0,
+      "iy": 2,
+      "col0": 0,
+      "row0": 780,
+      "width": 401,
+      "height": 400,
+      "bbox": [
+        120.32315397,
+        31.47731896716493,
+        120.32736739253254,
+        31.480912211864894
+      ],
+      "pgm_path": "outputs/huazhuang/tiles/tile_0_2/map.pgm",
+      "yaml_path": "outputs/huazhuang/tiles/tile_0_2/map.yaml"
+    },
+    {
+      "id": "tile_1_2",
+      "ix": 1,
+      "iy": 2,
+      "col0": 390,
+      "row0": 780,
+      "width": 401,
+      "height": 400,
+      "bbox": [
+        120.32726205696923,
+        31.47731896716493,
+        120.33147547950176,
+        31.480912211864894
+      ],
+      "pgm_path": "outputs/huazhuang/tiles/tile_1_2/map.pgm",
+      "yaml_path": "outputs/huazhuang/tiles/tile_1_2/map.yaml"
+    },
+    {
+      "id": "tile_2_2",
+      "ix": 2,
+      "iy": 2,
+      "col0": 780,
+      "row0": 780,
+      "width": 401,
+      "height": 400,
+      "bbox": [
+        120.33137014393846,
+        31.47731896716493,
+        120.33558356647099,
+        31.480912211864894
+      ],
+      "pgm_path": "outputs/huazhuang/tiles/tile_2_2/map.pgm",
+      "yaml_path": "outputs/huazhuang/tiles/tile_2_2/map.yaml"
+    },
+    {
+      "id": "tile_3_2",
+      "ix": 3,
+      "iy": 2,
+      "col0": 1170,
+      "row0": 780,
+      "width": 401,
+      "height": 400,
+      "bbox": [
+        120.33547823090768,
+        31.47731896716493,
+        120.33969165344021,
+        31.480912211864894
+      ],
+      "pgm_path": "outputs/huazhuang/tiles/tile_3_2/map.pgm",
+      "yaml_path": "outputs/huazhuang/tiles/tile_3_2/map.yaml"
+    },
+    {
+      "id": "tile_4_2",
+      "ix": 4,
+      "iy": 2,
+      "col0": 1560,
+      "row0": 780,
+      "width": 401,
+      "height": 400,
+      "bbox": [
+        120.33958631787691,
+        31.47731896716493,
+        120.34379974040944,
+        31.480912211864894
+      ],
+      "pgm_path": "outputs/huazhuang/tiles/tile_4_2/map.pgm",
+      "yaml_path": "outputs/huazhuang/tiles/tile_4_2/map.yaml"
+    },
+    {
+      "id": "tile_5_2",
+      "ix": 5,
+      "iy": 2,
+      "col0": 1950,
+      "row0": 780,
+      "width": 401,
+      "height": 400,
+      "bbox": [
+        120.34369440484613,
+        31.47731896716493,
+        120.34790782737866,
+        31.480912211864894
+      ],
+      "pgm_path": "outputs/huazhuang/tiles/tile_5_2/map.pgm",
+      "yaml_path": "outputs/huazhuang/tiles/tile_5_2/map.yaml"
+    },
+    {
+      "id": "tile_6_2",
+      "ix": 6,
+      "iy": 2,
+      "col0": 2340,
+      "row0": 780,
+      "width": 339,
+      "height": 400,
+      "bbox": [
+        120.34780249181536,
+        31.47731896716493,
+        120.35136521,
+        31.480912211864894
+      ],
+      "pgm_path": "outputs/huazhuang/tiles/tile_6_2/map.pgm",
+      "yaml_path": "outputs/huazhuang/tiles/tile_6_2/map.yaml"
+    },
+    {
+      "id": "tile_0_3",
+      "ix": 0,
+      "iy": 3,
+      "col0": 0,
+      "row0": 1170,
+      "width": 400,
+      "height": 400,
+      "bbox": [
+        120.32315397,
+        31.480822380747394,
+        120.32736739253254,
+        31.484415625447358
+      ],
+      "pgm_path": "outputs/huazhuang/tiles/tile_0_3/map.pgm",
+      "yaml_path": "outputs/huazhuang/tiles/tile_0_3/map.yaml"
+    },
+    {
+      "id": "tile_1_3",
+      "ix": 1,
+      "iy": 3,
+      "col0": 390,
+      "row0": 1170,
+      "width": 400,
+      "height": 400,
+      "bbox": [
+        120.32726205696923,
+        31.480822380747394,
+        120.33147547950176,
+        31.484415625447358
+      ],
+      "pgm_path": "outputs/huazhuang/tiles/tile_1_3/map.pgm",
+      "yaml_path": "outputs/huazhuang/tiles/tile_1_3/map.yaml"
+    },
+    {
+      "id": "tile_2_3",
+      "ix": 2,
+      "iy": 3,
+      "col0": 780,
+      "row0": 1170,
+      "width": 400,
+      "height": 400,
+      "bbox": [
+        120.33137014393846,
+        31.480822380747394,
+        120.33558356647099,
+        31.484415625447358
+      ],
+      "pgm_path": "outputs/huazhuang/tiles/tile_2_3/map.pgm",
+      "yaml_path": "outputs/huazhuang/tiles/tile_2_3/map.yaml"
+    },
+    {
+      "id": "tile_3_3",
+      "ix": 3,
+      "iy": 3,
+      "col0": 1170,
+      "row0": 1170,
+      "width": 400,
+      "height": 400,
+      "bbox": [
+        120.33547823090768,
+        31.480822380747394,
+        120.33969165344021,
+        31.484415625447358
+      ],
+      "pgm_path": "outputs/huazhuang/tiles/tile_3_3/map.pgm",
+      "yaml_path": "outputs/huazhuang/tiles/tile_3_3/map.yaml"
+    },
+    {
+      "id": "tile_4_3",
+      "ix": 4,
+      "iy": 3,
+      "col0": 1560,
+      "row0": 1170,
+      "width": 400,
+      "height": 400,
+      "bbox": [
+        120.33958631787691,
+        31.480822380747394,
+        120.34379974040944,
+        31.484415625447358
+      ],
+      "pgm_path": "outputs/huazhuang/tiles/tile_4_3/map.pgm",
+      "yaml_path": "outputs/huazhuang/tiles/tile_4_3/map.yaml"
+    },
+    {
+      "id": "tile_5_3",
+      "ix": 5,
+      "iy": 3,
+      "col0": 1950,
+      "row0": 1170,
+      "width": 400,
+      "height": 400,
+      "bbox": [
+        120.34369440484613,
+        31.480822380747394,
+        120.34790782737866,
+        31.484415625447358
+      ],
+      "pgm_path": "outputs/huazhuang/tiles/tile_5_3/map.pgm",
+      "yaml_path": "outputs/huazhuang/tiles/tile_5_3/map.yaml"
+    },
+    {
+      "id": "tile_6_3",
+      "ix": 6,
+      "iy": 3,
+      "col0": 2340,
+      "row0": 1170,
+      "width": 339,
+      "height": 400,
+      "bbox": [
+        120.34780249181536,
+        31.480822380747394,
+        120.35136521,
+        31.484415625447358
+      ],
+      "pgm_path": "outputs/huazhuang/tiles/tile_6_3/map.pgm",
+      "yaml_path": "outputs/huazhuang/tiles/tile_6_3/map.yaml"
+    },
+    {
+      "id": "tile_0_4",
+      "ix": 0,
+      "iy": 4,
+      "col0": 0,
+      "row0": 1560,
+      "width": 400,
+      "height": 400,
+      "bbox": [
+        120.32315397,
+        31.48432579432986,
+        120.32736739253254,
+        31.487919039029823
+      ],
+      "pgm_path": "outputs/huazhuang/tiles/tile_0_4/map.pgm",
+      "yaml_path": "outputs/huazhuang/tiles/tile_0_4/map.yaml"
+    },
+    {
+      "id": "tile_1_4",
+      "ix": 1,
+      "iy": 4,
+      "col0": 390,
+      "row0": 1560,
+      "width": 400,
+      "height": 400,
+      "bbox": [
+        120.32726205696923,
+        31.48432579432986,
+        120.33147547950176,
+        31.487919039029823
+      ],
+      "pgm_path": "outputs/huazhuang/tiles/tile_1_4/map.pgm",
+      "yaml_path": "outputs/huazhuang/tiles/tile_1_4/map.yaml"
+    },
+    {
+      "id": "tile_2_4",
+      "ix": 2,
+      "iy": 4,
+      "col0": 780,
+      "row0": 1560,
+      "width": 400,
+      "height": 400,
+      "bbox": [
+        120.33137014393846,
+        31.48432579432986,
+        120.33558356647099,
+        31.487919039029823
+      ],
+      "pgm_path": "outputs/huazhuang/tiles/tile_2_4/map.pgm",
+      "yaml_path": "outputs/huazhuang/tiles/tile_2_4/map.yaml"
+    },
+    {
+      "id": "tile_3_4",
+      "ix": 3,
+      "iy": 4,
+      "col0": 1170,
+      "row0": 1560,
+      "width": 400,
+      "height": 400,
+      "bbox": [
+        120.33547823090768,
+        31.48432579432986,
+        120.33969165344021,
+        31.487919039029823
+      ],
+      "pgm_path": "outputs/huazhuang/tiles/tile_3_4/map.pgm",
+      "yaml_path": "outputs/huazhuang/tiles/tile_3_4/map.yaml"
+    },
+    {
+      "id": "tile_4_4",
+      "ix": 4,
+      "iy": 4,
+      "col0": 1560,
+      "row0": 1560,
+      "width": 400,
+      "height": 400,
+      "bbox": [
+        120.33958631787691,
+        31.48432579432986,
+        120.34379974040944,
+        31.487919039029823
+      ],
+      "pgm_path": "outputs/huazhuang/tiles/tile_4_4/map.pgm",
+      "yaml_path": "outputs/huazhuang/tiles/tile_4_4/map.yaml"
+    },
+    {
+      "id": "tile_5_4",
+      "ix": 5,
+      "iy": 4,
+      "col0": 1950,
+      "row0": 1560,
+      "width": 400,
+      "height": 400,
+      "bbox": [
+        120.34369440484613,
+        31.48432579432986,
+        120.34790782737866,
+        31.487919039029823
+      ],
+      "pgm_path": "outputs/huazhuang/tiles/tile_5_4/map.pgm",
+      "yaml_path": "outputs/huazhuang/tiles/tile_5_4/map.yaml"
+    },
+    {
+      "id": "tile_6_4",
+      "ix": 6,
+      "iy": 4,
+      "col0": 2340,
+      "row0": 1560,
+      "width": 339,
+      "height": 400,
+      "bbox": [
+        120.34780249181536,
+        31.48432579432986,
+        120.35136521,
+        31.487919039029823
+      ],
+      "pgm_path": "outputs/huazhuang/tiles/tile_6_4/map.pgm",
+      "yaml_path": "outputs/huazhuang/tiles/tile_6_4/map.yaml"
+    },
+    {
+      "id": "tile_0_5",
+      "ix": 0,
+      "iy": 5,
+      "col0": 0,
+      "row0": 1950,
+      "width": 400,
+      "height": 400,
+      "bbox": [
+        120.32315397,
+        31.487829207912323,
+        120.32736739253254,
+        31.491422452612287
+      ],
+      "pgm_path": "outputs/huazhuang/tiles/tile_0_5/map.pgm",
+      "yaml_path": "outputs/huazhuang/tiles/tile_0_5/map.yaml"
+    },
+    {
+      "id": "tile_1_5",
+      "ix": 1,
+      "iy": 5,
+      "col0": 390,
+      "row0": 1950,
+      "width": 400,
+      "height": 400,
+      "bbox": [
+        120.32726205696923,
+        31.487829207912323,
+        120.33147547950176,
+        31.491422452612287
+      ],
+      "pgm_path": "outputs/huazhuang/tiles/tile_1_5/map.pgm",
+      "yaml_path": "outputs/huazhuang/tiles/tile_1_5/map.yaml"
+    },
+    {
+      "id": "tile_2_5",
+      "ix": 2,
+      "iy": 5,
+      "col0": 780,
+      "row0": 1950,
+      "width": 400,
+      "height": 400,
+      "bbox": [
+        120.33137014393846,
+        31.487829207912323,
+        120.33558356647099,
+        31.491422452612287
+      ],
+      "pgm_path": "outputs/huazhuang/tiles/tile_2_5/map.pgm",
+      "yaml_path": "outputs/huazhuang/tiles/tile_2_5/map.yaml"
+    },
+    {
+      "id": "tile_3_5",
+      "ix": 3,
+      "iy": 5,
+      "col0": 1170,
+      "row0": 1950,
+      "width": 400,
+      "height": 400,
+      "bbox": [
+        120.33547823090768,
+        31.487829207912323,
+        120.33969165344021,
+        31.491422452612287
+      ],
+      "pgm_path": "outputs/huazhuang/tiles/tile_3_5/map.pgm",
+      "yaml_path": "outputs/huazhuang/tiles/tile_3_5/map.yaml"
+    },
+    {
+      "id": "tile_4_5",
+      "ix": 4,
+      "iy": 5,
+      "col0": 1560,
+      "row0": 1950,
+      "width": 400,
+      "height": 400,
+      "bbox": [
+        120.33958631787691,
+        31.487829207912323,
+        120.34379974040944,
+        31.491422452612287
+      ],
+      "pgm_path": "outputs/huazhuang/tiles/tile_4_5/map.pgm",
+      "yaml_path": "outputs/huazhuang/tiles/tile_4_5/map.yaml"
+    },
+    {
+      "id": "tile_5_5",
+      "ix": 5,
+      "iy": 5,
+      "col0": 1950,
+      "row0": 1950,
+      "width": 400,
+      "height": 400,
+      "bbox": [
+        120.34369440484613,
+        31.487829207912323,
+        120.34790782737866,
+        31.491422452612287
+      ],
+      "pgm_path": "outputs/huazhuang/tiles/tile_5_5/map.pgm",
+      "yaml_path": "outputs/huazhuang/tiles/tile_5_5/map.yaml"
+    },
+    {
+      "id": "tile_6_5",
+      "ix": 6,
+      "iy": 5,
+      "col0": 2340,
+      "row0": 1950,
+      "width": 339,
+      "height": 400,
+      "bbox": [
+        120.34780249181536,
+        31.487829207912323,
+        120.35136521,
+        31.491422452612287
+      ],
+      "pgm_path": "outputs/huazhuang/tiles/tile_6_5/map.pgm",
+      "yaml_path": "outputs/huazhuang/tiles/tile_6_5/map.yaml"
+    },
+    {
+      "id": "tile_0_6",
+      "ix": 0,
+      "iy": 6,
+      "col0": 0,
+      "row0": 2340,
+      "width": 400,
+      "height": 147,
+      "bbox": [
+        120.32315397,
+        31.491332621494788,
+        120.32736739253254,
+        31.49264771
+      ],
+      "pgm_path": "outputs/huazhuang/tiles/tile_0_6/map.pgm",
+      "yaml_path": "outputs/huazhuang/tiles/tile_0_6/map.yaml"
+    },
+    {
+      "id": "tile_1_6",
+      "ix": 1,
+      "iy": 6,
+      "col0": 390,
+      "row0": 2340,
+      "width": 400,
+      "height": 147,
+      "bbox": [
+        120.32726205696923,
+        31.491332621494788,
+        120.33147547950176,
+        31.49264771
+      ],
+      "pgm_path": "outputs/huazhuang/tiles/tile_1_6/map.pgm",
+      "yaml_path": "outputs/huazhuang/tiles/tile_1_6/map.yaml"
+    },
+    {
+      "id": "tile_2_6",
+      "ix": 2,
+      "iy": 6,
+      "col0": 780,
+      "row0": 2340,
+      "width": 400,
+      "height": 147,
+      "bbox": [
+        120.33137014393846,
+        31.491332621494788,
+        120.33558356647099,
+        31.49264771
+      ],
+      "pgm_path": "outputs/huazhuang/tiles/tile_2_6/map.pgm",
+      "yaml_path": "outputs/huazhuang/tiles/tile_2_6/map.yaml"
+    },
+    {
+      "id": "tile_3_6",
+      "ix": 3,
+      "iy": 6,
+      "col0": 1170,
+      "row0": 2340,
+      "width": 400,
+      "height": 147,
+      "bbox": [
+        120.33547823090768,
+        31.491332621494788,
+        120.33969165344021,
+        31.49264771
+      ],
+      "pgm_path": "outputs/huazhuang/tiles/tile_3_6/map.pgm",
+      "yaml_path": "outputs/huazhuang/tiles/tile_3_6/map.yaml"
+    },
+    {
+      "id": "tile_4_6",
+      "ix": 4,
+      "iy": 6,
+      "col0": 1560,
+      "row0": 2340,
+      "width": 400,
+      "height": 147,
+      "bbox": [
+        120.33958631787691,
+        31.491332621494788,
+        120.34379974040944,
+        31.49264771
+      ],
+      "pgm_path": "outputs/huazhuang/tiles/tile_4_6/map.pgm",
+      "yaml_path": "outputs/huazhuang/tiles/tile_4_6/map.yaml"
+    },
+    {
+      "id": "tile_5_6",
+      "ix": 5,
+      "iy": 6,
+      "col0": 1950,
+      "row0": 2340,
+      "width": 400,
+      "height": 147,
+      "bbox": [
+        120.34369440484613,
+        31.491332621494788,
+        120.34790782737866,
+        31.49264771
+      ],
+      "pgm_path": "outputs/huazhuang/tiles/tile_5_6/map.pgm",
+      "yaml_path": "outputs/huazhuang/tiles/tile_5_6/map.yaml"
+    },
+    {
+      "id": "tile_6_6",
+      "ix": 6,
+      "iy": 6,
+      "col0": 2340,
+      "row0": 2340,
+      "width": 339,
+      "height": 147,
+      "bbox": [
+        120.34780249181536,
+        31.491332621494788,
+        120.35136521,
+        31.49264771
+      ],
+      "pgm_path": "outputs/huazhuang/tiles/tile_6_6/map.pgm",
+      "yaml_path": "outputs/huazhuang/tiles/tile_6_6/map.yaml"
+    }
+  ]
+}
