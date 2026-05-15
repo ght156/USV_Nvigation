@@ -32,6 +32,10 @@ Makefile
 *.swp
 *~
 
+# 大数据 / 部署文件（不上传）
+map/
+tools/
+
 # 系统
 .DS_Store
 Thumbs.db
