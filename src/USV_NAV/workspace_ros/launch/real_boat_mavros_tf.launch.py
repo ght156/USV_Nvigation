@@ -37,7 +37,7 @@ def generate_launch_description():
     map_odom_yaw_deg = LaunchConfiguration('map_odom_yaw_deg')
 
     default_map_yaml = PathJoinSubstitution(
-        [FindPackageShare('workspace_nav'), 'config', 'map.yaml'])
+        [FindPackageShare('workspace_nav'), 'config', 'map_real_boat_hk.yaml'])
 
     declare_static = DeclareLaunchArgument(
         'static_transform_file',

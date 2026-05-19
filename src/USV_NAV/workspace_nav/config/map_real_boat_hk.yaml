@@ -1,6 +1,6 @@
 # 无锡园区 HK 栅格（实船 Nav2 默认 map，见 nav2_real_mavros.launch.py）。
 # 源数据副本：仓库根目录 map/HK/；为避免与仿真 map.pgm 安装重名，包内命名为 hk_map.pgm。
-# ref_gnss_*：每条为 [longitude, latitude]（度）。模式 B 不自动用其对齐，供 QGC HOME / 人工核对。
+# ref_gnss_*：每条为 [longitude, latitude]（度）。gnss_odom_map_tf / waypoint_transform 须与此一致。
 image: ../map/hk_map.pgm
 resolution: 1.0
 origin:

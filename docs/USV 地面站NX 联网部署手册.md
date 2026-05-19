@@ -77,7 +77,7 @@ export ROS_LOCALHOST_ONLY=0
 ```bash
 # ===== ROS2 Ground Station =====
 source /opt/ros/humble/setup.bash
-source ~/wuxihik_navigation/install/setup.bash
+source ~/USV_NAV/install/setup.bash   # 实船主仓；仿真副本为 ~/wuxihik_navigation
 
 # 与船端统一 Domain
 export ROS_DOMAIN_ID=20

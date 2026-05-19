@@ -155,7 +155,7 @@ class GPSToFile(Node):
 
         self.declare_parameter('datum_source', 'map_yaml')
         self.declare_parameter('map_yaml_path', '')
-        self.declare_parameter('gps_topic', '/gps/filtered')
+        self.declare_parameter('gps_topic', '/mavros/global_position/global')
         self.declare_parameter('map_datum_ref_key', 'ref_gnss_10')
         self.declare_parameter('projection', 'enu')
 
@@ -169,6 +169,11 @@ class GPSToFile(Node):
         self._map_yaml_resolved = ''
         self._datum_ref_key = (ref_key or 'ref_gnss_10').strip() or 'ref_gnss_10'
         self._projection = projection if projection in ('enu', 'utm') else 'enu'
+        if self._projection == 'utm':
+            self.get_logger().warning(
+                'projection=utm is not recommended for Nav2 map-frame waypoint conversion. '
+                'Use projection=enu unless you know the map datum and UTM zone are consistent.'
+            )
         self._map_ox = 0.0
         self._map_oy = 0.0
         self._map_origin_yaw = 0.0
@@ -182,7 +187,7 @@ class GPSToFile(Node):
             else:
                 try:
                     share = Path(get_package_share_directory('workspace_nav'))
-                    map_path = (share / 'config' / 'map.yaml').resolve()
+                    map_path = (share / 'config' / 'map_real_boat_hk.yaml').resolve()
                 except Exception as e:
                     self.get_logger().fatal(f'无法解析 map.yaml 路径: {e}')
                     raise SystemExit(1) from e
@@ -203,12 +208,18 @@ class GPSToFile(Node):
             self.datum_easting = easting
             self.datum_northing = northing
             self._log_info_green(
-                f'map_yaml datum ref={self._datum_ref_key}: lat={lat}, lon={lon} | '
+                f'Using datum from map_yaml — '
+                f'ref={self._datum_ref_key}: lat={lat}, lon={lon} | '
                 f'map origin=({self._map_ox}, {self._map_oy}, yaw={self._map_origin_yaw:.6f} rad) | '
                 f'projection={self._projection} | file={map_path}'
             )
             self._map_yaml_resolved = str(map_path)
         elif source == 'first_gps':
+            self.get_logger().warning(
+                'datum_source=first_gps is deprecated for real USV use. '
+                'It makes map coordinates change after every boot. '
+                'Use datum_source=map_yaml for real boat navigation.'
+            )
             self.gps_sub = self.create_subscription(
                 NavSatFix, gps_topic, self.gps_callback, qos_profile=qos
             )
@@ -241,16 +252,72 @@ class GPSToFile(Node):
             if data_str.startswith('data: '):
                 data_str = data_str[6:].strip()
             json_data = json.loads(data_str)
-            waypoints_list = json_data.get('waypoints', [])
+
+            if 'waypoints' not in json_data:
+                self.get_logger().error(
+                    "Invalid waypoint message: missing 'waypoints' key"
+                )
+                return
+            waypoints_list = json_data['waypoints']
+            if not isinstance(waypoints_list, list):
+                self.get_logger().error(
+                    "Invalid waypoint message: 'waypoints' must be a list"
+                )
+                return
+            if len(waypoints_list) == 0:
+                self.get_logger().error(
+                    "Invalid waypoint message: 'waypoints' list is empty"
+                )
+                return
+
             parsed = []
-            for wp in waypoints_list:
+            for i, wp in enumerate(waypoints_list):
+                if not isinstance(wp, dict):
+                    self.get_logger().error(
+                        f'Waypoint #{i + 1}: invalid format, expected object'
+                    )
+                    return
+                if 'latitude' not in wp:
+                    self.get_logger().error(
+                        f"Waypoint #{i + 1}: missing 'latitude'"
+                    )
+                    return
+                if 'longitude' not in wp:
+                    self.get_logger().error(
+                        f"Waypoint #{i + 1}: missing 'longitude'"
+                    )
+                    return
                 lat = float(wp['latitude'])
                 lon = float(wp['longitude'])
+                if lat == 0.0 and lon == 0.0:
+                    self.get_logger().error(
+                        f'Waypoint #{i + 1}: latitude and longitude are both 0.0'
+                    )
+                    return
+                if lat < -90.0 or lat > 90.0:
+                    self.get_logger().error(
+                        f'Waypoint #{i + 1}: latitude {lat} out of range [-90, 90]'
+                    )
+                    return
+                if lon < -180.0 or lon > 180.0:
+                    self.get_logger().error(
+                        f'Waypoint #{i + 1}: longitude {lon} out of range [-180, 180]'
+                    )
+                    return
                 parsed.append((lat, lon))
+
             self.waypoints = parsed
-            self._log_info_green(f'Received {len(self.waypoints)} waypoint(s).')
+            self._log_info_green(f'Received {len(self.waypoints)} waypoint(s)')
+            self.get_logger().info(
+                f'Using datum from {self._datum_source}'
+            )
+            self.get_logger().info(
+                f'Using projection {self._projection}'
+            )
             self.waypoint_received = True
             self.try_conversion()
+        except json.JSONDecodeError as e:
+            self.get_logger().error(f'Failed to parse JSON: {e}')
         except Exception as e:
             self.get_logger().error(f'Failed to parse waypoint message: {e}')
 
@@ -356,7 +423,9 @@ class GPSToFile(Node):
             except Exception as e:
                 self.get_logger().error(f'Failed to verify written file: {e}')
                 return
-            self._log_info_green(f'Waypoints written to {OUTPUT_PATH} ({len(self.waypoints)} entries).')
+            self._log_info_green(
+                f'Waypoints written to {OUTPUT_PATH}'
+            )
             self.is_done = True
         except Exception as e:
             self.get_logger().error(f'Conversion failed: {e}')

@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 
 # ----------------------------------------------------------------------------------------------- #
-# 实船专用 Nav2 启动：默认 nav2_params_real_mavros.yaml + config/map.yaml。
-# 不改变 nav2.launch.py；仿真亦为 config/map.yaml + map/map.pgm。
+# 实船 Nav2：默认 nav2_params_real_mavros.yaml + map_real_boat_hk.yaml。
 # ----------------------------------------------------------------------------------------------- #
 
 import os
