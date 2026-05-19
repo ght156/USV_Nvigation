@@ -4,34 +4,43 @@
 #  地面站 /waypoint（经纬度）→ waypoints.json 中 Nav2 map 坐标 x,y（geometry_msgs / map 帧）。
 #
 #  与纯「相对 datum 的 UTM 米」不同：必须对齐 map_server 的 map.yaml：
-#    - ref_gnss_*：地图角点经纬度（与 navsat.yaml datum 同源），表示该角在地图中的物理含义；
+#    - ref_gnss_*：地图角点经纬度（与 navsat 固定 datum 同源），表示该角在地图中的物理含义；
 #    - origin: [ox, oy, yaw]：单元格 (0,0) 在 map 世界系中的位姿（米、弧度），Nav2 目标点应落在该系下。
 #
-#  转换步骤：经纬度差 → 以 datum 为原点的局部 ENU（东、北，米，与 robot_localization navsat 小范围平面一致）
+#  转换步骤：经纬度差 → 以 datum 为原点的局部 ENU（东、北，米）
 #          → 按 origin.yaw 旋转并加 origin 平移，得到 map 世界 (x, y)。
 #
-#  datum 默认 map.yaml ref（与 navsat 固定 datum 一致）；datum_source:=first_gps 可恢复旧行为。
+#  datum 默认 map_yaml；datum_source:=first_gps 兼容旧仿真行为。
+#  载荷格式与 mission_bridge / USV_NAV 一致：顶层 list 或 {"waypoints":[...]}，点为对象或 [lat,lon]。
+#
+#  坐标逻辑见 workspace_nav.gps_map_conversion（与 mission_bridge 共用）。
 # ----------------------------------------------------------------------------------------------- #
 
-import json
-import os
-import tempfile
-from pathlib import Path
-from typing import Optional, Tuple
-
-import math
-import utm
-import yaml
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy
 from sensor_msgs.msg import NavSatFix
 from std_msgs.msg import String
+from pathlib import Path
+from typing import Optional
+
+import utm
+import yaml
 from ament_index_python.packages import get_package_share_directory
+
+from workspace_nav.gps_map_conversion import (
+    atomic_write_json,
+    datum_lat_lon_from_cfg,
+    lat_lon_list_to_waypoints_document,
+    parse_waypoint_payload,
+    read_map_origin,
+    verify_waypoints_file,
+)
 
 GREEN = '\x1b[32m'
 RESET = '\x1b[0m'
 TARGET_FILENAME = "waypoints.json"
+
 
 def find_workspace_root() -> Optional[Path]:
     try:
@@ -55,7 +64,9 @@ def find_workspace_root() -> Optional[Path]:
                 return p
     return None
 
-def make_output_paths() -> Tuple[Path, Path]:
+
+def make_output_paths() -> tuple:
+    import os
     env_path = os.environ.get("WAYPOINT_OUTPUT_PATH")
     if env_path:
         p = Path(env_path).resolve()
@@ -101,64 +112,8 @@ def make_output_paths() -> Tuple[Path, Path]:
     fallback_dir = cwd_y.parent
     return fallback_dir, cwd_y
 
+
 OUTPUT_DIR, OUTPUT_PATH = make_output_paths()
-
-
-def _read_map_ref_lon_lat(cfg: dict, ref_key: str) -> Tuple[float, float]:
-    """yaml 中 ref 列表为 [longitude, latitude]，返回 (latitude, longitude)。"""
-    if ref_key not in cfg:
-        raise ValueError(f"map.yaml 中未找到 {ref_key}")
-    arr = cfg[ref_key]
-    lon = float(arr[0])
-    lat = float(arr[1])
-    return lat, lon
-
-
-def _datum_lat_lon_from_cfg(cfg: dict, ref_key: str) -> Tuple[float, float]:
-    if ref_key and ref_key.strip() and ref_key in cfg:
-        return _read_map_ref_lon_lat(cfg, ref_key)
-    for key in ("ref_gnss_10", "ref_gnss"):
-        if key not in cfg:
-            continue
-        arr = cfg[key]
-        lon = float(arr[0])
-        lat = float(arr[1])
-        return lat, lon
-    raise ValueError("map.yaml 中未找到 ref_gnss_10 / ref_gnss 或指定 datum_ref_key")
-
-
-def _read_map_origin(cfg: dict) -> Tuple[float, float, float]:
-    """map_server 风格 origin: [ox, oy, yaw_rad]。缺省为 (0,0,0)。"""
-    origin = cfg.get("origin")
-    if not origin:
-        return 0.0, 0.0, 0.0
-    if isinstance(origin, (list, tuple)):
-        ox = float(origin[0]) if len(origin) > 0 else 0.0
-        oy = float(origin[1]) if len(origin) > 1 else 0.0
-        oyaw = float(origin[2]) if len(origin) > 2 else 0.0
-        return ox, oy, oyaw
-    return 0.0, 0.0, 0.0
-
-
-def _geodetic_delta_enu_m(lat0: float, lon0: float, lat: float, lon: float) -> Tuple[float, float]:
-    """以 (lat0,lon0) 为切点的局部 ENU：x 东、y 北（米）。与 navsat 小范围平面逼近一致。"""
-    r_earth = 6378137.0
-    dlat = math.radians(lat - lat0)
-    dlon = math.radians(lon - lon0)
-    east = r_earth * math.cos(math.radians(lat0)) * dlon
-    north = r_earth * dlat
-    return east, north
-
-
-def _enu_delta_to_map_xy(
-    east: float, north: float, ox: float, oy: float, origin_yaw: float
-) -> Tuple[float, float]:
-    """ENU 米偏移（相对与地图 ref 重合的角点）→ map 世界坐标（与 map_server/costmap 公式一致）。"""
-    c = math.cos(origin_yaw)
-    s = math.sin(origin_yaw)
-    mx = ox + east * c - north * s
-    my = oy + east * s + north * c
-    return mx, my
 
 
 class GPSToFile(Node):
@@ -211,13 +166,13 @@ class GPSToFile(Node):
                     self.get_logger().fatal(f'无法解析 map.yaml 路径: {e}')
                     raise SystemExit(1) from e
             if not map_path.is_file():
-                self.get_logger().fatal(f'map.yaml 不存在: {map_path}')
+                self.get_logger().fatal(f'map yaml 不存在: {map_path}')
                 raise SystemExit(1)
             try:
                 with map_path.open("r", encoding="utf-8") as f:
                     cfg = yaml.safe_load(f)
-                lat, lon = _datum_lat_lon_from_cfg(cfg, self._datum_ref_key)
-                self._map_ox, self._map_oy, self._map_origin_yaw = _read_map_origin(cfg)
+                lat, lon = datum_lat_lon_from_cfg(cfg, self._datum_ref_key)
+                self._map_ox, self._map_oy, self._map_origin_yaw = read_map_origin(cfg)
             except Exception as e:
                 self.get_logger().fatal(f'读取地图 datum/origin 失败: {e}')
                 raise SystemExit(1) from e
@@ -234,11 +189,6 @@ class GPSToFile(Node):
             )
             self._map_yaml_resolved = str(map_path)
         elif source == 'first_gps':
-            self.get_logger().warning(
-                'datum_source=first_gps is deprecated for real USV use. '
-                'It makes map coordinates change after every boot. '
-                'Use datum_source=map_yaml for real boat navigation.'
-            )
             self.gps_sub = self.create_subscription(
                 NavSatFix, gps_topic, self.gps_callback, qos_profile=qos
             )
@@ -266,79 +216,19 @@ class GPSToFile(Node):
     def waypoint_callback(self, msg: String):
         if self.waypoint_received:
             return
-        try:
-            data_str = str(msg.data).strip()
-            if data_str.startswith('data: '):
-                data_str = data_str[6:].strip()
-            json_data = json.loads(data_str)
-
-            if 'waypoints' not in json_data:
-                self.get_logger().error(
-                    "Invalid waypoint message: missing 'waypoints' key"
-                )
-                return
-            waypoints_list = json_data['waypoints']
-            if not isinstance(waypoints_list, list):
-                self.get_logger().error(
-                    "Invalid waypoint message: 'waypoints' must be a list"
-                )
-                return
-            if len(waypoints_list) == 0:
-                self.get_logger().error(
-                    "Invalid waypoint message: 'waypoints' list is empty"
-                )
-                return
-
-            parsed = []
-            for i, wp in enumerate(waypoints_list):
-                if not isinstance(wp, dict):
-                    self.get_logger().error(
-                        f'Waypoint #{i + 1}: invalid format, expected object'
-                    )
-                    return
-                if 'latitude' not in wp:
-                    self.get_logger().error(
-                        f"Waypoint #{i + 1}: missing 'latitude'"
-                    )
-                    return
-                if 'longitude' not in wp:
-                    self.get_logger().error(
-                        f"Waypoint #{i + 1}: missing 'longitude'"
-                    )
-                    return
-                lat = float(wp['latitude'])
-                lon = float(wp['longitude'])
-                if lat == 0.0 and lon == 0.0:
-                    self.get_logger().error(
-                        f'Waypoint #{i + 1}: latitude and longitude are both 0.0'
-                    )
-                    return
-                if lat < -90.0 or lat > 90.0:
-                    self.get_logger().error(
-                        f'Waypoint #{i + 1}: latitude {lat} out of range [-90, 90]'
-                    )
-                    return
-                if lon < -180.0 or lon > 180.0:
-                    self.get_logger().error(
-                        f'Waypoint #{i + 1}: longitude {lon} out of range [-180, 180]'
-                    )
-                    return
-                parsed.append((lat, lon))
-
-            self.waypoints = parsed
-            self._log_info_green(f'Received {len(self.waypoints)} waypoint(s)')
-            self.get_logger().info(
-                f'Using datum from {self._datum_source}'
+        parsed = parse_waypoint_payload(msg.data)
+        if not parsed:
+            self.get_logger().error(
+                'Invalid waypoint message (expect list / {"waypoints":[...]}, lat/lon objects or tuples)'
             )
-            self.get_logger().info(
-                f'Using projection {self._projection}'
-            )
-            self.waypoint_received = True
-            self.try_conversion()
-        except json.JSONDecodeError as e:
-            self.get_logger().error(f'Failed to parse JSON: {e}')
-        except Exception as e:
-            self.get_logger().error(f'Failed to parse waypoint message: {e}')
+            return
+
+        self.waypoints = parsed
+        self._log_info_green(f'Received {len(self.waypoints)} waypoint(s)')
+        self.get_logger().info(f'Using datum from {self._datum_source}')
+        self.get_logger().info(f'Using projection {self._projection}')
+        self.waypoint_received = True
+        self.try_conversion()
 
     def gps_callback(self, msg: NavSatFix):
         if self.datum_lat is not None and self.datum_lon is not None:
@@ -361,93 +251,32 @@ class GPSToFile(Node):
             return
         try:
             OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-            output = {
-                "waypoints": [],
-                "datum": {
-                    "latitude": float(self.datum_lat),
-                    "longitude": float(self.datum_lon)
-                },
-                "datum_source_meta": {
-                    "datum_source": self._datum_source,
-                    "map_yaml": self._map_yaml_resolved or None,
-                    "map_datum_ref_key": self._datum_ref_key if self._datum_source == 'map_yaml' else None,
-                    "projection": self._projection,
-                },
-                "map_frame_meta": {
-                    "frame_id": "map",
-                    "description": (
-                        "x,y 为 Nav2 map 坐标（米）。datum_source=map_yaml 时已应用 map.yaml 的 origin 平移与旋转；"
-                        "first_gps 时为相对首帧 GPS 的平面坐标，不一定与 map 一致。"
-                    ),
-                    "origin_x": float(self._map_ox),
-                    "origin_y": float(self._map_oy),
-                    "origin_yaw_rad": float(self._map_origin_yaw),
-                    "applied_origin_transform": bool(self._datum_source == 'map_yaml'),
-                },
-            }
-            for lat, lon in self.waypoints:
-                if self._projection == 'utm':
-                    easting, northing, _, _ = utm.from_latlon(float(lat), float(lon))
-                    east = float(easting - self.datum_easting)
-                    north = float(northing - self.datum_northing)
-                else:
-                    east, north = _geodetic_delta_enu_m(
-                        float(self.datum_lat),
-                        float(self.datum_lon),
-                        float(lat),
-                        float(lon),
-                    )
-                if self._datum_source == 'map_yaml':
-                    x, y = _enu_delta_to_map_xy(
-                        east, north, self._map_ox, self._map_oy, self._map_origin_yaw
-                    )
-                else:
-                    x, y = east, north
-                output["waypoints"].append({
-                    "latitude": float(lat),
-                    "longitude": float(lon),
-                    "x": round(x, 4),
-                    "y": round(y, 4)
-                })
-            fd = None
-            tmp_path = None
-            try:
-                fd, tmp_path = tempfile.mkstemp(dir=str(OUTPUT_DIR), prefix='waypoints_', suffix='.tmp')
-                with os.fdopen(fd, 'w') as tf:
-                    json.dump(output, tf, indent=2)
-                    tf.flush()
-                    os.fsync(tf.fileno())
-                if OUTPUT_PATH.exists():
-                    try:
-                        OUTPUT_PATH.unlink()
-                    except Exception:
-                        pass
-                os.replace(tmp_path, str(OUTPUT_PATH))
-                tmp_path = None
-            finally:
-                try:
-                    if tmp_path and os.path.exists(tmp_path):
-                        os.remove(tmp_path)
-                except Exception:
-                    pass
-            try:
-                with open(OUTPUT_PATH, 'r') as vf:
-                    loaded = json.load(vf)
-                if not isinstance(loaded, dict) or 'waypoints' not in loaded or 'datum' not in loaded:
-                    self.get_logger().error('Verification failed: written file content is invalid or missing required keys.')
-                    return
-                if not isinstance(loaded.get('waypoints'), list) or not isinstance(loaded.get('datum'), dict):
-                    self.get_logger().error('Verification failed: invalid types in written file.')
-                    return
-            except Exception as e:
-                self.get_logger().error(f'Failed to verify written file: {e}')
-                return
-            self._log_info_green(
-                f'Waypoints written to {OUTPUT_PATH}'
+            output = lat_lon_list_to_waypoints_document(
+                self.waypoints,
+                float(self.datum_lat),
+                float(self.datum_lon),
+                float(self.datum_easting),
+                float(self.datum_northing),
+                self._projection,
+                self._datum_source,
+                self._map_yaml_resolved or '',
+                self._datum_ref_key,
+                self._map_ox,
+                self._map_oy,
+                self._map_origin_yaw,
             )
+            atomic_write_json(OUTPUT_DIR, OUTPUT_PATH, output)
+
+            if not verify_waypoints_file(OUTPUT_PATH):
+                self.get_logger().error(
+                    'Verification failed: written file content is invalid or missing required keys.'
+                )
+                return
+            self._log_info_green(f'Waypoints written to {OUTPUT_PATH}')
             self.is_done = True
         except Exception as e:
             self.get_logger().error(f'Conversion failed: {e}')
+
 
 def main(args=None):
     rclpy.init(args=args)
@@ -462,6 +291,7 @@ def main(args=None):
         except Exception:
             pass
         rclpy.shutdown()
+
 
 if __name__ == '__main__':
     main()

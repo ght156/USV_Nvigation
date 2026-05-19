@@ -26,6 +26,14 @@ cmd_vel_to_thrusters_sim:
   converter: workspace_ros/scripts/converter.py
   manual_keyboard: workspace_ros/scripts/manual_control.py
 
+gcs_bridge_sim:
+  mission_bridge_node: workspace_nav/workspace_nav/mission_bridge.py
+  mission_bridge_launch: workspace_nav/launch/mission_bridge.launch.py
+  shared_conversion: workspace_nav/workspace_nav/gps_map_conversion.py
+  nav2_integration: >-
+    ros2 launch workspace_nav nav2.launch.py … enable_mission_bridge:=true
+    （map_yaml_path 与 map:= 一致由 launch 传入）
+
 sensor_tf:
   simulation: workspace_ros/config/static_transform.yaml
 
@@ -33,8 +41,6 @@ localization_frames:
   ekf: workspace_ros/config/ekf.yaml
   navsat: workspace_ros/config/navsat.yaml
 
-optional_mavros_overlay_for_hil:
-  note: >-
-    仅当在仿真外接 MAVROS 做对比或 HIL 时使用；合并层为
-    workspace_nav/config/nav2_mavros_odom_overlay.yaml（launch 参数 use_mavros_odometry）。
+mavros_nav2_odometry:
+  note: 本仓已移除 MAVROS Nav2 overlay；若需 /mavros/local_position/odom 驱动的 Nav2 参数请在 USV_NAV 维护。
   upstream_real_boat_launch_and_configs: USV_NAV 仓库

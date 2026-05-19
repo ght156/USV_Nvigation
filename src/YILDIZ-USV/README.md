@@ -33,7 +33,7 @@ source install/setup.bash
 |:---:|------|
 | **1** | `ros2 launch workspace_gz simulation.launch.py` |
 | **2** | `ros2 launch workspace_ros localization.launch.py use_sim_time:=true` |
-| **3** | `ros2 launch workspace_nav nav2.launch.py use_sim_time:=true` |
+| **3** | `ros2 launch workspace_nav nav2.launch.py use_sim_time:=true`（地面站联调可加 **`enable_mission_bridge:=true`**） |
 
 可选第四终端：`ros2 run workspace_ros converter`（`/cmd_vel_nav` → 仿真推进器）。
 
