@@ -4,9 +4,8 @@
 # Real-boat stack starter（MAVROS 需另开终端先行启动）。
 #
 # localization_backend：
-#   - robot_localization：EKF / navsat_transform + 静态 TF（与仿真链路一致，仍用 static_transform.yaml）
-#   - mavros_odom：**暂用 MAVROS PX4 融合位姿**：不启动 EKF/NAVSAT，仅用静态 TF；
-#               默认 static_transform_real_boat.yaml（接到 base_link）。
+#   - robot_localization：引用 localization.launch.py（本仓未提供，勿用）
+#   - mavros_odom（默认）：MAVROS 融合位姿 + gnss_odom_map_tf + static_transform_real_boat.yaml
 # ----------------------------------------------------------------------------------------------- #
 
 from pathlib import Path
@@ -49,7 +48,7 @@ def generate_launch_description():
     use_robot_loc = EqualsSubstitution(localization_backend, 'robot_localization')
 
     default_map_yaml = PathJoinSubstitution(
-        [FindPackageShare('workspace_nav'), 'config', 'map_real_boat_hk.yaml'])
+        [FindPackageShare('workspace_nav'), 'config', 'map.yaml'])
 
     return LaunchDescription([
         DeclareLaunchArgument(
@@ -60,11 +59,11 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'enable_nav2_cmd_vel_to_mavros',
             default_value='false',
-            description='Nav2 /cmd_vel_nav (controller raw, bypass smoother) → MAVROS setpoint_velocity',
+            description='Nav2 cmd_vel bridge (default /cmd_vel_nav, bypass smoother) → MAVROS setpoint_raw/local',
         ),
         DeclareLaunchArgument(
             'localization_backend',
-            default_value='robot_localization',
+            default_value='mavros_odom',
             description='robot_localization | mavros_odom',
         ),
         DeclareLaunchArgument(

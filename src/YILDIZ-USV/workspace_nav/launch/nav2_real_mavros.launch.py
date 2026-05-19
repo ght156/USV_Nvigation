@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 
 # ----------------------------------------------------------------------------------------------- #
-# 实船专用 Nav2 启动：默认 nav2_params_real_mavros.yaml + config/map_real_boat_hk.yaml（HK 园区图）。
-# 不改变 nav2.launch.py；仿真仍为 config/map.yaml + map/map.pgm。
+# 实船 Nav2：默认 nav2_params_real_mavros.yaml + map_real_boat_hk.yaml。
 # ----------------------------------------------------------------------------------------------- #
 
 import os
@@ -22,7 +21,7 @@ def generate_launch_description():
 
     real_nav2_config = PathJoinSubstitution(
         [package_share, 'config', 'nav2_params_real_mavros.yaml'])
-    map_default = PathJoinSubstitution([package_share, 'config', 'map_real_boat_hk.yaml'])
+    map_default = PathJoinSubstitution([package_share, 'config', 'map.yaml'])
 
     map_arg = LaunchConfiguration('map')
     use_sim_time = LaunchConfiguration('use_sim_time')
@@ -39,7 +38,7 @@ def generate_launch_description():
     declare_map = DeclareLaunchArgument(
         'map',
         default_value=map_default,
-        description='实船默认 HK 园区图（map_real_boat_hk.yaml）；可 map:=/绝对路径/其它.yaml 覆盖',
+        description='实船默认 map.yaml；可 map:=/绝对路径/其它.yaml 覆盖',
     )
 
     declare_use_sim_time = DeclareLaunchArgument(

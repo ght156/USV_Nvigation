@@ -3,11 +3,8 @@
 # ----------------------------------------------------------------------------------------------- #
 #  Node that monitors a waypoint JSON file, loads and validates waypoint lists, and dispatches
 #  each waypoint to the Nav2 FollowWaypoints action server. It observes odometry to skip waypoints
-#  within tolerance, handles action responses and results, clears the waypoint file on completion,
-#  and may launch a post-navigation "kamikaze" script as a subprocess while ensuring robust process-
-#  group termination and cleanup. The node resolves the waypoint file path from environment,
-#  package share or workspace locations, logs detailed state transitions and errors, and supports a
-#  graceful shutdown sequence that terminates any spawned child processes.
+#  within tolerance, handles action responses and results, and clears the waypoint file on completion.
+#  The node resolves the waypoint file path from environment, package share or workspace locations.
 # ----------------------------------------------------------------------------------------------- #
 
 import os
@@ -15,9 +12,6 @@ import math
 import json
 import rclpy
 import threading
-import subprocess
-import sys
-import signal
 from pathlib import Path
 from typing import Optional, List, Tuple
 
@@ -45,9 +39,9 @@ def find_workspace_root() -> Optional[Path]:
             if p in seen:
                 continue
             seen.add(p)
-            if (p / "src" / "YILDIZ-USV").is_dir():
+            if (p / "src" / "USV_NAV").is_dir():
                 return p
-            if (p / "YILDIZ-USV").is_dir():
+            if (p / "USV_NAV").is_dir():
                 return p
     return None
 
@@ -64,42 +58,19 @@ def make_waypoint_path() -> Path:
         pass
     ws_root = find_workspace_root()
     if ws_root is not None:
-        candidate1 = (ws_root / "src" / "YILDIZ-USV" / "workspace_nav" / "json" / WAYPOINT_FILENAME).resolve()
+        candidate1 = (ws_root / "src" / "USV_NAV" / "workspace_nav" / "json" / WAYPOINT_FILENAME).resolve()
         if candidate1.exists():
             return candidate1
-        candidate2 = (ws_root / "YILDIZ-USV" / "workspace_nav" / "json" / WAYPOINT_FILENAME).resolve()
+        candidate2 = (ws_root / "USV_NAV" / "workspace_nav" / "json" / WAYPOINT_FILENAME).resolve()
         if candidate2.exists():
             return candidate2
-        candidate3 = (ws_root / "src" / "YILDIZ-USV" / "workspace_nav" / "json" / WAYPOINT_FILENAME).resolve()
+        candidate3 = (ws_root / "src" / "USV_NAV" / "workspace_nav" / "json" / WAYPOINT_FILENAME).resolve()
         return candidate3
-    home_candidate = Path.home() / "yildiz_ws" / "src" / "YILDIZ-USV" / "workspace_nav" / "json" / WAYPOINT_FILENAME
+    home_candidate = Path.home() / "usv_nav_ws" / "src" / "USV_NAV" / "workspace_nav" / "json" / WAYPOINT_FILENAME
     if home_candidate.exists():
         return home_candidate.resolve()
-    default = Path.cwd().resolve() / "src" / "YILDIZ-USV" / "workspace_nav" / "json" / WAYPOINT_FILENAME
+    default = Path.cwd().resolve() / "src" / "USV_NAV" / "workspace_nav" / "json" / WAYPOINT_FILENAME
     return default
-
-def find_kamikaze_script() -> Optional[Path]:
-    env_path = os.environ.get("KAMIKAZE_SCRIPT_PATH")
-    if env_path:
-        p = Path(env_path).expanduser().resolve()
-        if p.exists():
-            return p
-    try:
-        base = get_package_share_directory("workspace_ros")
-        candidate = Path(base) / "scripts" / "kamikaze.py"
-        if candidate.exists():
-            return candidate.resolve()
-    except Exception:
-        pass
-    ws_root = find_workspace_root()
-    if ws_root is not None:
-        candidate1 = (ws_root / "src" / "YILDIZ-USV" / "workspace_ros" / "scripts" / "kamikaze.py").resolve()
-        if candidate1.exists():
-            return candidate1
-        candidate2 = (ws_root / "YILDIZ-USV" / "workspace_ros" / "scripts" / "kamikaze.py").resolve()
-        if candidate2.exists():
-            return candidate2
-    return None
 
 class SimpleWaypointNavigator(Node):
     def __init__(self):
@@ -113,8 +84,6 @@ class SimpleWaypointNavigator(Node):
         self._file_state = None
         self.current_index = 0
         self.navigating = False
-        self.kamikaze_script_executed = False
-        self.kamikaze_process = None
         self._current_pose = (0.0, 0.0)
         self._pose_lock = threading.Lock()
         self.waypoint_follower = ActionClient(self, FollowWaypoints, 'follow_waypoints')
@@ -164,8 +133,31 @@ class SimpleWaypointNavigator(Node):
     def start_navigation(self):
         self._current_pose = (0.0, 0.0)
         self._pose_lock = threading.Lock()
-        self._odom_sub = self.create_subscription(Odometry, '/odometry/filtered', self._odom_callback, 10)
-        self._send_timer = self.create_timer(2.0, self.send_next_waypoint)
+
+        # odom topic parameter
+        self.declare_parameter(
+            'odom_topic',
+            '/mavros/local_position/odom'
+        )
+        odom_topic = self.get_parameter(
+            'odom_topic'
+        ).value
+
+        self.get_logger().info(
+            f'Using odom topic: {odom_topic}'
+        )
+
+        self._odom_sub = self.create_subscription(
+            Odometry,
+            odom_topic,
+            self._odom_callback,
+            10
+        )
+
+        self._send_timer = self.create_timer(
+            2.0,
+            self.send_next_waypoint
+        )
 
     def load_waypoints_from_file(self, path: Path) -> List[Tuple[float, float, float]]:
         points: List[Tuple[float, float, float]] = []
@@ -304,8 +296,13 @@ class SimpleWaypointNavigator(Node):
             self._log_info_green(f'Waypoint {self.current_index + 1} reached successfully.')
             self.current_index += 1
             if self.current_index >= len(self.waypoints):
-                self._log_info_green('All waypoints completed. Initiating post-navigation sequence.')
-                self.execute_kamikaze_script()
+                self.clear_waypoint_file()
+                self.get_logger().info(
+                    'All waypoints completed.'
+                )
+                self.get_logger().info(
+                    'Holding position.'
+                )
                 return
         self._send_timer = self.create_timer(1.0, self.send_next_waypoint)
 
@@ -318,61 +315,6 @@ class SimpleWaypointNavigator(Node):
         except Exception as e:
             self.get_logger().error(f'Failed to clear waypoint file: {e}')
 
-    def _terminate_process(self, proc: Optional[subprocess.Popen]):
-        if proc is None:
-            return
-        try:
-            if proc.poll() is None:
-                try:
-                    os.killpg(proc.pid, signal.SIGTERM)
-                except Exception:
-                    try:
-                        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-                    except Exception:
-                        pass
-                try:
-                    proc.wait(timeout=5)
-                except Exception:
-                    try:
-                        os.killpg(proc.pid, signal.SIGKILL)
-                    except Exception:
-                        pass
-        except Exception:
-            pass
-        finally:
-            try:
-                if proc.poll() is None:
-                    proc.kill()
-            except Exception:
-                pass
-
-    def execute_kamikaze_script(self):
-        if self.kamikaze_script_executed:
-            return
-        kamikaze_path = find_kamikaze_script()
-        kamikaze_started = False
-        try:
-            if kamikaze_path and kamikaze_path.exists():
-                self.get_logger().info('Starting kamikaze script.')
-                self.kamikaze_process = subprocess.Popen(
-                    [sys.executable, str(kamikaze_path)],
-                    preexec_fn=os.setsid,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-                kamikaze_started = True
-            else:
-                self.get_logger().error(f'kamikaze script not found at: {kamikaze_path}')
-        except Exception as e:
-            self.get_logger().error(f'Failed to start kamikaze script: {e}')
-            self.kamikaze_process = None
-        self.kamikaze_script_executed = kamikaze_started
-        if self.kamikaze_script_executed:
-            self.clear_waypoint_file()
-            self._log_info_green('Post-navigation kamikaze script launched. Navigator will remain running; press Ctrl+C to terminate and clean up child processes.')
-        else:
-            self.get_logger().error('No post-navigation scripts could be launched.')
-
 def main(args=None):
     rclpy.init(args=args)
     node = SimpleWaypointNavigator()
@@ -381,14 +323,6 @@ def main(args=None):
     except KeyboardInterrupt:
         node.get_logger().info('Waypoint navigator interrupted by user.')
     finally:
-        try:
-            node.get_logger().info('Terminating child processes if any.')
-        except Exception:
-            pass
-        try:
-            node._terminate_process(node.kamikaze_process)
-        except Exception:
-            pass
         try:
             node.destroy_node()
         except Exception:
