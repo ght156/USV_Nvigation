@@ -43,6 +43,10 @@ def find_workspace_root() -> Optional[Path]:
                 return p
             if (p / "USV_NAV").is_dir():
                 return p
+            if (p / "src" / "YILDIZ-USV" / "workspace_nav").is_dir():
+                return p
+            if (p / "YILDIZ-USV" / "workspace_nav").is_dir():
+                return p
     return None
 
 def make_waypoint_path() -> Path:
@@ -64,13 +68,27 @@ def make_waypoint_path() -> Path:
         candidate2 = (ws_root / "USV_NAV" / "workspace_nav" / "json" / WAYPOINT_FILENAME).resolve()
         if candidate2.exists():
             return candidate2
+        candidate_y1 = (
+            ws_root / "src" / "YILDIZ-USV" / "workspace_nav" / "json" / WAYPOINT_FILENAME
+        ).resolve()
+        if candidate_y1.exists():
+            return candidate_y1
+        candidate_y2 = (ws_root / "YILDIZ-USV" / "workspace_nav" / "json" / WAYPOINT_FILENAME).resolve()
+        if candidate_y2.exists():
+            return candidate_y2
         candidate3 = (ws_root / "src" / "USV_NAV" / "workspace_nav" / "json" / WAYPOINT_FILENAME).resolve()
         return candidate3
-    home_candidate = Path.home() / "usv_nav_ws" / "src" / "USV_NAV" / "workspace_nav" / "json" / WAYPOINT_FILENAME
-    if home_candidate.exists():
-        return home_candidate.resolve()
-    default = Path.cwd().resolve() / "src" / "USV_NAV" / "workspace_nav" / "json" / WAYPOINT_FILENAME
-    return default
+    home_candidate_usv = Path.home() / "usv_nav_ws" / "src" / "USV_NAV" / "workspace_nav" / "json" / WAYPOINT_FILENAME
+    if home_candidate_usv.exists():
+        return home_candidate_usv.resolve()
+    home_candidate_sim = Path.home() / "wuxihik_ws" / "src" / "YILDIZ-USV" / "workspace_nav" / "json" / WAYPOINT_FILENAME
+    if home_candidate_sim.exists():
+        return home_candidate_sim.resolve()
+    default_usv = Path.cwd().resolve() / "src" / "USV_NAV" / "workspace_nav" / "json" / WAYPOINT_FILENAME
+    if default_usv.parent.is_dir():
+        return default_usv
+    default_sim = Path.cwd().resolve() / "src" / "YILDIZ-USV" / "workspace_nav" / "json" / WAYPOINT_FILENAME
+    return default_sim
 
 class SimpleWaypointNavigator(Node):
     def __init__(self):
@@ -137,7 +155,7 @@ class SimpleWaypointNavigator(Node):
         # odom topic parameter
         self.declare_parameter(
             'odom_topic',
-            '/mavros/local_position/odom'
+            '/odometry/filtered'
         )
         odom_topic = self.get_parameter(
             'odom_topic'

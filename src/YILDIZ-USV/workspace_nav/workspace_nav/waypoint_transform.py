@@ -49,6 +49,10 @@ def find_workspace_root() -> Optional[Path]:
                 return p
             if (p / "USV_NAV" / "workspace_nav").is_dir():
                 return p
+            if (p / "src" / "YILDIZ-USV" / "workspace_nav").is_dir():
+                return p
+            if (p / "YILDIZ-USV" / "workspace_nav").is_dir():
+                return p
     return None
 
 def make_output_paths() -> Tuple[Path, Path]:
@@ -71,16 +75,31 @@ def make_output_paths() -> Tuple[Path, Path]:
         candidate2 = (ws_root / "USV_NAV" / "workspace_nav" / "json" / TARGET_FILENAME).resolve()
         if candidate2.parent.exists():
             return candidate2.parent, candidate2
+        candidate_y1 = (ws_root / "src" / "YILDIZ-USV" / "workspace_nav" / "json" / TARGET_FILENAME).resolve()
+        if candidate_y1.parent.exists():
+            return candidate_y1.parent, candidate_y1
+        candidate_y2 = (ws_root / "YILDIZ-USV" / "workspace_nav" / "json" / TARGET_FILENAME).resolve()
+        if candidate_y2.parent.exists():
+            return candidate_y2.parent, candidate_y2
         candidate3_dir = (ws_root / "src" / "USV_NAV" / "workspace_nav" / "json").resolve()
-        return candidate3_dir, (candidate3_dir / TARGET_FILENAME).resolve()
+        if candidate3_dir.exists():
+            return candidate3_dir, (candidate3_dir / TARGET_FILENAME).resolve()
+        candidate_y_dir = (ws_root / "src" / "YILDIZ-USV" / "workspace_nav" / "json").resolve()
+        return candidate_y_dir, (candidate_y_dir / TARGET_FILENAME).resolve()
     cwd_candidate = (Path.cwd().resolve() / "src" / "USV_NAV" / "workspace_nav" / "json" / TARGET_FILENAME).resolve()
     alt_cwd = (Path.cwd().resolve() / "USV_NAV" / "workspace_nav" / "json" / TARGET_FILENAME).resolve()
+    cwd_y = (Path.cwd().resolve() / "src" / "YILDIZ-USV" / "workspace_nav" / "json" / TARGET_FILENAME).resolve()
+    alt_y = (Path.cwd().resolve() / "YILDIZ-USV" / "workspace_nav" / "json" / TARGET_FILENAME).resolve()
     if cwd_candidate.parent.exists():
         return cwd_candidate.parent, cwd_candidate
     if alt_cwd.parent.exists():
         return alt_cwd.parent, alt_cwd
-    fallback_dir = cwd_candidate.parent
-    return fallback_dir, cwd_candidate
+    if cwd_y.parent.exists():
+        return cwd_y.parent, cwd_y
+    if alt_y.parent.exists():
+        return alt_y.parent, alt_y
+    fallback_dir = cwd_y.parent
+    return fallback_dir, cwd_y
 
 OUTPUT_DIR, OUTPUT_PATH = make_output_paths()
 
@@ -155,7 +174,7 @@ class GPSToFile(Node):
 
         self.declare_parameter('datum_source', 'map_yaml')
         self.declare_parameter('map_yaml_path', '')
-        self.declare_parameter('gps_topic', '/mavros/global_position/global')
+        self.declare_parameter('gps_topic', '/roboboat/sensors/gps/navsat')
         self.declare_parameter('map_datum_ref_key', 'ref_gnss_10')
         self.declare_parameter('projection', 'enu')
 
@@ -187,7 +206,7 @@ class GPSToFile(Node):
             else:
                 try:
                     share = Path(get_package_share_directory('workspace_nav'))
-                    map_path = (share / 'config' / 'map_real_boat_hk.yaml').resolve()
+                    map_path = (share / 'config' / 'map.yaml').resolve()
                 except Exception as e:
                     self.get_logger().fatal(f'无法解析 map.yaml 路径: {e}')
                     raise SystemExit(1) from e

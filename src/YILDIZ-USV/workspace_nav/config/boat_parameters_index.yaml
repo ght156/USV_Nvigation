@@ -1,5 +1,6 @@
 # 船体与导航参数——仓库内文件索引（非运行时加载，仅供查阅）
-# 详细说明见同目录上级 docs/船体与导航参数索引.md
+# 仿真栈说明见 src/YILDIZ-USV/docs/PROJECT_ARCHITECTURE_AND_NAV2.md
+# 真机参数与 MAVROS/PX4 相关文件见 USV_NAV 仓库
 
 simulation_urdf_and_gazebo:
   primary_file: workspace_gz/description/roboboat/roboboat.xacro
@@ -15,8 +16,6 @@ nav2_maps:
   simulation_default: workspace_nav/config/map.yaml
   simulation_backup: workspace_nav/config/map.simulation.backup.yaml
   simulation_pgm_backup: workspace_nav/map/map.simulation.backup.pgm
-  real_boat_default_hk: workspace_nav/config/map_real_boat_hk.yaml
-  real_boat_hk_pgm: workspace_nav/map/hk_map.pgm
 
   keys:
     - local_costmap.ros__parameters.footprint
@@ -28,18 +27,14 @@ cmd_vel_to_thrusters_sim:
   manual_keyboard: workspace_ros/scripts/manual_control.py
 
 sensor_tf:
-  simulation_and_mode_a_localization: workspace_ros/config/static_transform.yaml
-  real_boat_mavros_odom_default: workspace_ros/config/static_transform_real_boat.yaml
+  simulation: workspace_ros/config/static_transform.yaml
 
 localization_frames:
   ekf: workspace_ros/config/ekf.yaml
+  navsat: workspace_ros/config/navsat.yaml
 
-px4_real_boat:
-  note: 真机推进器混控与动力学参数在飞控/地面站，不在本仓库
-
-mavros_ros2_px4_overlay:
-  launch: workspace_ros/launch/mavros_px4_usv.launch.py
-  overrides_yaml: workspace_ros/config/mavros_px4_overrides_usv.yaml
+optional_mavros_overlay_for_hil:
   note: >-
-    在已安装的 mavros/share/mavros/launch/px4_pluginlists.yaml 与 px4_config.yaml 之后加载覆盖层，
-    实船对齐 map→odom→base_link 与 Nav2。
+    仅当在仿真外接 MAVROS 做对比或 HIL 时使用；合并层为
+    workspace_nav/config/nav2_mavros_odom_overlay.yaml（launch 参数 use_mavros_odometry）。
+  upstream_real_boat_launch_and_configs: USV_NAV 仓库

@@ -37,7 +37,7 @@ def generate_launch_description():
     package_share = FindPackageShare('workspace_nav')
 
     nav2_config = PathJoinSubstitution([package_share, 'config', 'nav2_params.yaml'])
-    map_config = PathJoinSubstitution([package_share, 'config', 'map_real_boat_hk.yaml'])
+    map_config = PathJoinSubstitution([package_share, 'config', 'map.yaml'])
 
     map_topic = LaunchConfiguration('map')
     use_sim_time = LaunchConfiguration('use_sim_time')

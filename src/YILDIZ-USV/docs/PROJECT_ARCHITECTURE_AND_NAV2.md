@@ -1,9 +1,8 @@
-# 实船架构与 Nav2 数据流
+# Gazebo 仿真与 Nav2（YILDIZ-USV / wuxihik_navigation）
 
-本文描述 **USV_NAV 实船** 包分工与话题/TF 链。**Gazebo 仿真** 见独立仓库 `wuxihik_navigation`。
+本仓库 **以 Gazebo + EKF + Nav2 仿真为主**。**实船 MAWROS / PX4 / NX 联调** 在独立仓库 **[USV_NAV](https://github.com/ght156/USV_Navigation)**（路径 `USV_NAV/`）维护，避免双份栈同步成本。
 
-**联调命令**：[`docs/项目运行与联调.md`](../../../docs/项目运行与联调.md)  
-**按文件改参**：[`实船配置修改清单.md`](./实船配置修改清单.md)
+**仿真联调入口**（本仓库根目录）：[`docs/项目运行与联调.md`](../../docs/项目运行与联调.md)
 
 ---
 
@@ -11,115 +10,74 @@
 
 | 包 | 职责 |
 |----|------|
-| **`workspace_ros`** | MAVROS 启动与 TF 覆盖、`gnss_odom_map_tf`、`static_transform_real_boat`、`nav2_cmd_vel_to_mavros`、感知/任务脚本 |
-| **`workspace_nav`** | `nav2_real_mavros.launch.py`、`nav2_params_real_mavros.yaml`、地图 yaml、`waypoint_transform` |
+| **`workspace_gz`** | Gazebo 世界、模型、`ros_gz_bridge`、推进器与传感器话题 |
+| **`workspace_ros`** | `localization.launch.py`（EKF + navsat + 静态 TF + 协方差转发）、`converter`（仿真推进器）、感知/任务脚本 |
+| **`workspace_nav`** | `nav2.launch.py`、`nav2_params.yaml`、默认 **`config/map.yaml`**、航点节点 |
 
 ---
 
-## 2. 实船启动顺序
+## 2. 推荐启动顺序（仿真）
 
-1. `mavros_px4_usv.launch.py` — 飞控桥，`odom→base_link` TF  
-2. `real_boat_bringup.launch.py` — `gnss_odom_map_tf` + 传感器静态 TF +（可选）速度桥  
-3. `nav2_real_mavros.launch.py` — Nav2 + RViz  
+1. **`workspace_gz` `simulation.launch.py`** — Gazebo + 时钟 + 桥接（IMU、GPS、激光、推力等）  
+2. **`workspace_ros` `localization.launch.py`** — `use_sim_time:=true`，融合得到 **`/odometry/filtered`**  
+3. **`workspace_nav` `nav2.launch.py`** — Nav2 + RViz（默认 `map:=` 包内 `map.yaml`）  
+4. **（可选）** `ros2 run workspace_ros converter` — Nav2 `/cmd_vel_nav` → Gazebo 推力（与实船无关）
 
 ---
 
 ## 3. 数据流总览
 
 ```text
-                    ┌─────────────────────────────────────┐
-                    │  map_server (map_real_boat_hk.yaml)   │
-                    └─────────────────┬───────────────────┘
-                                      │ map 系规划
-┌──────────────┐   GNSS + local odom  ▼   ┌──────────────────┐
-│ gnss_odom_   │ ───────────────────────► │ map → odom       │
-│ map_tf       │                          └────────┬─────────┘
-└──────────────┘                                   │
-                                                   ▼
-┌──────────────┐   /mavros/local_position/odom   ┌──────────────┐
-│ PX4 + MAVROS │ ───────────────────────────────►│ odom→base_link│
-└──────────────┘                                  └──────┬───────┘
-                                                         │
-     /livox/lidar ──► costmap ◄── Nav2 ◄── /cmd_vel_nav ─┤
-                                                         │
-                              nav2_cmd_vel_to_mavros ────┘
-                                         │
-                                         ▼
-                              /mavros/setpoint_raw/local → PX4
+Gazebo ──► IMU/GPS/odom ──► covariance repub ──► EKF + navsat ──► /odometry/filtered
+                                                      │
+map_server (map.yaml) ◄── Nav2 ◄────────────────────┘  (map frame)
+     │
+     └── local_costmap ◄── LaserScan /roboboat/sensors/lidar/scan
 ```
 
----
-
-## 4. TF 链（模式 B，默认）
-
-| 变换 | 发布者 |
-|------|--------|
-| `map` → `odom` | `gnss_odom_map_tf`（读 `map_config_yaml` + `map_origin_ref_key`） |
-| `odom` → `base_link` | MAVROS `local_position`（`mavros_px4_overrides_usv.yaml`） |
-| `base_link` → 传感器 | `static_transform_real_boat.yaml` |
-
-仅起 MAVROS、不起 bringup：**无 `map→odom`**。
+可选：在 `nav2.launch.py` 传入 **`use_mavros_odometry:=true`** 时合并 `nav2_mavros_odom_overlay.yaml`，用于 **带 MAVROS 的半实物 / 对比实验**（仍以 USV_NAV 为实船主线）。
 
 ---
 
-## 5. 速度话题
+## 4. TF 与里程计（仿真默认）
 
-| 话题 | 说明 |
-|------|------|
-| `/cmd_vel_nav` | **`controller_server` 发布**（Nav2 bringup remap） |
-| `/cmd_vel` | **`velocity_smoother` 发布**（订阅 `/cmd_vel_nav`）；桥可选 **`cmd_vel_src:=/cmd_vel`** |
-| `/mavros/setpoint_raw/local` | `nav2_cmd_vel_to_mavros`（默认订 `/cmd_vel_nav`）→ PX4 OFFBOARD |
-
-调试命令见 [`docs/项目运行与联调.md`](../../../docs/项目运行与联调.md)「调试命令速查」。
-
-**不要**在实船运行 `converter`（Gazebo 推力，仅 wuxihik 仿真用）。
-
----
-
-## 6. Nav2 要点（`nav2_params_real_mavros.yaml`）
-
-- **里程计**：`/mavros/local_position/odom`  
-- **全局帧 / 局部帧**：`map` / `odom`，`robot_base_frame: base_link`  
-- **避障**：`VoxelLayer` + **`/livox/lidar`**（核对点云 `frame_id` 与 TF）  
-- **控制器**：Regulated Pure Pursuit；参数与 `nav2_cmd_vel_to_mavros` 限幅同量级  
-
----
-
-## 7. 地图与 datum
-
-- 默认栅格：**`config/map_real_boat_hk.yaml`** + **`map/hk_map.pgm`**  
-- 四角 **`ref_gnss_*`**：`[longitude, latitude]`（度）  
-- **`gnss_odom_map_tf`**、**`waypoint_transform`**、**PX4 HOME** 须共用同一角点约定  
-
-详见 [`docs/地图与GNSS-Nav2对齐说明.md`](../../../docs/地图与GNSS-Nav2对齐说明.md)。
-
----
-
-## 8. 航点与地面站
-
-- GCS 发 **`/waypoint`**（经纬度 JSON）→ **`waypoint_transform`** → `waypoints.json`（map 系 x,y）  
-- 默认 **`datum_source:=map_yaml`**，与 `ref_gnss*` 同源，不依赖首帧 GPS  
-
----
-
-## 9. 可选 / 未维护
-
-| 项 | 状态 |
+| 项 | 约定 |
 |----|------|
-| `localization.launch.py` + EKF + navsat | **本仓未提供**；`real_boat_bringup` 若设 `robot_localization` 会引用缺失文件 |
-| `nav2.launch.py` / `nav2_params.yaml` | **仿真用**，在 wuxihik |
-| `kamikaze` | 与 Nav2 同发 `/cmd_vel_nav`，勿并行 |
+| 融合里程计 | **`/odometry/filtered`**（`ekf.yaml`） |
+| 静态 TF（传感器） | `static_transform.yaml`（与 URDF `*_link` → `roboboat/base_link/sensor_*` 对齐） |
+| Nav2 `odom_topic` | **`/odometry/filtered`**（见 `nav2_params.yaml`） |
 
 ---
 
-## 10. 改参索引
+## 5. 航点与地面站
+
+- GCS 发 **`/waypoint`**（经纬度 JSON）→ **`waypoint_transform`**（默认 GPS：`/roboboat/sensors/gps/navsat`）→ `json/waypoints.json`（map 系）  
+- **`waypoint_with_state`** 默认订阅 **`/odometry/filtered`**  
+
+---
+
+## 6. 地图与 datum
+
+- 默认栅格：**`workspace_nav/config/map.yaml`** 及对应 PGM  
+- **`ref_gnss_*`**、**`navsat.yaml` datum**、**`waypoint_transform`** 须一致  
+
+详见 [`docs/地图与GNSS-Nav2对齐说明.md`](../../docs/地图与GNSS-Nav2对齐说明.md)。
+
+---
+
+## 7. 改参索引（仿真）
 
 | 目标 | 文件 |
 |------|------|
-| 避障话题/高度 | `nav2_params_real_mavros.yaml` |
-| 控制/到点容差 | 同上 `controller_server` |
-| 速度桥限幅 | `nav2_cmd_vel_to_mavros.py` / launch |
-| 地图锚点 | map yaml、`real_boat_bringup` 的 `map_config_yaml` |
-| MAVROS TF | `mavros_px4_overrides_usv.yaml` |
+| Nav2 全局/局部代价图、控制器 | `workspace_nav/config/nav2_params.yaml` |
+| EKF / GPS 基准 | `workspace_ros/config/ekf.yaml`、`navsat.yaml` |
+| 传感器帧 | `workspace_ros/config/static_transform.yaml`、URDF xacro |
+| 船体动力学/推进 | `workspace_gz` xacro 与 Gazebo 插件参数 |
 
-完整表：[`实船配置修改清单.md`](./实船配置修改清单.md)。
+更全索引：`workspace_nav/config/boat_parameters_index.yaml`。
+
+---
+
+## 8. 实船
+
+实船启动、MAVROS、`gnss_odom_map_tf`、Livox、`nav2_*_real*` 等：**见 USV_NAV 仓库文档**，本仓库不再附带这些 launch/配置。

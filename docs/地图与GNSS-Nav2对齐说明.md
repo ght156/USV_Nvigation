@@ -1,58 +1,56 @@
-# 地图、GNSS 与 Nav2 对齐说明（实船）
+# 地图、GNSS 与 Nav2 对齐说明
 
-归纳 **栅格海图、`ref_gnss*`、PX4 HOME、`gnss_odom_map_tf`、航点** 的关系。日常启动见 [`项目运行与联调.md`](./项目运行与联调.md)。
+归纳 **栅格海图、`ref_gnss*`、datum、EKF/航点** 的关系。日常仿真启动见 [`项目运行与联调.md`](./项目运行与联调.md)。
 
-> 历史设计笔记（navsat+EKF 仿真方案）已归档删除；实船默认 **不用 EKF**，用 **map YAML 固定角点 + `gnss_odom_map_tf`** 装订 `map→odom`。
+**实船**（PX4 HOME、`gnss_odom_map_tf`、MAVROS 里程计）在 **`USV_NAV`** 仓库说明；本文件以 **本仓仿真默认** 为主。
 
 ---
 
 ## 1. 栅格地图
 
-- **默认**：`workspace_nav/config/map_real_boat_hk.yaml` → `map/hk_map.pgm`（无锡 HK 园区）。  
-- **白板图**（几乎全白）：全局规划约束弱，**主要靠 local_costmap + Livox** 避障。  
-- **带岸线/禁区**：须在 PGM 标占据区，并核对 **`origin` / `ref_gnss*`** 与现场一致。
+- **仿真默认**：`src/YILDIZ-USV/workspace_nav/config/map.yaml` 及对应 PGM（路径见 yaml 内 `image:`）。  
+- **白板图**：全局规划约束弱，**主要靠 local_costmap + LaserScan**（`/roboboat/sensors/lidar/scan`）避障。  
+- **带岸线/禁区**：须在 PGM 标占据区，并核对 **`origin` / `ref_gnss*`** 与 `navsat.yaml` **datum** 一致。
 
 ---
 
-## 2. `map` 与 `odom` 不会自动对齐
+## 2. 仿真：`map` 与 `odom`
 
-- **`/mavros/local_position/odom`** 原点一般为 **PX4 HOME**，不会随换 Nav2 海图自动变。  
-- **`gnss_odom_map_tf`**（默认开启）用 **GNSS + 局域 odom** 计算 **`map→odom`**，锚点来自 **`map_config_yaml`** 的 **`map_origin_ref_key`**（默认 `ref_gnss_10`）。  
-- 关 **`use_gnss_map_odom_tf:=false`** 时退化为静态 `map→odom`，更依赖 **HOME 与锚点一致**。
+- **`robot_localization` EKF** 输出 **`/odometry/filtered`**，提供 **`odom` → `base_link`**（见 `ekf.yaml`）。  
+- **`navsat_transform_node`**（由 `localization.launch.py` 启动）在 **固定 datum** 下协助全球坐标与图的一致性；**`navsat.yaml` 的 datum** 应与地图 **`ref_gnss*`**（或所选角点）一致。  
+- 换图后请同时核对 **地图 yaml**、`navsat.yaml`、航点节点的 **`map_yaml_path`**。
 
 ---
 
-## 3. `map.yaml` 字段
+## 3. `map.yaml` 字段示例
 
 ```yaml
-image: ../map/hk_map.pgm
+image: ../map/your_map.pgm
 resolution: 1.0
 origin: [0.0, 0.0, 0.0]    # 栅格参考角在 map 系位姿
-ref_gnss_10: [lon, lat]      # 与 map 原点 (0,0) 对应的角点（默认 datum 键）
+ref_gnss_10: [lon, lat]     # 与 map 约定角点对应的 [经度, 纬度]（度）
 ```
 
 - **`ref_gnss_*`**：每条为 **`[longitude, latitude]`**（度）。  
-- **`origin`**：Nav2 将栅格角点放在 map 系的位姿；**`origin=[0,0,0]`** 时常见为角点与 `map`(0,0) 重合。  
-- 船在 map 上的位置来自 **TF**（`map→odom→base_link`），不是自动等于某角点。
+- **`origin`**：Nav2 `map_server` 将栅格角点放在 map 系的位姿。  
+- 船在地图上的位置来自 **TF**：`map` → `odom` → `base_link`。
 
 ---
 
-## 4. 实船对齐 checklist
+## 4. 仿真对齐 checklist
 
 | 链路 | 配置 |
 |------|------|
-| Nav2 载入海图 | `nav2_real_mavros.launch.py` → **`map:=`** |
-| `map→odom` | bringup → **`map_config_yaml:=`**（与上相同） |
-| 航点经纬→map x,y | `waypoint_transform` → **`map_yaml_path`** / 默认同包内 yaml |
-| 局域原点 | QGC 或 **`/mavros/cmd/set_home`** 对齐 **`ref_gnss*`** |
-
-**核心**：上述项共用 **同一份 YAML、同一 `ref_gnss*` 角点**。
+| Nav2 载入海图 | `nav2.launch.py` → **`map:=`** |
+| GNSS ↔ 地图角点 | `navsat.yaml` datum 与 **`ref_gnss*`** |
+| 航点经纬→map x,y | `waypoint_transform`：`map_yaml_path` / 默认包内 `map.yaml` |
+| 里程计 | Nav2 **`odom_topic: /odometry/filtered`** |
 
 ---
 
-## 5. `navsat.yaml`（可选）
+## 5. 实船（USV_NAV）
 
-本仓 **默认不运行** `navsat_transform`。若将来补 EKF 链，`config/navsat.yaml` 的 **`datum`** 须与所选 **`ref_gnss*`** 的 lat/lon 一致。
+实船上 **`/mavros/local_position/odom`** 原点通常随 **PX4 HOME**，需用 **`gnss_odom_map_tf`** 与地图锚点装订 **`map→odom`**。详见 **USV_NAV** 文档，不在此重复。
 
 ---
 
@@ -60,6 +58,6 @@ ref_gnss_10: [lon, lat]      # 与 map 原点 (0,0) 对应的角点（默认 dat
 
 | 文档 | 内容 |
 |------|------|
-| [`工作进度汇报.md`](./工作进度汇报.md) | 航点/map 坐标改版记录 |
-| [`实船调试.md`](../src/USV_NAV/docs/实船调试.md) | HOME、`gnss_odom_map_tf` 算法要点 |
-| [`PROJECT_ARCHITECTURE_AND_NAV2.md`](../src/USV_NAV/docs/PROJECT_ARCHITECTURE_AND_NAV2.md) | 数据流图 |
+| [`工作进度汇报.md`](./工作进度汇报.md) | 历史记录（若有） |
+| [`map与gnss的对齐.md`](./map与gnss的对齐.md) | 详细几何与调试笔记 |
+| [`../src/YILDIZ-USV/docs/PROJECT_ARCHITECTURE_AND_NAV2.md`](../src/YILDIZ-USV/docs/PROJECT_ARCHITECTURE_AND_NAV2.md) | 仿真数据流 |

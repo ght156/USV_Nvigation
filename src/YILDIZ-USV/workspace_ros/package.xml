@@ -3,11 +3,11 @@
 <package format="3">
   <name>workspace_ros</name>
   <version>0.0.1</version>
-  <description>ROS 2 package customized for the TEKNOFEST Unmanned Surface Vehicle (USV) Competition.</description>
-  
+  <description>Simulation-focused ROS 2 helpers: Gazebo bridge topics, EKF/localization, converter, perception.</description>
+
   <maintainer email="yildiz.usv@outlook.com">YILDIZ USV</maintainer>
   <license>Apache-2.0</license>
-  
+
   <author>Görkem Direybatoğulları</author>
   <author>Mustafa Berat Yavaş</author>
   <author>Muhammet Al</author>
@@ -15,7 +15,7 @@
   <author>Harun Kurt</author>
 
   <buildtool_depend>ament_python</buildtool_depend>
-  
+
   <depend>rclpy</depend>
   <depend>launch</depend>
   <depend>launch_ros</depend>
@@ -25,8 +25,6 @@
   <depend>geometry_msgs</depend>
   <depend>sensor_msgs</depend>
   <depend>std_msgs</depend>
-  <depend>mavros_msgs</depend>
-  <exec_depend>mavros</exec_depend>
   <depend>tf2</depend>
   <depend>tf2_ros</depend>
   <depend>robot_localization</depend>

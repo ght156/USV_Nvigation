@@ -30,7 +30,7 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'use_sim_time',
             default_value='true',
-            description='false on real boat; true in Gazebo when /clock is published',
+            description='Must be true in Gazebo (/clock); physical vehicle workflows live in USV_NAV',
         ),
         DeclareLaunchArgument(
             'imu_src',

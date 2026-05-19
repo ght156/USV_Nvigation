@@ -7,7 +7,7 @@
 
 **只改 `navsat.yaml` 不够，目标点转换逻辑也必须一起改。否则船的位置用“地图左下角 datum”，目标点却还在用“船第一次 GPS datum”，两套坐标系会错开。**
 
-> **仓库维护备忘（Nav2 避障，可与本文 GNSS/地图对齐一并阅读）**：当栅格**近白板、全局占据约束弱**时，**动态避障主要依赖 `local_costmap`**。**仿真**（`workspace_nav/config/nav2_params.yaml`）：**`ObstacleLayer`** + **`LaserScan`**（约定 **`/roboboat/sensors/lidar/scan`**）。**实船 MAVROS**（`workspace_nav/config/nav2_params_real_mavros.yaml`）：**`VoxelLayer`** + **`sensor_msgs/PointCloud2`**（默认 **`/livox/lidar`**）；体内 3D 体素仍**投影为 2D costmap**，**`InflationLayer` 未改**。现场须核对 **点云 `header.frame_id`→`base_link`（及 map/odom 链）**、**时间戳与 `use_sim_time`**，并标定 **`origin_z`、`z_voxels`、`min/max_obstacle_height`、量程** 等。更细的说明见 [`地图与GNSS-Nav2对齐说明.md`](./地图与GNSS-Nav2对齐说明.md) §1、[`../src/YILDIZ-USV/docs/实船调试.md`](../src/YILDIZ-USV/docs/实船调试.md)「避障传感器（模式 B）」。
+> **仓库维护备忘（Nav2 避障）**：当栅格**近白板、全局占据约束弱**时，**动态避障主要依赖 `local_costmap`**。**本仓仿真**（`workspace_nav/config/nav2_params.yaml`）：**`ObstacleLayer`** + **`LaserScan`**（约定 **`/roboboat/sensors/lidar/scan`**）。**实船** Livox、三维代价图、`/mavros` 等与 **`map→odom`** 的参数在 **`USV_NAV`** 仓库维护（本仓已不包含 `nav2_params_real_mavros` 等）。更细的栅格说明见 [`地图与GNSS-Nav2对齐说明.md`](./地图与GNSS-Nav2对齐说明.md) §1。
 
 ------
 
@@ -678,4 +678,4 @@ global EKF:
 
 ## 实船补充：MAVROS 用 `CommandHome` 对齐 PX4 HOME（模式 B）
 
-真机仅用 **`/mavros/local_position/odom`** 且 **`map→odom` 恒等**时，局域里程原点随 **PX4 HOME**；需与当前 **`nav2`** 载入的 **`map.yaml` / `map_real_boat_hk.yaml`** 中约定的 **`ref_gnss*`** 角点一致。除 **QGroundControl「设 HOME」** 外，可在 ROS 2 调用服务 **`/mavros/cmd/set_home`**（**`mavros_msgs/srv/CommandHome`**）：**指定经纬度高程时必须 `current_gps: false`**（**`current_gps: true`** 为用**当前船位**，会忽略你填写的经纬度）。可复制命令、自检 **`/mavros/home_position/home`**、以及与 **`home_position/set` 话题**的区别，均以 **[`src/YILDIZ-USV/docs/实船调试.md`](../src/YILDIZ-USV/docs/实船调试.md)**「用 ROS 2 服务设置 PX4 HOME」为准。
+真机仅用 **`/mavros/local_position/odom`** 且 **`map→odom` 装订不当或恒等**时，局域里程原点随 **PX4 HOME**，易与 **`nav2` 海图 **`ref_gnss*`** 角点脱节；实船装订与 **`/mavros/cmd/set_home`** 等请以 **`USV_NAV`** 仓库中的实船调试文档为准。**本仿真仓**默认用 **EKF + `map.yaml`**，不假设 MAVROS HOME。

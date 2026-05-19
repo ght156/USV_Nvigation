@@ -1,115 +1,52 @@
-# USV_NAV
+# YILDIZ-USV（wuxihik_navigation）— 仿真栈
 
 [![Ubuntu](https://img.shields.io/badge/Ubuntu-22.04-blue.svg)](https://releases.ubuntu.com/22.04/)
 [![ROS2](https://img.shields.io/badge/ROS2-Humble-blue.svg)](https://docs.ros.org/en/humble/)
-[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](./LICENSE.txt)
 
-**实船**自主导航：ROS 2 Humble、Navigation2、MAVROS/PX4、Livox 避障、航点与地面站联调。
+**Gazebo Garden** 仿真 USV：**Nav2**、**robot_localization（EKF）**、推力 `converter`。**实船 MAWROS / PX4 / NX** 在 **`USV_NAV`** 仓库维护（本仓已去掉实船独占 launch 与脚本，减少双份维护）。
 
-> **本仓库不做 Gazebo 仿真。** 仿真栈在独立副本 [`wuxihik_navigation`](https://github.com/ght156/USV_Nvigation)（包名 `YILDIZ-USV`）中维护。
-
-## 项目结构
+## 仓库布局
 
 ```
-USV_NAV/
-├── docs/                    # 联调、NX 部署、地图/GNSS 说明
-├── map/                     # 栅格图源（如 HK 园区）
-└── src/USV_NAV/
-    ├── workspace_nav/       # Nav2、地图 yaml、航点节点
-    └── workspace_ros/       # MAVROS 桥接、gnss_odom_map_tf、速度桥
+src/YILDIZ-USV/
+├── workspace_gz/      # Gazebo 世界、模型、桥接
+├── workspace_ros/     # localization.launch.py、converter、感知脚本
+└── workspace_nav/     # nav2.launch.py、地图、航点
 ```
 
 ## 依赖与编译
 
-见下文 **Step 1–5**；系统包需含 `ros-humble-mavros`、`ros-humble-nav2-bringup`、`ros-humble-robot-localization`（仅当将来补 EKF launch 时）。
-
 ```bash
 source /opt/ros/humble/setup.bash
-cd ~/USV_NAV   # 或你的工作区根目录
+cd <你的 colcon 工作区根目录>
 colcon build --merge-install
 source install/setup.bash
 ```
 
-## 实船快速启动（三终端）
+典型系统包：`ros-humble-nav2-*`、`ros-humble-robot-localization`、`ros-gz`（与 Gazebo Harmonic/Garden 对齐的安装名以官方为准）。
 
-每个终端先：
+## 仿真快速启动（三终端）
 
-```bash
-source /opt/ros/humble/setup.bash
-source ~/USV_NAV/install/setup.bash   # 按实际路径
-```
+每终端先：`source /opt/ros/humble/setup.bash` 与 `source install/setup.bash`。
 
 | 终端 | 命令 |
 |:---:|------|
-| **1** | `ros2 launch workspace_ros mavros_px4_usv.launch.py fcu_url:=serial:///dev/ttyACM0:57600` |
-| **2** | `ros2 launch workspace_ros real_boat_bringup.launch.py use_sim_time:=false enable_nav2_cmd_vel_to_mavros:=true` |
-| **3** | `ros2 launch workspace_nav nav2_real_mavros.launch.py` |
+| **1** | `ros2 launch workspace_gz simulation.launch.py` |
+| **2** | `ros2 launch workspace_ros localization.launch.py use_sim_time:=true` |
+| **3** | `ros2 launch workspace_nav nav2.launch.py use_sim_time:=true` |
 
-换海图时，终端 2 的 **`map_config_yaml:=`** 与终端 3 的 **`map:=`** 必须为**同一路径**（默认 `map_real_boat_hk.yaml`）。
+可选第四终端：`ros2 run workspace_ros converter`（`/cmd_vel_nav` → 仿真推进器）。
 
-**控制链**：Nav2 `controller` → `/cmd_vel_nav` →（可选 `velocity_smoother` → `/cmd_vel`）→ `nav2_cmd_vel_to_mavros`（默认 `/cmd_vel_nav`）→ PX4 OFFBOARD。
+默认地图：`workspace_nav/config/map.yaml`。换图时对 `nav2.launch.py` 传同一 `map:=` 路径。
 
-详细步骤、TF、HOME、换图、**`/cmd_vel`↔`/cmd_vel_nav` 调试命令**：[`docs/项目运行与联调.md`](../docs/项目运行与联调.md)。
+## 文档
 
-## 可选节点（地面站 / 任务）
-
-```bash
-ros2 run workspace_nav waypoint_transform
-ros2 run workspace_nav waypoint_with_state
-ros2 run workspace_ros target_buoy    # 需 GCS 提供目标信息
-```
-
-## 文档索引
-
-| 文档 | 用途 |
+| 文档 | 说明 |
 |------|------|
-| [`docs/项目运行与联调.md`](../docs/项目运行与联调.md) | **主入口**：启动顺序、速度桥、换图、ROS_DOMAIN_ID |
-| [`docs/实船调试.md`](docs/实船调试.md) | MAVROS、TF 复盘、HOME、避障、echo 调试 |
-| [`docs/实船配置修改清单.md`](docs/实船配置修改清单.md) | 按文件改参数 |
-| [`docs/PROJECT_ARCHITECTURE_AND_NAV2.md`](docs/PROJECT_ARCHITECTURE_AND_NAV2.md) | 实船数据流与 Nav2 要点 |
-| [`docs/地图与GNSS-Nav2对齐说明.md`](../docs/地图与GNSS-Nav2对齐说明.md) | 栅格、datum、`ref_gnss*` |
-| [`docs/USV 地面站NX 联网部署手册.md`](../docs/USV%20地面站NX%20联网部署手册.md) | NX 部署 |
+| [`../../docs/项目运行与联调.md`](../../docs/项目运行与联调.md) | **仿真**主入口 |
+| [`docs/PROJECT_ARCHITECTURE_AND_NAV2.md`](docs/PROJECT_ARCHITECTURE_AND_NAV2.md) | 包分工与数据流 |
+| [`../../docs/地图与GNSS-Nav2对齐说明.md`](../../docs/地图与GNSS-Nav2对齐说明.md) | 栅格、`ref_gnss*`、datum |
 
-## 安装步骤（新环境）
+## 实船
 
-### Step 1 — ROS 2 Humble
-
-[官方安装说明](https://docs.ros.org/en/humble/Installation/Ubuntu-Install-Debs.html)
-
-### Step 2 — 系统依赖
-
-```bash
-sudo apt update
-sudo apt install -y \
-  ros-humble-nav2-bringup \
-  ros-humble-navigation2 \
-  ros-humble-mavros \
-  ros-humble-mavros-extras \
-  ros-humble-tf2 \
-  ros-humble-tf2-ros
-```
-
-### Step 3 — 克隆
-
-```bash
-mkdir -p ~/usv_nav_ws/src && cd ~/usv_nav_ws/src
-git clone https://github.com/ght156/USV_Nvigation.git USV_NAV
-```
-
-### Step 4 — Python 依赖
-
-```bash
-cd USV_NAV && pip install -r requirements.txt
-```
-
-### Step 5 — 编译
-
-```bash
-source /opt/ros/humble/setup.bash
-cd ~/usv_nav_ws && colcon build --merge-install
-source install/setup.bash
-```
-
-## CONTRIBUTING
-
-见 [CONTRIBUTING.md](CONTRIBUTING.md)。
+见 **`USV_NAV`** 仓库 README 与 `docs/项目运行与联调.md`（实船版）。
