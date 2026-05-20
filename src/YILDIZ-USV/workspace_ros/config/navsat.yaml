@@ -1,4 +1,5 @@
-# 与 workspace_nav/config/map.yaml 中 ref_gnss_10（或 ref_gnss）一致，保证 GNSS→odom 与地图左下角对齐。
+# datum 须与「当前 Nav2 / map_server 使用的海图 yaml」里 ref_gnss_10（或你选的 ref_gnss*）一致。
+# 本工作区默认海图为 map_hk.yaml；navsat 不会自动读海图，改图后请手改本文件或显式设同一组经纬度。
 # datum: [latitude_deg, longitude_deg, heading_rad]，heading 为 ENU 下绕 z，0 表示 x 朝东（见 robot_localization 官方说明）。
 navsat_transform_node:
   ros__parameters:

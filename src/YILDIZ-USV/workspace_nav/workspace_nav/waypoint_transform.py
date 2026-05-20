@@ -161,9 +161,9 @@ class GPSToFile(Node):
             else:
                 try:
                     share = Path(get_package_share_directory('workspace_nav'))
-                    map_path = (share / 'config' / 'map.yaml').resolve()
+                    map_path = (share / 'config' / 'map_hk.yaml').resolve()
                 except Exception as e:
-                    self.get_logger().fatal(f'无法解析 map.yaml 路径: {e}')
+                    self.get_logger().fatal(f'无法解析地图 yaml 路径: {e}')
                     raise SystemExit(1) from e
             if not map_path.is_file():
                 self.get_logger().fatal(f'map yaml 不存在: {map_path}')

@@ -10,7 +10,7 @@ from launch_ros.substitutions import FindPackageShare
 
 def generate_launch_description():
     pkg = FindPackageShare("workspace_nav")
-    default_map_yaml = PathJoinSubstitution([pkg, "config", "map.yaml"])
+    default_map_yaml = PathJoinSubstitution([pkg, "config", "map_hk.yaml"])
 
     def _decl(name: str, default_value, description: str) -> DeclareLaunchArgument:
         return DeclareLaunchArgument(name, default_value=default_value, description=description)
@@ -56,12 +56,54 @@ def generate_launch_description():
             _decl(
                 "allow_replace_running_mission",
                 "false",
-                "RUNNING 中替换任务（未实现：仍为拒绝并告警）",
+                "航行中看到新 /waypoint 是否自动 cancel 并重派（实船默认关；仿真需运动中换路时显式 true）",
             ),
             _decl(
                 "allow_repeat_identical_route",
                 "false",
                 "完成后是否允许同源 hash 立刻再跑一趟",
+            ),
+            _decl(
+                "target_buoy_force_rewrite",
+                "false",
+                "true 时每次 /color_code 都重写 target_buoy.json（默认仅语义变色才写）",
+            ),
+            _decl(
+                "waypoint_command_mode",
+                "debounce",
+                "immediate | debounce | start_pulse；防抖可抑制地面站短时交替发布引发的反复 cancel",
+            ),
+            _decl(
+                "waypoint_commit_delay_sec",
+                "0.45",
+                "debounce 模式下静默窗口（秒）；收到最后一条 /waypoint 后再执行",
+            ),
+            _decl(
+                "mission_start_topic",
+                "",
+                'start_pulse 必填，例如 "/gcs_mission/start"（订阅 std_msgs/Empty)',
+            ),
+            _decl(
+                "mission_cancel_topic",
+                "/gcs_mission/cancel",
+                "std_msgs/Empty：清空缓冲并在航行中断航；与地面站 Cancel Nav 对齐",
+            ),
+            _decl(
+                "discard_watchdog_sec",
+                "4.0",
+                "抢占丢弃 goal 超时看门狗（秒），≤0 关闭；卡死时再发航点前应已恢复",
+            ),
+            _decl(
+                "suppress_passive_waypoints_after_cancel",
+                "true",
+                "Cancel Nav 后置位：丢弃无 explicit_replan 的被动 /waypoint，避免又自动起航"
+                "（start_pulse + Empty 仍可启动；JSON 中带 explicit_replan 会清除抑制）",
+            ),
+            _decl(
+                "target_buoy_min_write_period_sec",
+                "0.0",
+                "target_buoy.json 最小写盘间隔（秒）；0 关闭。"
+                "与「同色跳过」并行，可压住 GCS 红绿交替语义导致的刷屏写盘",
             ),
             Node(
                 package="workspace_nav",
@@ -103,6 +145,30 @@ def generate_launch_description():
                         ),
                         "allow_repeat_identical_route": ParameterValue(
                             lc("allow_repeat_identical_route"), value_type=bool
+                        ),
+                        "target_buoy_force_rewrite": ParameterValue(
+                            lc("target_buoy_force_rewrite"), value_type=bool
+                        ),
+                        "waypoint_command_mode": ParameterValue(
+                            lc("waypoint_command_mode"), value_type=str
+                        ),
+                        "waypoint_commit_delay_sec": ParameterValue(
+                            lc("waypoint_commit_delay_sec"), value_type=float
+                        ),
+                        "mission_start_topic": ParameterValue(
+                            lc("mission_start_topic"), value_type=str
+                        ),
+                        "mission_cancel_topic": ParameterValue(
+                            lc("mission_cancel_topic"), value_type=str
+                        ),
+                        "discard_watchdog_sec": ParameterValue(
+                            lc("discard_watchdog_sec"), value_type=float
+                        ),
+                        "suppress_passive_waypoints_after_cancel": ParameterValue(
+                            lc("suppress_passive_waypoints_after_cancel"), value_type=bool
+                        ),
+                        "target_buoy_min_write_period_sec": ParameterValue(
+                            lc("target_buoy_min_write_period_sec"), value_type=float
                         ),
                     },
                 ],

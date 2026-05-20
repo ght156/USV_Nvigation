@@ -8,9 +8,79 @@ import math
 import os
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 import utm
+
+
+class WaypointParseResult(NamedTuple):
+    """地面站 JSON 解析结果：`explicit_replan` 表示操纵员显式下令重规划（如 GCS Run Mission）。"""
+
+    waypoints: List[Tuple[float, float]]
+    explicit_replan: bool
+
+
+def parse_waypoint_message(data_str: str) -> Optional[WaypointParseResult]:
+    """与 `parse_waypoint_payload` 相同几何解析，并从字典载荷读取显式重申航迹标志。"""
+    data_str = str(data_str).strip()
+    if data_str.startswith("data: "):
+        data_str = data_str[6:].strip()
+    try:
+        json_data = json.loads(data_str)
+    except json.JSONDecodeError:
+        return None
+
+    explicit = False
+
+    waypoints_list: Optional[List[Any]] = None
+    if isinstance(json_data, list):
+        waypoints_list = json_data
+    elif isinstance(json_data, dict) and "waypoints" in json_data:
+        wl = json_data["waypoints"]
+        if isinstance(wl, list):
+            waypoints_list = wl
+        for key in (
+            "explicit_replan",
+            "from_start_mission",
+            "start_mission",
+            "force_replan",
+            "restart_mission",
+        ):
+            v = json_data.get(key)
+            if isinstance(v, bool):
+                explicit = explicit or v
+            elif isinstance(v, (int, float)) and v != 0:
+                explicit = True
+            elif isinstance(v, str) and v.strip().lower() in ("true", "1", "yes", "on"):
+                explicit = True
+
+        cmd = json_data.get("command")
+        if isinstance(cmd, str):
+            lc = cmd.strip().lower()
+            if lc in ("start", "replan", "restart", "reload"):
+                explicit = True
+    if not waypoints_list:
+        return None
+
+    parsed: List[Tuple[float, float]] = []
+    for wp in waypoints_list:
+        if isinstance(wp, dict) and "latitude" in wp and "longitude" in wp:
+            lat = float(wp["latitude"])
+            lon = float(wp["longitude"])
+        elif isinstance(wp, (list, tuple)) and len(wp) >= 2:
+            lat = float(wp[0])
+            lon = float(wp[1])
+        else:
+            return None
+        if lat == 0.0 and lon == 0.0:
+            return None
+        if lat < -90.0 or lat > 90.0 or lon < -180.0 or lon > 180.0:
+            return None
+        parsed.append((lat, lon))
+    if not parsed:
+        return None
+    return WaypointParseResult(parsed, explicit)
+
 
 
 def read_map_ref_lon_lat(cfg: dict, ref_key: str) -> Tuple[float, float]:
@@ -75,41 +145,12 @@ def enu_delta_to_map_xy(
 
 
 def parse_waypoint_payload(data_str: str) -> Optional[List[Tuple[float, float]]]:
-    """地面站载荷：顶层 list、或 {\"waypoints\": [...]}；点可为 {lat,lon} 或 [lat,lon]。"""
-    data_str = str(data_str).strip()
-    if data_str.startswith("data: "):
-        data_str = data_str[6:].strip()
-    try:
-        json_data = json.loads(data_str)
-    except json.JSONDecodeError:
-        return None
+    """地面站载荷：顶层 list、或 {\"waypoints\": [...]}；点可为 {lat,lon} 或 [lat,lon]。
 
-    waypoints_list: Optional[List[Any]] = None
-    if isinstance(json_data, list):
-        waypoints_list = json_data
-    elif isinstance(json_data, dict) and "waypoints" in json_data:
-        wl = json_data["waypoints"]
-        if isinstance(wl, list):
-            waypoints_list = wl
-    if not waypoints_list:
-        return None
-
-    parsed: List[Tuple[float, float]] = []
-    for wp in waypoints_list:
-        if isinstance(wp, dict) and "latitude" in wp and "longitude" in wp:
-            lat = float(wp["latitude"])
-            lon = float(wp["longitude"])
-        elif isinstance(wp, (list, tuple)) and len(wp) >= 2:
-            lat = float(wp[0])
-            lon = float(wp[1])
-        else:
-            return None
-        if lat == 0.0 and lon == 0.0:
-            return None
-        if lat < -90.0 or lat > 90.0 or lon < -180.0 or lon > 180.0:
-            return None
-        parsed.append((lat, lon))
-    return parsed if parsed else None
+    （忽略字典中的重申标志；如需显式重申语义请使用 `parse_waypoint_message`。）
+    """
+    r = parse_waypoint_message(data_str)
+    return r.waypoints if r else None
 
 
 def lat_lon_list_to_waypoints_document(

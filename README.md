@@ -8,6 +8,7 @@ ROS 2 Humble：**Gazebo USV 仿真**（Nav2 + EKF + `converter`）。
 ## 仿真入口
 
 - [`docs/项目运行与联调.md`](docs/项目运行与联调.md)  
+- **阶段成果 / 写报告用**：[`docs/工作进度汇报.md`](docs/工作进度汇报.md)（含 **仿真 vs 实船** 一页纸）  
 - 架构说明：[`src/YILDIZ-USV/docs/PROJECT_ARCHITECTURE_AND_NAV2.md`](src/YILDIZ-USV/docs/PROJECT_ARCHITECTURE_AND_NAV2.md)
 
 ## 编译

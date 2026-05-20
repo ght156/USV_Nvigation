@@ -13,7 +13,8 @@ simulation_urdf_and_gazebo:
   models_assets: workspace_gz/models/roboboat/
 
 nav2_maps:
-  simulation_default: workspace_nav/config/map.yaml
+  simulation_default: workspace_nav/config/map_hk.yaml
+  simulation_template: workspace_nav/config/map.yaml
   simulation_backup: workspace_nav/config/map.simulation.backup.yaml
   simulation_pgm_backup: workspace_nav/map/map.simulation.backup.pgm
 

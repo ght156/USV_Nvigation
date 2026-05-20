@@ -3,7 +3,7 @@
 [![Ubuntu](https://img.shields.io/badge/Ubuntu-22.04-blue.svg)](https://releases.ubuntu.com/22.04/)
 [![ROS2](https://img.shields.io/badge/ROS2-Humble-blue.svg)](https://docs.ros.org/en/humble/)
 
-**Gazebo Garden** 仿真 USV：**Nav2**、**robot_localization（EKF）**、推力 `converter`。**实船 MAWROS / PX4 / NX** 在 **`USV_NAV`** 仓库维护（本仓已去掉实船独占 launch 与脚本，减少双份维护）。
+**Gazebo Garden** 仿真 USV：**Nav2**、**robot_localization（EKF）**、推力 `converter`。**实船 MAVROS / PX4 / NX** 在 **`USV_NAV`** 仓库维护（本仓已去掉实船独占 launch 与脚本，减少双份维护）。
 
 ## 仓库布局
 
@@ -37,7 +37,7 @@ source install/setup.bash
 
 可选第四终端：`ros2 run workspace_ros converter`（`/cmd_vel_nav` → 仿真推进器）。
 
-默认地图：`workspace_nav/config/map.yaml`。换图时对 `nav2.launch.py` 传同一 `map:=` 路径。
+默认地图：`workspace_nav/config/map_hk.yaml`。换图时对 `nav2.launch.py` 传同一 `map:=` 路径，并同步 `navsat.yaml` 的 `datum`。
 
 ## 文档
 
@@ -45,7 +45,7 @@ source install/setup.bash
 |------|------|
 | [`../../docs/项目运行与联调.md`](../../docs/项目运行与联调.md) | **仿真**主入口 |
 | [`docs/PROJECT_ARCHITECTURE_AND_NAV2.md`](docs/PROJECT_ARCHITECTURE_AND_NAV2.md) | 包分工与数据流 |
-| [`../../docs/地图与GNSS-Nav2对齐说明.md`](../../docs/地图与GNSS-Nav2对齐说明.md) | 栅格、`ref_gnss*`、datum |
+| [`../../docs/工作进度汇报.md`](../../docs/工作进度汇报.md) | **绩效/工作报告**、仿真↔实船分工 |
 
 ## 实船
 

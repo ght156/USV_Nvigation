@@ -30,6 +30,7 @@ from rclpy.duration import Duration as RDuration
 from rclpy.node import Node
 from rclpy.task import Future
 from rclpy.time import Time as RTime
+from std_msgs.msg import Empty
 from std_msgs.msg import String
 from tf2_ros.buffer import Buffer
 from tf2_ros.transform_listener import TransformListener
@@ -38,7 +39,7 @@ from workspace_nav.gps_map_conversion import (
     atomic_write_json,
     datum_lat_lon_from_cfg,
     lat_lon_list_to_waypoints_document,
-    parse_waypoint_payload,
+    parse_waypoint_message,
     read_map_origin,
     verify_waypoints_file,
 )
@@ -171,6 +172,14 @@ class MissionBridgeNode(Node):
         self.declare_parameter("debug_mode", False)
         self.declare_parameter("allow_replace_running_mission", False)
         self.declare_parameter("allow_repeat_identical_route", False)
+        self.declare_parameter("target_buoy_force_rewrite", False)
+        self.declare_parameter("waypoint_command_mode", "immediate")
+        self.declare_parameter("waypoint_commit_delay_sec", 0.45)
+        self.declare_parameter("mission_start_topic", "")
+        self.declare_parameter("mission_cancel_topic", "")
+        self.declare_parameter("discard_watchdog_sec", 4.0)
+        self.declare_parameter("suppress_passive_waypoints_after_cancel", True)
+        self.declare_parameter("target_buoy_min_write_period_sec", 0.0)
 
         self._dbg = bool(self.get_parameter("debug_mode").value)
         wf_param = (
@@ -214,7 +223,7 @@ class MissionBridgeNode(Node):
         else:
             try:
                 share = Path(get_package_share_directory("workspace_nav"))
-                map_path = (share / "config" / "map.yaml").resolve()
+                map_path = (share / "config" / "map_hk.yaml").resolve()
             except Exception as e:
                 self.get_logger().fatal(f"无法解析默认 map_yaml: {e}")
                 raise SystemExit(1) from e
@@ -271,11 +280,6 @@ class MissionBridgeNode(Node):
             callback_group=cg,
         )
 
-        wp_topic = self.get_parameter("waypoint_topic").value
-        cg_topic = self.get_parameter("color_topic").value
-        self.create_subscription(String, wp_topic, self._cb_waypoint, 10)
-        self.create_subscription(String, cg_topic, self._cb_color, 10)
-
         self._odom_topic = self.get_parameter("odom_topic").value
         self._tolerance = float(self.get_parameter("waypoint_tolerance_m").value)
 
@@ -289,7 +293,46 @@ class MissionBridgeNode(Node):
         self._allow_repeat_identical_route = bool(
             self.get_parameter("allow_repeat_identical_route").value
         )
+        self._target_buoy_force_rewrite = bool(
+            self.get_parameter("target_buoy_force_rewrite").value
+        )
 
+        wm = (
+            self.get_parameter("waypoint_command_mode")
+            .get_parameter_value()
+            .string_value.strip()
+            .lower()
+        )
+        if wm in ("debounce", "debounced"):
+            self._wp_cmd_mode = "debounce"
+        elif wm in ("start_pulse", "start", "pulse"):
+            self._wp_cmd_mode = "start_pulse"
+        else:
+            self._wp_cmd_mode = "immediate"
+        self._wp_commit_delay = float(
+            self.get_parameter("waypoint_commit_delay_sec").value
+        )
+        if self._wp_commit_delay < 0.05:
+            self._wp_commit_delay = 0.05
+
+        ms_top = (
+            self.get_parameter("mission_start_topic").get_parameter_value().string_value.strip()
+        )
+        mc_top = (
+            self.get_parameter("mission_cancel_topic")
+            .get_parameter_value()
+            .string_value.strip()
+        )
+        self._discard_watchdog_sec = max(
+            0.0, float(self.get_parameter("discard_watchdog_sec").value)
+        )
+
+        self._suppress_passive_after_cancel = bool(
+            self.get_parameter("suppress_passive_waypoints_after_cancel").value
+        )
+        self._target_buoy_min_period = max(
+            0.0, float(self.get_parameter("target_buoy_min_write_period_sec").value)
+        )
         self._nav_xy: List[Tuple[float, float]] = []
         self.current_index = 0
         self.navigating = False
@@ -298,6 +341,67 @@ class MissionBridgeNode(Node):
         self._odom_sub: Optional[Any] = None
         self._send_timer: Optional[Any] = None
         self._idle_transition_timer: Optional[Any] = None
+        # 当前发往 Nav2 的 FollowWaypoints goal（用于地面站换新任务时 cancel）
+        self._active_goal_handle: Optional[Any] = None
+        self._discard_next_goal_result = False
+        self._delayed_mission_timer: Optional[Any] = None
+        self._delayed_mission: Optional[Tuple[List[Tuple[float, float]], str]] = None
+        self._waypoint_commit_timer: Optional[Any] = None
+        self._deb_route: Optional[
+            Tuple[List[Tuple[float, float]], str, bool]
+        ] = None
+        self._startpulse_route: Optional[
+            Tuple[List[Tuple[float, float]], str, bool]
+        ] = None
+        self._discard_watchdog_timer: Optional[Any] = None
+
+        self._mission_start_topic = ms_top
+        self._mission_cancel_topic = mc_top.strip()
+
+        self.get_logger().info(
+            "waypoint_command_mode=%s (commit_delay=%.2fs, start_topic=%s, cancel_topic=%s)"
+            % (
+                self._wp_cmd_mode,
+                self._wp_commit_delay,
+                self._mission_start_topic or "(empty)",
+                self._mission_cancel_topic or "(empty)",
+            )
+        )
+
+        if self._wp_cmd_mode == "start_pulse":
+            if not self._mission_start_topic:
+                self.get_logger().fatal(
+                    'waypoint_command_mode=start_pulse 时必须设置 mission_start_topic（例如 "/gcs_mission/start")'
+                )
+                raise SystemExit(1)
+
+        _wp_in = self.get_parameter("waypoint_topic").value
+        _cg_in = self.get_parameter("color_topic").value
+        self.create_subscription(String, _wp_in, self._cb_waypoint, 10)
+        self.create_subscription(String, _cg_in, self._cb_color, 10)
+        if self._wp_cmd_mode == "start_pulse":
+            self.create_subscription(
+                Empty,
+                self._mission_start_topic,
+                self._cb_mission_start,
+                10,
+            )
+            self._log_green(f"listening start_pulse.Empty on {self._mission_start_topic!r}")
+        if self._mission_cancel_topic:
+            self.create_subscription(
+                Empty,
+                self._mission_cancel_topic,
+                self._cb_mission_cancel,
+                10,
+            )
+
+        self._suppress_passive_waypoints = False
+        self._last_passive_waypoint_wall = 0.0
+
+        # 地面站可能对 /color_code 高频重复发布同色；仅在语义变化时写盘，避免刷屏与无意义改写
+        self._last_written_target_sem: Optional[str] = None
+        self._last_target_buoy_any_write_wall = 0.0
+        self._last_stage_log_wall = 0.0
 
         self.get_logger().info(f"Writing waypoints to: {self._waypoints_path}")
         self.get_logger().info(f"Writing target buoy to: {self._target_path}")
@@ -331,34 +435,146 @@ class MissionBridgeNode(Node):
         except Exception:
             return False
 
-    def _cb_color(self, msg: String) -> None:
-        if self._dbg:
-            self.get_logger().info(f"[debug] /color_code raw: {msg.data!r}")
-        sem = normalize_color(self, msg.data, self._dbg)
-        if sem is None:
+    def _cancel_discard_watchdog(self) -> None:
+        tmr = getattr(self, "_discard_watchdog_timer", None)
+        self._discard_watchdog_timer = None
+        if tmr is not None:
+            try:
+                tmr.cancel()
+            except Exception:
+                pass
+
+    def _schedule_discard_watchdog_if_needed(self) -> None:
+        self._cancel_discard_watchdog()
+        if self._discard_watchdog_sec <= 0.0:
             return
-        ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        target_data = {
-            "color": sem,
-            "target": {"color": sem, "timestamp": ts},
-        }
-        try:
-            atomic_write_json(self._target_dir, self._target_path, target_data)
-            self._log_green(f"Updated target_buoy.json ({sem}) -> {self._target_path}")
-        except Exception as e:
-            self.get_logger().error(f"Failed writing target_buoy.json: {e}")
-
-    def _cb_waypoint(self, msg: String) -> None:
-        if self._dbg:
-            self.get_logger().info(f"[debug] /waypoint raw: {msg.data!r}")
-
-        wps = parse_waypoint_payload(msg.data)
-        if not wps:
-            self.get_logger().warning("Invalid or empty waypoint message; skipped")
+        if not self._discard_next_goal_result:
             return
+        self._discard_watchdog_timer = self.create_timer(
+            float(self._discard_watchdog_sec),
+            self._discard_watchdog_fired,
+        )
 
-        mh = waypoint_mission_hash(wps)
+    def _discard_watchdog_fired(self) -> None:
+        self._cancel_discard_watchdog()
 
+        if not self._discard_next_goal_result:
+            return
+        self.get_logger().warning(
+            "FollowWaypoints discard watchdog: forcing discard_next_goal_result=False "
+            f"(had been True for ≥{self._discard_watchdog_sec:.1f}s)"
+        )
+        self._discard_next_goal_result = False
+        self.navigating = False
+
+    def _cancel_waypoint_commit_timer(self) -> None:
+        wt = getattr(self, "_waypoint_commit_timer", None)
+        self._waypoint_commit_timer = None
+        if wt is not None:
+            try:
+                wt.cancel()
+            except Exception:
+                pass
+
+    def _reschedule_waypoint_commit_timer(self) -> None:
+        self._cancel_waypoint_commit_timer()
+
+        def _flush_debounced() -> None:
+            t_inner = getattr(self, "_waypoint_commit_timer", None)
+            self._waypoint_commit_timer = None
+            if t_inner is not None:
+                try:
+                    t_inner.cancel()
+                except Exception:
+                    pass
+            bundle = getattr(self, "_deb_route", None)
+            if bundle is None:
+                return
+            bwps, bmh, bexplicit = bundle
+            self._consume_waypoint_command(
+                bwps, bmh, from_start_pulse=False, explicit_replan=bexplicit
+            )
+
+        self._waypoint_commit_timer = self.create_timer(
+            float(self._wp_commit_delay),
+            _flush_debounced,
+        )
+
+    def _cb_mission_start(self, _: Empty) -> None:
+        bundle = getattr(self, "_startpulse_route", None)
+        if bundle is None or not bundle[0]:
+            self.get_logger().warning(
+                "start_pulse: buffered route empty — publish /waypoint first, then pulse start topic."
+            )
+            return
+        wps, mh, _buffered_explicit = bundle
+        self.get_logger().info(
+            f"start_pulse: executing buffered route ({len(wps)} points, mission hash {mh[:12]}…)"
+        )
+        self._consume_waypoint_command(
+            wps, mh, from_start_pulse=True, explicit_replan=True
+        )
+
+    def _cb_mission_cancel(self, _: Empty) -> None:
+        self.get_logger().info("mission_cancel: clearing waypoint buffers")
+        if self._suppress_passive_after_cancel:
+            self._suppress_passive_waypoints = True
+            self.get_logger().info(
+                "mission_cancel: suppress_passive_waypoints=True until explicit_replan or start_pulse"
+            )
+        self._deb_route = None
+        self._startpulse_route = None
+        self._cancel_waypoint_commit_timer()
+
+        dmt = getattr(self, "_delayed_mission_timer", None)
+        if dmt is not None:
+            try:
+                dmt.cancel()
+            except Exception:
+                pass
+            self._delayed_mission_timer = None
+        self._delayed_mission = None
+
+        with self._sm_lock:
+            running = self._state == MissionState.RUNNING
+
+        if running:
+            self._preempt_running_mission_for_new_waypoints()
+
+    def _consume_waypoint_command(
+        self,
+        wps: List[Tuple[float, float]],
+        mh: str,
+        *,
+        from_start_pulse: bool,
+        explicit_replan: bool = False,
+    ) -> None:
+        operator_explicit = bool(from_start_pulse or explicit_replan)
+        if operator_explicit:
+            self._suppress_passive_waypoints = False
+        elif (
+            self._suppress_passive_after_cancel
+            and self._suppress_passive_waypoints
+        ):
+            _tp = getattr(self, "_last_passive_waypoint_wall", 0.0)
+            if time.time() - _tp > 4.0:
+                setattr(self, "_last_passive_waypoint_wall", time.time())
+                self.get_logger().info(
+                    "passive /waypoint discarded after Cancel Nav "
+                    "(need explicit_replan in JSON or start_pulse Empty)"
+                )
+            return
+        # 取消遗留的延后启动定时器（防连续改点时任务叠加）
+        dmt = getattr(self, "_delayed_mission_timer", None)
+        if dmt is not None:
+            try:
+                dmt.cancel()
+            except Exception:
+                pass
+            self._delayed_mission_timer = None
+        self._delayed_mission = None
+
+        preempt = False
         with self._sm_lock:
             if self._state == MissionState.WAITING_SYSTEM:
                 self.get_logger().warning(
@@ -368,29 +584,36 @@ class MissionBridgeNode(Node):
 
             if self._state == MissionState.RUNNING:
                 if mh == self._running_mission_hash:
-                    _twall = getattr(self, "_last_dup_wall", 0.0)
-                    if time.time() - _twall > 4.0:
-                        setattr(self, "_last_dup_wall", time.time())
-                        self.get_logger().info("duplicate mission ignored")
-                    return
-                if self._allow_replace_running_mission:
+                    if operator_explicit:
+                        preempt = True
+                    else:
+                        _twall = getattr(self, "_last_dup_wall", 0.0)
+                        if time.time() - _twall > 4.0:
+                            setattr(self, "_last_dup_wall", time.time())
+                            self.get_logger().info("duplicate mission ignored")
+                        return
+                elif (
+                    not self._allow_replace_running_mission and not operator_explicit
+                ):
                     self.get_logger().warning(
-                        "allow_replace_running_mission is true but in-run replacement "
-                        "is not implemented yet; rejecting new mission"
+                        "mission running, new mission rejected "
+                        "(enable allow_replace_running_mission, publish explicit_replan/start_pulse, "
+                        "or Run Mission from GCS)"
                     )
-                self.get_logger().warning("mission running, new mission rejected")
-                return
-
-            if self._state not in (
+                    return
+                else:
+                    preempt = True
+            elif self._state not in (
                 MissionState.IDLE,
                 MissionState.COMPLETED,
                 MissionState.FAILED,
             ):
                 self.get_logger().warning(f"Waypoint ignored in state {self._state}")
                 return
-
-            if (
-                mh == self._last_completed_mission_hash
+            elif (
+                not from_start_pulse
+                and not explicit_replan
+                and mh == self._last_completed_mission_hash
                 and not self._allow_repeat_identical_route
             ):
                 _tc = getattr(self, "_last_done_dup_wall", 0.0)
@@ -401,7 +624,152 @@ class MissionBridgeNode(Node):
                     )
                 return
 
+        if preempt:
+            self._preempt_running_mission_for_new_waypoints()
+            self._delayed_mission = (wps, mh)
+
+            def _deferred_execute() -> None:
+                """一次性定时：开头 cancel，避免 ROS 2 Timer 周期性误触发。"""
+                tmr = getattr(self, "_delayed_mission_timer", None)
+                self._delayed_mission_timer = None
+                if tmr is not None:
+                    try:
+                        tmr.cancel()
+                    except Exception:
+                        pass
+                dm = getattr(self, "_delayed_mission", None)
+                if dm is None:
+                    return
+                if dm[1] != mh:
+                    return
+                self._delayed_mission = None
+                self._execute_mission_atomic(dm[0], dm[1])
+
+            self._delayed_mission_timer = self.create_timer(0.22, _deferred_execute)
+            return
+
         self._execute_mission_atomic(wps, mh)
+
+    def _cb_color(self, msg: String) -> None:
+        if self._dbg:
+            self.get_logger().info(f"[debug] /color_code raw: {msg.data!r}")
+        sem = normalize_color(self, msg.data, self._dbg)
+        if sem is None:
+            return
+        if sem == self._last_written_target_sem and not self._target_buoy_force_rewrite:
+            if self._dbg:
+                self.get_logger().info(
+                    f"[debug] target_buoy unchanged ({sem}), skip rewrite (same as last write)"
+                )
+            return
+
+        if self._target_buoy_min_period > 0.0:
+            _now = time.time()
+            _lw = getattr(self, "_last_target_buoy_any_write_wall", 0.0)
+            if _lw > 0.0 and (_now - _lw) < float(self._target_buoy_min_period):
+                if self._dbg:
+                    self.get_logger().info(
+                        "[debug] target_buoy write throttled "
+                        f"(min period {self._target_buoy_min_period:.2f}s)"
+                    )
+                return
+
+        ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        target_data = {
+            "color": sem,
+            "target": {"color": sem, "timestamp": ts},
+        }
+        try:
+            atomic_write_json(self._target_dir, self._target_path, target_data)
+            self._last_written_target_sem = sem
+            self._last_target_buoy_any_write_wall = time.time()
+            self._log_green(f"Updated target_buoy.json ({sem}) -> {self._target_path}")
+        except Exception as e:
+            self.get_logger().error(f"Failed writing target_buoy.json: {e}")
+
+    def _cb_waypoint(self, msg: String) -> None:
+        if self._dbg:
+            self.get_logger().info(f"[debug] /waypoint raw: {msg.data!r}")
+
+        parsed = parse_waypoint_message(msg.data)
+        if not parsed or not parsed.waypoints:
+            self.get_logger().warning("Invalid or empty waypoint message; skipped")
+            return
+
+        wps = parsed.waypoints
+        explicit = parsed.explicit_replan
+
+        mh = waypoint_mission_hash(wps)
+
+        if (
+            self._suppress_passive_after_cancel
+            and self._suppress_passive_waypoints
+            and not explicit
+            and self._wp_cmd_mode in ("immediate", "debounce")
+        ):
+            _tp = getattr(self, "_last_passive_waypoint_wall", 0.0)
+            if time.time() - _tp > 4.0:
+                setattr(self, "_last_passive_waypoint_wall", time.time())
+                self.get_logger().info(
+                    "passive /waypoint ignored after Cancel Nav "
+                    f"(mode={self._wp_cmd_mode!r})"
+                )
+            return
+
+        if self._wp_cmd_mode == "start_pulse":
+            self._startpulse_route = (wps, mh, explicit)
+            if self._dbg or (
+                time.time() - getattr(self, "_last_stage_log_wall", 0.0) > 12.0
+            ):
+                self._last_stage_log_wall = time.time()
+                self.get_logger().info(
+                    f"start_pulse: staged {len(wps)} waypoint(s), hash={mh[:12]}… "
+                    f"pulse std_msgs/msg/Empty on {self._mission_start_topic!r} to navigate"
+                )
+            return
+
+        if self._wp_cmd_mode == "debounce":
+            self._deb_route = (wps, mh, explicit)
+            self._reschedule_waypoint_commit_timer()
+            return
+
+        self._consume_waypoint_command(
+            wps, mh, from_start_pulse=False, explicit_replan=explicit
+        )
+
+    def _preempt_running_mission_for_new_waypoints(self) -> None:
+        """取消当前发往 Nav2 的 FollowWaypoints，使后续新航线能重新触发全局规划。"""
+        self.get_logger().info(
+            "New GCS waypoint set while navigating — canceling active FollowWaypoints goal"
+        )
+        gh = self._active_goal_handle
+        self._active_goal_handle = None
+
+        if gh is not None or self.navigating:
+            self._discard_next_goal_result = True
+        self.navigating = False
+
+        if gh is not None:
+            try:
+                gh.cancel_goal_async()
+            except Exception as ex:
+                self.get_logger().warning(f"cancel_goal_async: {ex}")
+
+        try:
+            if self._send_timer is not None:
+                try:
+                    self._send_timer.cancel()
+                except Exception:
+                    pass
+                self._send_timer = None
+        except Exception:
+            pass
+
+        with self._sm_lock:
+            self._running_mission_hash = None
+            self._state = MissionState.IDLE
+
+        self._schedule_discard_watchdog_if_needed()
 
     def _execute_mission_atomic(self, wps: List[Tuple[float, float]], mh: str) -> None:
         try:
@@ -554,23 +922,56 @@ class MissionBridgeNode(Node):
         except Exception:
             self.get_logger().error("goal future failed")
             self.navigating = False
-            self._reset_send_timer(2.0)
+            self._active_goal_handle = None
+            if not self._discard_next_goal_result:
+                self._reset_send_timer(2.0)
             return
+
+        # 插队抢占： preempt 早于 accept —— 仍以 cancel 收口，避免遗留旧目标在执行
+        if self._discard_next_goal_result:
+            if goal_handle.accepted:
+                self._active_goal_handle = goal_handle
+                try:
+                    goal_handle.cancel_goal_async()
+                except Exception as ex:
+                    self.get_logger().warning(f"cancel_goal_async (preempt/in-flight accept): {ex}")
+                rf = goal_handle.get_result_async()
+                rf.add_done_callback(self._goal_result_cb)
+            else:
+                self._discard_next_goal_result = False
+                self._cancel_discard_watchdog()
+                self.navigating = False
+            return
+
         if not goal_handle.accepted:
             self.get_logger().error("FollowWaypoints goal rejected")
             self.navigating = False
+            self._active_goal_handle = None
             self._on_nav_fatal()
             return
+
+        self._active_goal_handle = goal_handle
         res_fut = goal_handle.get_result_async()
         res_fut.add_done_callback(self._goal_result_cb)
 
     def _goal_result_cb(self, future: Future) -> None:
         self.navigating = False
+        self._active_goal_handle = None
+
         try:
             raw = future.result()
             status = raw.status if raw else GoalStatus.STATUS_UNKNOWN
         except Exception:
             status = GoalStatus.STATUS_UNKNOWN
+
+        if self._discard_next_goal_result:
+            self._discard_next_goal_result = False
+            self._cancel_discard_watchdog()
+            self.get_logger().info(
+                "Previous waypoint goal discarded for new GCS mission "
+                f"(action status={status})"
+            )
+            return
 
         if status != GoalStatus.STATUS_SUCCEEDED:
             self.get_logger().error(f"Waypoint failed status={status}")
@@ -610,6 +1011,8 @@ class MissionBridgeNode(Node):
         except Exception:
             pass
 
+        self._active_goal_handle = None
+
         self._clear_waypoint_file()
         with self._sm_lock:
             hc = self._running_mission_hash
@@ -641,6 +1044,7 @@ class MissionBridgeNode(Node):
             self._state = MissionState.FAILED
             self._running_mission_hash = None
         self.navigating = False
+        self._active_goal_handle = None
         try:
             if self._send_timer is not None:
                 try:

@@ -1,1 +1,28 @@
-{}
+{
+  "waypoints": [
+    {
+      "latitude": 31.48724,
+      "longitude": 120.36924,
+      "x": 123.9134,
+      "y": 117.8039
+    }
+  ],
+  "datum": {
+    "latitude": 31.48618175,
+    "longitude": 120.36793468
+  },
+  "datum_source_meta": {
+    "datum_source": "map_yaml",
+    "map_yaml": "/home/ght/wuxihik_navigation/src/YILDIZ-USV/workspace_nav/config/map_hk.yaml",
+    "map_datum_ref_key": "ref_gnss_10",
+    "projection": "enu"
+  },
+  "map_frame_meta": {
+    "frame_id": "map",
+    "description": "x,y \u4e3a Nav2 map \u5750\u6807\uff08\u7c73\uff09\u3002datum_source=map_yaml \u65f6\u5df2\u5e94\u7528 map.yaml \u7684 origin \u5e73\u79fb\u4e0e\u65cb\u8f6c\uff1bfirst_gps \u65f6\u4e3a\u76f8\u5bf9\u9996\u5e27 GPS \u7684\u5e73\u9762\u5750\u6807\uff0c\u4e0d\u4e00\u5b9a\u4e0e map \u4e00\u81f4\u3002",
+    "origin_x": 0.0,
+    "origin_y": 0.0,
+    "origin_yaw_rad": 0.0,
+    "applied_origin_transform": true
+  }
+}
