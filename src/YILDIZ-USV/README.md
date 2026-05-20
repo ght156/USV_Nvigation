@@ -39,6 +39,12 @@ source install/setup.bash
 
 默认地图：`workspace_nav/config/map_hk.yaml`。换图时对 `nav2.launch.py` 传同一 `map:=` 路径，并同步 `navsat.yaml` 的 `datum`。
 
+## 任务下发流程
+
+地面站点击 **Run Mission** 后，`waypoint_publisher.py` **事件式 burst 发布**（0.2 s 间隔 × 3 次，带 `mission_id` + `explicit_replan`）然后自动退出。船端 `mission_bridge.py` 通过 `debounce` 模式（0.5 s 窗口）接收并去重，写 `waypoints.json` 后逐点调用 Nav2 FollowWaypoints。
+
+取消任务通过地面站 **Cancel Nav** → `cancel_publisher.py`（一发即退 rclpy 节点）→ `mission_bridge` 清空缓冲并 preempt 当前 goal。
+
 ## 文档
 
 | 文档 | 说明 |

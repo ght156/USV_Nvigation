@@ -145,8 +145,10 @@ def normalize_color(nav: Optional[Node], raw: str, debug: bool) -> Optional[str]
     return None
 
 
-def waypoint_mission_hash(waypoints: List[Tuple[float, float]]) -> str:
-    norm = [{"latitude": lat, "longitude": lon} for lat, lon in waypoints]
+def waypoint_mission_hash(waypoints: List[Tuple[float, float]], mission_id: str = "") -> str:
+    norm: List[Dict[str, Any]] = [{"latitude": lat, "longitude": lon} for lat, lon in waypoints]
+    if mission_id:
+        norm.append({"mission_id": mission_id})
     blob = json.dumps(norm, sort_keys=True).encode("utf-8")
     return hashlib.sha256(blob).hexdigest()
 
@@ -698,8 +700,15 @@ class MissionBridgeNode(Node):
 
         wps = parsed.waypoints
         explicit = parsed.explicit_replan
+        mission_id = parsed.mission_id
 
-        mh = waypoint_mission_hash(wps)
+        mh = waypoint_mission_hash(wps, mission_id)
+
+        if mission_id:
+            self.get_logger().info(
+                f"Received mission_id={mission_id}  "
+                f"waypoints={len(wps)}  explicit={explicit}  hash={mh[:12]}…"
+            )
 
         if (
             self._suppress_passive_after_cancel
@@ -747,7 +756,8 @@ class MissionBridgeNode(Node):
 
         if gh is not None or self.navigating:
             self._discard_next_goal_result = True
-        self.navigating = False
+        with self._sm_lock:
+            self.navigating = False
 
         if gh is not None:
             try:
@@ -841,7 +851,6 @@ class MissionBridgeNode(Node):
         except Exception:
             pass
 
-        self._current_pose_xy = (0.0, 0.0)
         if self._odom_sub is None:
             self._odom_sub = self.create_subscription(
                 Odometry, self._odom_topic, self._odom_cb, 10
@@ -862,7 +871,7 @@ class MissionBridgeNode(Node):
 
     def create_pose_msg(self, x: float, y: float, z: float = 0.0, yaw: float = 0.0) -> PoseStamped:
         pose = PoseStamped()
-        pose.header.frame_id = "map"
+        pose.header.frame_id = self._global_frame
         pose.header.stamp = self.get_clock().now().to_msg()
         pose.pose.position.x = x
         pose.pose.position.y = y
@@ -875,27 +884,28 @@ class MissionBridgeNode(Node):
         with self._sm_lock:
             if self._state != MissionState.RUNNING:
                 return
+            if self.navigating:
+                return
+            if self.current_index >= len(self._nav_xy):
+                return
+            x, y = self._nav_xy[self.current_index]
 
-        if self.navigating:
-            return
-        if self.current_index >= len(self._nav_xy):
-            return
-
-        x, y = self._nav_xy[self.current_index]
         rx, ry = self._robot_xy()
         dist = math.hypot(x - rx, y - ry)
         if dist <= self._tolerance:
             self.get_logger().info(
                 f"Waypoint {self.current_index + 1} within tolerance; skipping."
             )
-            self.current_index += 1
+            with self._sm_lock:
+                self.current_index += 1
             self._reset_send_timer(0.5)
             self._finalize_if_done()
             return
 
         goal = FollowWaypoints.Goal()
         goal.poses = [self.create_pose_msg(x, y, 0.0, 0.0)]
-        self.navigating = True
+        with self._sm_lock:
+            self.navigating = True
         self._log_green(
             f"Sending waypoint {self.current_index + 1}/{len(self._nav_xy)} x={x:.2f}, y={y:.2f}"
         )
@@ -921,7 +931,8 @@ class MissionBridgeNode(Node):
             goal_handle = future.result()
         except Exception:
             self.get_logger().error("goal future failed")
-            self.navigating = False
+            with self._sm_lock:
+                self.navigating = False
             self._active_goal_handle = None
             if not self._discard_next_goal_result:
                 self._reset_send_timer(2.0)
@@ -940,12 +951,14 @@ class MissionBridgeNode(Node):
             else:
                 self._discard_next_goal_result = False
                 self._cancel_discard_watchdog()
-                self.navigating = False
+                with self._sm_lock:
+                    self.navigating = False
             return
 
         if not goal_handle.accepted:
             self.get_logger().error("FollowWaypoints goal rejected")
-            self.navigating = False
+            with self._sm_lock:
+                self.navigating = False
             self._active_goal_handle = None
             self._on_nav_fatal()
             return
@@ -955,7 +968,8 @@ class MissionBridgeNode(Node):
         res_fut.add_done_callback(self._goal_result_cb)
 
     def _goal_result_cb(self, future: Future) -> None:
-        self.navigating = False
+        with self._sm_lock:
+            self.navigating = False
         self._active_goal_handle = None
 
         try:
@@ -979,10 +993,9 @@ class MissionBridgeNode(Node):
             return
 
         self._log_green(f"Waypoint {self.current_index + 1} reached successfully.")
-        self.current_index += 1
-
         done = False
         with self._sm_lock:
+            self.current_index += 1
             if self.current_index >= len(self._nav_xy):
                 done = True
 
@@ -1043,7 +1056,7 @@ class MissionBridgeNode(Node):
         with self._sm_lock:
             self._state = MissionState.FAILED
             self._running_mission_hash = None
-        self.navigating = False
+            self.navigating = False
         self._active_goal_handle = None
         try:
             if self._send_timer is not None:

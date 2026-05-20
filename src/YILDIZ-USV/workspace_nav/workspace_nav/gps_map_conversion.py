@@ -18,6 +18,7 @@ class WaypointParseResult(NamedTuple):
 
     waypoints: List[Tuple[float, float]]
     explicit_replan: bool
+    mission_id: str
 
 
 def parse_waypoint_message(data_str: str) -> Optional[WaypointParseResult]:
@@ -31,6 +32,7 @@ def parse_waypoint_message(data_str: str) -> Optional[WaypointParseResult]:
         return None
 
     explicit = False
+    mission_id = ""
 
     waypoints_list: Optional[List[Any]] = None
     if isinstance(json_data, list):
@@ -59,6 +61,10 @@ def parse_waypoint_message(data_str: str) -> Optional[WaypointParseResult]:
             lc = cmd.strip().lower()
             if lc in ("start", "replan", "restart", "reload"):
                 explicit = True
+
+        mid = json_data.get("mission_id")
+        if isinstance(mid, str) and mid.strip():
+            mission_id = mid.strip()
     if not waypoints_list:
         return None
 
@@ -79,7 +85,7 @@ def parse_waypoint_message(data_str: str) -> Optional[WaypointParseResult]:
         parsed.append((lat, lon))
     if not parsed:
         return None
-    return WaypointParseResult(parsed, explicit)
+    return WaypointParseResult(parsed, explicit, mission_id)
 
 
 
