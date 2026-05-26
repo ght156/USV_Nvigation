@@ -23,6 +23,28 @@ nav2_maps:
     - global_costmap.ros__parameters.footprint
     - controller_server.ros__parameters.FollowPath
 
+  # 地图分辨率对控制行为的影响（重要）：
+  # 不同地图的 resolution (m/pixel) 会影响 SmacPlanner2D 产生的路径平滑度，进而影响
+  # RegulatedPurePursuitController 的曲率检测和速度缩放行为。
+  #
+  # 因果链：地图分辨率 → 路径平滑度 → RPP 曲率检测 → 线速度压制 → 原地打转
+  #
+  # 粗分辨率地图（如 map_shanxi 7.71m/pixel）：
+  #   - 全局 costmap 虽以 0.5m 重采样，但信息呈块状（~15 cell 同值）
+  #   - 路径即使经过 smoother 仍可能产生较急弯折
+  #   - 更多路径段被 RPP 判定为曲率 < min_radius，线速度被压到 min_speed
+  #   - 低速下差动推力占比过大 → 船原地旋转而非前进
+  #
+  # 细分辨率地图（如 map_hk 1.0m/pixel）：
+  #   - 路径自然平滑，大部分段曲率低于阈值
+  #   - 线速度保持 desired_linear_vel，船正常航行
+  #
+  # 切换地图时的调参检查项：
+  #   - FollowPath.regulated_linear_scaling_min_speed（确保低速仍有舵效）
+  #   - FollowPath.regulated_linear_scaling_min_radius（与地图分辨率匹配）
+  #   - FollowPath.min_lookahead_dist（低速时 carrot 不能太远）
+  #   - converter 的 linear_scale / angular_scale 通常无需因地图而改
+
 cmd_vel_to_thrusters_sim:
   converter: workspace_ros/scripts/converter.py
   manual_keyboard: workspace_ros/scripts/manual_control.py

@@ -339,13 +339,14 @@ class MissionBridgeNode(Node):
         self.current_index = 0
         self.navigating = False
         self._current_pose_xy = (0.0, 0.0)
+        self._have_odom = False
         self._pose_lock = threading.Lock()
         self._odom_sub: Optional[Any] = None
         self._send_timer: Optional[Any] = None
         self._idle_transition_timer: Optional[Any] = None
         # 当前发往 Nav2 的 FollowWaypoints goal（用于地面站换新任务时 cancel）
         self._active_goal_handle: Optional[Any] = None
-        self._discard_next_goal_result = False
+        self._mission_token = 0
         self._delayed_mission_timer: Optional[Any] = None
         self._delayed_mission: Optional[Tuple[List[Tuple[float, float]], str]] = None
         self._waypoint_commit_timer: Optional[Any] = None
@@ -355,7 +356,6 @@ class MissionBridgeNode(Node):
         self._startpulse_route: Optional[
             Tuple[List[Tuple[float, float]], str, bool]
         ] = None
-        self._discard_watchdog_timer: Optional[Any] = None
 
         self._mission_start_topic = ms_top
         self._mission_cancel_topic = mc_top.strip()
@@ -437,38 +437,6 @@ class MissionBridgeNode(Node):
         except Exception:
             return False
 
-    def _cancel_discard_watchdog(self) -> None:
-        tmr = getattr(self, "_discard_watchdog_timer", None)
-        self._discard_watchdog_timer = None
-        if tmr is not None:
-            try:
-                tmr.cancel()
-            except Exception:
-                pass
-
-    def _schedule_discard_watchdog_if_needed(self) -> None:
-        self._cancel_discard_watchdog()
-        if self._discard_watchdog_sec <= 0.0:
-            return
-        if not self._discard_next_goal_result:
-            return
-        self._discard_watchdog_timer = self.create_timer(
-            float(self._discard_watchdog_sec),
-            self._discard_watchdog_fired,
-        )
-
-    def _discard_watchdog_fired(self) -> None:
-        self._cancel_discard_watchdog()
-
-        if not self._discard_next_goal_result:
-            return
-        self.get_logger().warning(
-            "FollowWaypoints discard watchdog: forcing discard_next_goal_result=False "
-            f"(had been True for ≥{self._discard_watchdog_sec:.1f}s)"
-        )
-        self._discard_next_goal_result = False
-        self.navigating = False
-
     def _cancel_waypoint_commit_timer(self) -> None:
         wt = getattr(self, "_waypoint_commit_timer", None)
         self._waypoint_commit_timer = None
@@ -527,6 +495,7 @@ class MissionBridgeNode(Node):
         self._deb_route = None
         self._startpulse_route = None
         self._cancel_waypoint_commit_timer()
+        self._clear_waypoint_file()
 
         dmt = getattr(self, "_delayed_mission_timer", None)
         if dmt is not None:
@@ -755,7 +724,10 @@ class MissionBridgeNode(Node):
         self._active_goal_handle = None
 
         if gh is not None or self.navigating:
-            self._discard_next_goal_result = True
+            self._mission_token += 1
+            self.get_logger().info(
+                f"Mission token bumped to {self._mission_token} (preempt)"
+            )
         with self._sm_lock:
             self.navigating = False
 
@@ -778,8 +750,6 @@ class MissionBridgeNode(Node):
         with self._sm_lock:
             self._running_mission_hash = None
             self._state = MissionState.IDLE
-
-        self._schedule_discard_watchdog_if_needed()
 
     def _execute_mission_atomic(self, wps: List[Tuple[float, float]], mh: str) -> None:
         try:
@@ -813,6 +783,11 @@ class MissionBridgeNode(Node):
                 )
                 for e in document["waypoints"]
             ]
+
+            self._mission_token += 1
+            self.get_logger().info(
+                f"Mission token bumped to {self._mission_token} (new mission)"
+            )
 
             with self._sm_lock:
                 if self._state not in (
@@ -859,6 +834,7 @@ class MissionBridgeNode(Node):
         self._send_timer = self.create_timer(2.0, self._send_next_waypoint)
 
     def _odom_cb(self, msg: Odometry) -> None:
+        self._have_odom = True
         with self._pose_lock:
             self._current_pose_xy = (
                 msg.pose.pose.position.x,
@@ -881,6 +857,10 @@ class MissionBridgeNode(Node):
         return pose
 
     def _send_next_waypoint(self) -> None:
+        if not self._have_odom:
+            self.get_logger().warning("Waiting for odometry before sending waypoint")
+            self._reset_send_timer(0.5)
+            return
         with self._sm_lock:
             if self._state != MissionState.RUNNING:
                 return
@@ -915,8 +895,11 @@ class MissionBridgeNode(Node):
             self._on_nav_fatal()
             return
 
+        send_token = self._mission_token
         gh_fut = self._waypoint_client.send_goal_async(goal)
-        gh_fut.add_done_callback(self._goal_response_cb)
+        gh_fut.add_done_callback(
+            lambda future, t=send_token: self._goal_response_cb(future, t)
+        )
 
     def _reset_send_timer(self, sec: float) -> None:
         try:
@@ -926,7 +909,23 @@ class MissionBridgeNode(Node):
             pass
         self._send_timer = self.create_timer(sec, self._send_next_waypoint)
 
-    def _goal_response_cb(self, future: Future) -> None:
+    def _goal_response_cb(self, future: Future, send_token: int) -> None:
+        if send_token != self._mission_token:
+            try:
+                goal_handle = future.result()
+            except Exception:
+                return
+            if goal_handle.accepted:
+                try:
+                    goal_handle.cancel_goal_async()
+                except Exception:
+                    pass
+                rf = goal_handle.get_result_async()
+                rf.add_done_callback(
+                    lambda f, t=send_token: self._goal_result_cb(f, t)
+                )
+            return
+
         try:
             goal_handle = future.result()
         except Exception:
@@ -934,25 +933,7 @@ class MissionBridgeNode(Node):
             with self._sm_lock:
                 self.navigating = False
             self._active_goal_handle = None
-            if not self._discard_next_goal_result:
-                self._reset_send_timer(2.0)
-            return
-
-        # 插队抢占： preempt 早于 accept —— 仍以 cancel 收口，避免遗留旧目标在执行
-        if self._discard_next_goal_result:
-            if goal_handle.accepted:
-                self._active_goal_handle = goal_handle
-                try:
-                    goal_handle.cancel_goal_async()
-                except Exception as ex:
-                    self.get_logger().warning(f"cancel_goal_async (preempt/in-flight accept): {ex}")
-                rf = goal_handle.get_result_async()
-                rf.add_done_callback(self._goal_result_cb)
-            else:
-                self._discard_next_goal_result = False
-                self._cancel_discard_watchdog()
-                with self._sm_lock:
-                    self.navigating = False
+            self._reset_send_timer(2.0)
             return
 
         if not goal_handle.accepted:
@@ -965,27 +946,31 @@ class MissionBridgeNode(Node):
 
         self._active_goal_handle = goal_handle
         res_fut = goal_handle.get_result_async()
-        res_fut.add_done_callback(self._goal_result_cb)
+        res_fut.add_done_callback(
+            lambda f, t=send_token: self._goal_result_cb(f, t)
+        )
 
-    def _goal_result_cb(self, future: Future) -> None:
+    def _goal_result_cb(self, future: Future, send_token: int) -> None:
         with self._sm_lock:
             self.navigating = False
         self._active_goal_handle = None
+
+        if send_token != self._mission_token:
+            try:
+                raw = future.result()
+                status = raw.status if raw else GoalStatus.STATUS_UNKNOWN
+            except Exception:
+                status = GoalStatus.STATUS_UNKNOWN
+            self.get_logger().info(
+                f"Discarding stale goal result (token {send_token} != {self._mission_token}, status={status})"
+            )
+            return
 
         try:
             raw = future.result()
             status = raw.status if raw else GoalStatus.STATUS_UNKNOWN
         except Exception:
             status = GoalStatus.STATUS_UNKNOWN
-
-        if self._discard_next_goal_result:
-            self._discard_next_goal_result = False
-            self._cancel_discard_watchdog()
-            self.get_logger().info(
-                "Previous waypoint goal discarded for new GCS mission "
-                f"(action status={status})"
-            )
-            return
 
         if status != GoalStatus.STATUS_SUCCEEDED:
             self.get_logger().error(f"Waypoint failed status={status}")
@@ -1047,7 +1032,7 @@ class MissionBridgeNode(Node):
         try:
             self._waypoints_path.parent.mkdir(parents=True, exist_ok=True)
             with self._waypoints_path.open("w", encoding="utf-8") as f:
-                f.write("{}")
+                json.dump({"waypoints": []}, f)
             self.get_logger().info(f"Waypoint file cleared: {self._waypoints_path}")
         except Exception as e:
             self.get_logger().error(f"Failed clearing waypoint file: {e}")

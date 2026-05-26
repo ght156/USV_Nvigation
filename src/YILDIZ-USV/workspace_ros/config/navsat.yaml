@@ -13,4 +13,6 @@ navsat_transform_node:
     publish_filtered_gps: true
     wait_for_datum: true
     #datum: [30.64534831, 119.92304646, 0.0]
-    datum: [31.48618175, 120.36793468, 0.0]
+    datum: [31.48618175, 120.36793468, 0.0]  #hk
+    #datum: [27.54541513, 119.76308268, 0.0]
+    

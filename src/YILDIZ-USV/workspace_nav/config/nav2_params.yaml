@@ -62,7 +62,7 @@ controller_server:
       desired_linear_vel: 1.2        
       max_angular_accel: 2.0           
       allow_reversing: false 
-     
+     #船越容易画圈，就把速度降下来、前视距离加大、曲率限速放宽一点。
       lookahead_time: 2.0
       use_velocity_scaled_lookahead_dist: true
       min_lookahead_dist: 1.0
@@ -70,7 +70,11 @@ controller_server:
       cost_scaling_factor: 0.5
       inflation_radius: 1.5
 
-      use_regulated_linear_velocity_scaling: true    
+      use_regulated_linear_velocity_scaling: true
+      # NOTE: min_speed/min_radius 须与当前地图分辨率匹配。
+      # 粗分辨率地图（如 shanxi 7.71m/pixel）路径平滑度差，更易触发曲率阈值，
+      # 导致速度被压到 min_speed 而原地打转。切换地图后若船画圈，优先调这两个值。
+      # 详见 boat_parameters_index.yaml nav2_maps 节。
       regulated_linear_scaling_min_speed: 0.1
       regulated_linear_scaling_min_radius: 2.0 
       use_cost_regulated_linear_velocity_scaling: false
@@ -131,7 +135,7 @@ global_costmap:
       use_sim_time: True
       rolling_window: false
       footprint: "[[0.5, 0.3], [0.5, -0.3], [-0.5, -0.3], [-0.5, 0.3]]"
-      resolution: 0.5
+      resolution: 7.8
       track_unknown_space: True
       plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
       obstacle_layer:
