@@ -397,6 +397,9 @@ class MissionBridgeNode(Node):
                 10,
             )
 
+        # Publish internal state so GCS can monitor true mission progress (vs dispatch-only state)
+        self._state_pub = self.create_publisher(String, '/mission_bridge/state', 10)
+
         self._suppress_passive_waypoints = False
         self._last_passive_waypoint_wall = 0.0
 
@@ -416,12 +419,22 @@ class MissionBridgeNode(Node):
     def _log_green(self, s: str) -> None:
         self.get_logger().info(f"{GREEN}{s}{RESET}")
 
+    def _transition_state(self, new_state: MissionState) -> None:
+        """Set internal state and publish to /mission_bridge/state for GCS."""
+        prev = self._state
+        self._state = new_state
+        if new_state != prev:
+            msg = String()
+            msg.data = str(new_state.value)
+            self._state_pub.publish(msg)
+            self.get_logger().info(f"STATE -> {new_state.value}")
+
     def _tick_ready(self) -> None:
         with self._sm_lock:
             if self._state != MissionState.WAITING_SYSTEM:
                 return
             if self._tf_ok() and self._waypoint_client.wait_for_server(timeout_sec=0.2):
-                self._state = MissionState.IDLE
+                self._transition_state(MissionState.IDLE)
                 self._log_green(f"TF ready: {self._global_frame} -> {self._robot_frame}")
                 self.get_logger().info("FollowWaypoints action server ready")
                 self.get_logger().info("STATE -> IDLE")
@@ -749,7 +762,7 @@ class MissionBridgeNode(Node):
 
         with self._sm_lock:
             self._running_mission_hash = None
-            self._state = MissionState.IDLE
+            self._transition_state(MissionState.IDLE)
 
     def _execute_mission_atomic(self, wps: List[Tuple[float, float]], mh: str) -> None:
         try:
@@ -801,7 +814,7 @@ class MissionBridgeNode(Node):
                 self.current_index = 0
                 self.navigating = False
                 self._running_mission_hash = mh
-                self._state = MissionState.RUNNING
+                self._transition_state(MissionState.RUNNING)
                 self._log_green(
                     f"STATE -> RUNNING (mission hash {mh[:12]}…) {len(nav_xy)} poses"
                 )
@@ -811,7 +824,7 @@ class MissionBridgeNode(Node):
         except Exception as e:
             self.get_logger().error(f"Failed to execute mission: {e}")
             with self._sm_lock:
-                self._state = MissionState.FAILED
+                self._transition_state(MissionState.FAILED)
                 self._running_mission_hash = None
             self._state_to_idle_relaxed()
 
@@ -1016,8 +1029,8 @@ class MissionBridgeNode(Node):
             hc = self._running_mission_hash
             self._last_completed_mission_hash = hc
             self._running_mission_hash = None
-            self._state = MissionState.COMPLETED
-        self.get_logger().info("All waypoints completed. STATE -> COMPLETED")
+            self._transition_state(MissionState.COMPLETED)
+        self.get_logger().info("All waypoints completed.")
 
         try:
             if self._odom_sub is not None:
@@ -1039,7 +1052,7 @@ class MissionBridgeNode(Node):
 
     def _on_nav_fatal(self) -> None:
         with self._sm_lock:
-            self._state = MissionState.FAILED
+            self._transition_state(MissionState.FAILED)
             self._running_mission_hash = None
             self.navigating = False
         self._active_goal_handle = None
@@ -1086,8 +1099,7 @@ class MissionBridgeNode(Node):
     def _defer_idle(self) -> None:
         with self._sm_lock:
             if self._state in (MissionState.COMPLETED, MissionState.FAILED):
-                self._state = MissionState.IDLE
-                self.get_logger().info("STATE -> IDLE")
+                self._transition_state(MissionState.IDLE)
 
 
 def main(args: Optional[list] = None) -> None:
