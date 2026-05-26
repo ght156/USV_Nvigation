@@ -15,6 +15,8 @@ class Nav2ThrusterController(Node):
     def __init__(self):
         super().__init__('converter')
 
+        self.declare_parameter('cmd_vel_topic', '/cmd_vel_nav')
+
         self.left_thruster_topic = '/roboboat/thrusters/left/thrust'
         self.right_thruster_topic = '/roboboat/thrusters/right/thrust'
 
@@ -24,12 +26,14 @@ class Nav2ThrusterController(Node):
         self.linear_scale = 1.75
         self.angular_scale = 20.0
 
+        cmd_vel_topic = self.get_parameter('cmd_vel_topic').value
         self.cmd_vel_sub = self.create_subscription(
             Twist,
-            '/cmd_vel_nav',
+            cmd_vel_topic,
             self.cmd_vel_callback,
             20
         )
+        self.get_logger().info(f'Subscribing to cmd_vel: {cmd_vel_topic}')
 
         self.stop_motors()
 

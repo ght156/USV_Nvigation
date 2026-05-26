@@ -1,0 +1,22 @@
+{
+  "task_id": "demo_task_001",
+  "tile_source": "tianditu_vec",
+  "bbox": {
+    "min_lon": 119.76308268,
+    "min_lat": 27.54541513,
+    "max_lon": 120.0832403,
+    "max_lat": 27.75586125
+  },
+  "width_px": 7461,
+  "height_px": 5536,
+  "zoom_used": 15,
+  "meters_per_pixel": 4.2317152190743945,
+  "ref_corner": "south_west",
+  "row_axis": "north_to_south",
+  "transform_version": "wm-v1",
+  "paths": {
+    "png": "outputs/demo_task_001/snapshot/base_map.png",
+    "meta": "outputs/demo_task_001/snapshot/base_map.meta.json",
+    "pgw": "outputs/demo_task_001/snapshot/base_map.pgw"
+  }
+}
