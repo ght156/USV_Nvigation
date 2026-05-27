@@ -105,6 +105,27 @@ def generate_launch_description():
                 "target_buoy.json 最小写盘间隔（秒）；0 关闭。"
                 "与「同色跳过」并行，可压住 GCS 红绿交替语义导致的刷屏写盘",
             ),
+            # nav_status_aggregator launch arguments
+            _decl(
+                "nav_status_publish_rate",
+                "2.0",
+                "聚合器发布频率（Hz）",
+            ),
+            _decl(
+                "nav_status_vehicle_id",
+                "usv_001",
+                "车辆 ID",
+            ),
+            _decl(
+                "aggregator_gps_topic",
+                "/gps/fixed_cov",
+                "GPS fix 话题（聚合器用）",
+            ),
+            _decl(
+                "aggregator_odom_topic",
+                "/odometry/filtered",
+                "里程计话题（聚合器用）",
+            ),
             Node(
                 package="workspace_nav",
                 executable="mission_bridge",
@@ -169,6 +190,30 @@ def generate_launch_description():
                         ),
                         "target_buoy_min_write_period_sec": ParameterValue(
                             lc("target_buoy_min_write_period_sec"), value_type=float
+                        ),
+                    },
+                ],
+            ),
+            # nav_status_aggregator: pure observer, no goals sent
+            Node(
+                package="workspace_nav",
+                executable="nav_status_aggregator",
+                name="nav_status_aggregator",
+                output="screen",
+                parameters=[
+                    {"use_sim_time": ParameterValue(use_sim_time, value_type=bool)},
+                    {
+                        "publish_rate": ParameterValue(
+                            lc("nav_status_publish_rate"), value_type=float
+                        ),
+                        "vehicle_id": ParameterValue(
+                            lc("nav_status_vehicle_id"), value_type=str
+                        ),
+                        "gps_topic": ParameterValue(
+                            lc("aggregator_gps_topic"), value_type=str
+                        ),
+                        "odom_topic": ParameterValue(
+                            lc("aggregator_odom_topic"), value_type=str
                         ),
                     },
                 ],

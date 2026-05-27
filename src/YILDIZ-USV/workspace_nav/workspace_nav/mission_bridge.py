@@ -339,6 +339,9 @@ class MissionBridgeNode(Node):
         self.current_index = 0
         self.navigating = False
         self._current_pose_xy = (0.0, 0.0)
+        self._current_mission_id: Optional[str] = None
+        self._current_command_id: Optional[str] = None
+        self._mission_start_wall: float = 0.0
         self._have_odom = False
         self._pose_lock = threading.Lock()
         self._odom_sub: Optional[Any] = None
@@ -400,6 +403,10 @@ class MissionBridgeNode(Node):
         # Publish internal state so GCS can monitor true mission progress (vs dispatch-only state)
         self._state_pub = self.create_publisher(String, '/mission_bridge/state', 10)
 
+        # Publish enriched status detail for nav_status_aggregator consumption
+        self._status_detail_pub = self.create_publisher(String, '/mission_bridge/status_detail', 10)
+        self._status_detail_timer = self.create_timer(0.5, self._status_detail_heartbeat)
+
         self._suppress_passive_waypoints = False
         self._last_passive_waypoint_wall = 0.0
 
@@ -418,6 +425,37 @@ class MissionBridgeNode(Node):
 
     def _log_green(self, s: str) -> None:
         self.get_logger().info(f"{GREEN}{s}{RESET}")
+
+    def _publish_status_detail(self, state_override: Optional[str] = None, error_code: Optional[str] = None) -> None:
+        """Publish /mission_bridge/status_detail JSON for nav_status_aggregator."""
+        with self._sm_lock:
+            if state_override is None and self._state != MissionState.RUNNING:
+                return
+            state = state_override or self._state.value
+            task_id = self._current_mission_id or ""
+            command_id = self._current_command_id or ""
+            waypoint_total = len(self._nav_xy) if self._nav_xy else 0
+            waypoint_current_index = self.current_index
+            waypoint_completed = self.current_index
+            elapsed = 0.0
+            if self._mission_start_wall > 0.0:
+                elapsed = time.time() - self._mission_start_wall
+        msg = String()
+        msg.data = json.dumps({
+            "state": state,
+            "task_id": task_id,
+            "command_id": command_id,
+            "waypoint_total": waypoint_total,
+            "waypoint_completed": waypoint_completed,
+            "waypoint_current_index": waypoint_current_index,
+            "elapsed_sec": round(elapsed, 1),
+            "error_code": error_code,
+        })
+        self._status_detail_pub.publish(msg)
+
+    def _status_detail_heartbeat(self) -> None:
+        """2 Hz heartbeat — only publishes status_detail when RUNNING."""
+        self._publish_status_detail()
 
     def _transition_state(self, new_state: MissionState) -> None:
         """Set internal state and publish to /mission_bridge/state for GCS."""
@@ -684,6 +722,20 @@ class MissionBridgeNode(Node):
         explicit = parsed.explicit_replan
         mission_id = parsed.mission_id
 
+        # Parse command_id from raw JSON for status_detail publishing
+        command_id = ""
+        try:
+            payload = json.loads(msg.data)
+            if isinstance(payload, dict):
+                cid = payload.get("command_id")
+                if isinstance(cid, str) and cid.strip():
+                    command_id = cid.strip()
+        except Exception:
+            pass
+
+        self._current_mission_id = mission_id if mission_id else None
+        self._current_command_id = command_id if command_id else None
+
         mh = waypoint_mission_hash(wps, mission_id)
 
         if mission_id:
@@ -764,6 +816,8 @@ class MissionBridgeNode(Node):
             self._running_mission_hash = None
             self._transition_state(MissionState.IDLE)
 
+        self._publish_status_detail(state_override="IDLE")
+
     def _execute_mission_atomic(self, wps: List[Tuple[float, float]], mh: str) -> None:
         try:
             document = lat_lon_list_to_waypoints_document(
@@ -818,6 +872,9 @@ class MissionBridgeNode(Node):
                 self._log_green(
                     f"STATE -> RUNNING (mission hash {mh[:12]}…) {len(nav_xy)} poses"
                 )
+
+            self._mission_start_wall = time.time()
+            self._publish_status_detail()
 
             self._start_nav_stack()
 
@@ -990,12 +1047,26 @@ class MissionBridgeNode(Node):
             self._on_nav_failed()
             return
 
+        # Nav2 FollowWaypoints may return SUCCEEDED even when a waypoint was
+        # skipped (planner failed, waypoint marked as "missed").  Check the
+        # result for missed_waypoints.
+        missed = getattr(raw.result, "missed_waypoints", [])
+        if missed:
+            self.get_logger().error(
+                f"Waypoint {self.current_index + 1} MISSED "
+                f"(planner could not reach target, moving to next)"
+            )
+            self._on_nav_failed()
+            return
+
         self._log_green(f"Waypoint {self.current_index + 1} reached successfully.")
         done = False
         with self._sm_lock:
             self.current_index += 1
             if self.current_index >= len(self._nav_xy):
                 done = True
+
+        self._publish_status_detail()
 
         if done:
             self._finish_all_waypoints_success()
@@ -1031,6 +1102,8 @@ class MissionBridgeNode(Node):
             self._running_mission_hash = None
             self._transition_state(MissionState.COMPLETED)
         self.get_logger().info("All waypoints completed.")
+
+        self._publish_status_detail(state_override="COMPLETED")
 
         try:
             if self._odom_sub is not None:
@@ -1073,6 +1146,7 @@ class MissionBridgeNode(Node):
             pass
 
         self.get_logger().error("MISSION FAILED — STATE -> FAILED")
+        self._publish_status_detail(state_override="FAILED", error_code="MISSION_FAILED")
         self._state_to_idle_relaxed()
 
     def _on_nav_failed(self) -> None:

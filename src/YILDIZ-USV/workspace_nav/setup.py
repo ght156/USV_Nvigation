@@ -55,6 +55,7 @@ setup(
             'waypoint_transform = workspace_nav.waypoint_transform:main',
             'waypoint_with_state = workspace_nav.waypoint_with_state:main',
             'mission_bridge = workspace_nav.mission_bridge:main',
+            'nav_status_aggregator = workspace_nav.nav_status_aggregator:main',
         ],
     },
 )
