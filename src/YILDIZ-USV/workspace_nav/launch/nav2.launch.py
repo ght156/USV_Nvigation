@@ -87,6 +87,12 @@ def generate_launch_description():
         description='True: spawn mission_bridge (/waypoint, /color_code) with same map as Nav2'
     )
 
+    declare_mission_bridge_params_file_cmd = DeclareLaunchArgument(
+        'mission_bridge_params_file',
+        default_value='',
+        description='Optional YAML for mission_bridge + nav_status_aggregator (see mission_stack.example.yaml)',
+    )
+
     mission_bridge_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             PathJoinSubstitution([
@@ -98,6 +104,7 @@ def generate_launch_description():
         launch_arguments=[
             ('use_sim_time', use_sim_time),
             ('map_yaml_path', map_topic),
+            ('params_file', LaunchConfiguration('mission_bridge_params_file')),
         ],
         condition=IfCondition(enable_mission_bridge),
     )
@@ -132,6 +139,7 @@ def generate_launch_description():
     ld.add_action(declare_use_rviz_cmd)
     ld.add_action(declare_rviz_config_cmd)
     ld.add_action(declare_enable_mission_bridge_cmd)
+    ld.add_action(declare_mission_bridge_params_file_cmd)
     ld.add_action(mission_bridge_launch)
     ld.add_action(start_nav2_cmd)
     ld.add_action(start_rviz_cmd)

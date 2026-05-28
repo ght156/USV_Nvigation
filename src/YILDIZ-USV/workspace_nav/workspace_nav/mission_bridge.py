@@ -426,7 +426,10 @@ class MissionBridgeNode(Node):
     def _log_green(self, s: str) -> None:
         self.get_logger().info(f"{GREEN}{s}{RESET}")
 
-    def _publish_status_detail(self, state_override: Optional[str] = None, error_code: Optional[str] = None) -> None:
+    def _publish_status_detail(self, state_override: Optional[str] = None,
+                               error_code: Optional[str] = None,
+                               nav2_error_code: int = 0,
+                               nav2_error_msg: str = "") -> None:
         """Publish /mission_bridge/status_detail JSON for nav_status_aggregator."""
         with self._sm_lock:
             if state_override is None and self._state != MissionState.RUNNING:
@@ -440,8 +443,7 @@ class MissionBridgeNode(Node):
             elapsed = 0.0
             if self._mission_start_wall > 0.0:
                 elapsed = time.time() - self._mission_start_wall
-        msg = String()
-        msg.data = json.dumps({
+        payload = {
             "state": state,
             "task_id": task_id,
             "command_id": command_id,
@@ -450,7 +452,12 @@ class MissionBridgeNode(Node):
             "waypoint_current_index": waypoint_current_index,
             "elapsed_sec": round(elapsed, 1),
             "error_code": error_code,
-        })
+        }
+        if nav2_error_code or nav2_error_msg:
+            payload["nav2_error_code"] = nav2_error_code
+            payload["nav2_error_msg"] = nav2_error_msg
+        msg = String()
+        msg.data = json.dumps(payload)
         self._status_detail_pub.publish(msg)
 
     def _status_detail_heartbeat(self) -> None:
@@ -1043,8 +1050,15 @@ class MissionBridgeNode(Node):
             status = GoalStatus.STATUS_UNKNOWN
 
         if status != GoalStatus.STATUS_SUCCEEDED:
-            self.get_logger().error(f"Waypoint failed status={status}")
-            self._on_nav_failed()
+            n2_code = getattr(raw.result, "error_code", 0)
+            n2_msg = getattr(raw.result, "error_msg", "")
+            self.get_logger().error(
+                f"Waypoint failed status={status} "
+                f"nav2_error_code={n2_code} nav2_error_msg={n2_msg}"
+            )
+            self._on_nav_fatal(error_code="MISSION_FAILED",
+                               nav2_error_code=int(n2_code),
+                               nav2_error_msg=str(n2_msg))
             return
 
         # Nav2 FollowWaypoints may return SUCCEEDED even when a waypoint was
@@ -1052,11 +1066,16 @@ class MissionBridgeNode(Node):
         # result for missed_waypoints.
         missed = getattr(raw.result, "missed_waypoints", [])
         if missed:
+            n2_code = getattr(raw.result, "error_code", 0)
+            n2_msg = getattr(raw.result, "error_msg", "")
             self.get_logger().error(
                 f"Waypoint {self.current_index + 1} MISSED "
-                f"(planner could not reach target, moving to next)"
+                f"(planner could not reach target, moving to next) "
+                f"nav2_error_code={n2_code} nav2_error_msg={n2_msg}"
             )
-            self._on_nav_failed()
+            self._on_nav_fatal(error_code="MISSION_FAILED",
+                               nav2_error_code=int(n2_code),
+                               nav2_error_msg=str(n2_msg))
             return
 
         self._log_green(f"Waypoint {self.current_index + 1} reached successfully.")
@@ -1123,7 +1142,9 @@ class MissionBridgeNode(Node):
         except Exception as e:
             self.get_logger().error(f"Failed clearing waypoint file: {e}")
 
-    def _on_nav_fatal(self) -> None:
+    def _on_nav_fatal(self, error_code: str = "MISSION_FAILED",
+                      nav2_error_code: int = 0,
+                      nav2_error_msg: str = "") -> None:
         with self._sm_lock:
             self._transition_state(MissionState.FAILED)
             self._running_mission_hash = None
@@ -1145,12 +1166,17 @@ class MissionBridgeNode(Node):
         except Exception:
             pass
 
-        self.get_logger().error("MISSION FAILED — STATE -> FAILED")
-        self._publish_status_detail(state_override="FAILED", error_code="MISSION_FAILED")
+        self.get_logger().error(
+            f"MISSION FAILED — STATE -> FAILED "
+            f"error_code={error_code} nav2_error_code={nav2_error_code} nav2_error_msg={nav2_error_msg}"
+        )
+        self._publish_status_detail(state_override="FAILED", error_code=error_code,
+                                     nav2_error_code=nav2_error_code,
+                                     nav2_error_msg=nav2_error_msg)
         self._state_to_idle_relaxed()
 
-    def _on_nav_failed(self) -> None:
-        self._on_nav_fatal()
+    def _on_nav_failed(self, **kwargs: Any) -> None:
+        self._on_nav_fatal(**kwargs)
 
     def _idle_once_cb(self) -> None:
         self._defer_idle()

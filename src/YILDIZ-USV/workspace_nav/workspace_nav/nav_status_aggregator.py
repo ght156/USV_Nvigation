@@ -22,7 +22,7 @@ from enum import Enum
 from typing import Any, Deque, Dict, Optional, Set, Tuple
 
 import rclpy
-from action_msgs.msg import GoalStatusArray
+from action_msgs.msg import GoalStatus, GoalStatusArray
 from nav_msgs.msg import Odometry
 from rcl_interfaces.msg import Log
 from rclpy.callback_groups import ReentrantCallbackGroup
@@ -45,6 +45,14 @@ class LocHealth(str, Enum):
     GOOD = "GOOD"
     DEGRADED = "DEGRADED"
     LOST = "LOST"
+
+
+# rcl_interfaces/Log.msg severity (Log.WARN etc. may be bytes in some installs)
+_LOG_DEBUG = 10
+_LOG_INFO = 20
+_LOG_WARN = 30
+_LOG_ERROR = 40
+_LOG_FATAL = 50
 
 
 # --------------------------------------------------------------------------- #
@@ -133,6 +141,8 @@ class NavStatusAggregator(Node):
         self._waypoint_current_index: int = 0
         self._mission_elapsed_sec: float = 0.0
         self._last_error: Optional[str] = None
+        self._nav2_error_code: int = 0
+        self._nav2_error_msg: str = ""
         self._mb_last_stamp: float = 0.0
         self._prev_mission_state: Optional[str] = None
 
@@ -250,6 +260,16 @@ class NavStatusAggregator(Node):
         elif self._mission_state in ("COMPLETED",):
             self._last_error = None
 
+        # Capture Nav2 FollowWaypoints native error details
+        n2_code = data.get("nav2_error_code", 0)
+        n2_msg = data.get("nav2_error_msg", "")
+        if n2_msg:
+            self._nav2_error_code = int(n2_code)
+            self._nav2_error_msg = str(n2_msg)
+        elif self._mission_state in ("COMPLETED", "IDLE"):
+            self._nav2_error_code = 0
+            self._nav2_error_msg = ""
+
         # Detect mission state transitions and fire events
         if prev_state != self._mission_state:
             self._detect_mission_transition(prev_state, self._mission_state)
@@ -306,9 +326,9 @@ class NavStatusAggregator(Node):
         latest = msg.status_list[-1]
         s = latest.status
 
-        if s in (1, 2):          # STATUS_ACCEPTED, STATUS_EXECUTING
+        if s in (GoalStatus.STATUS_ACCEPTED, GoalStatus.STATUS_EXECUTING):
             self._waypoint_goal_active = True
-        elif s in (4, 5, 6):     # STATUS_SUCCEEDED, STATUS_CANCELED, STATUS_ABORTED
+        elif s in (GoalStatus.STATUS_SUCCEEDED, GoalStatus.STATUS_CANCELED, GoalStatus.STATUS_ABORTED):
             self._waypoint_goal_active = False
 
     def _cb_planner_status(self, msg: GoalStatusArray) -> None:
@@ -323,27 +343,33 @@ class NavStatusAggregator(Node):
         latest = msg.status_list[-1]
         s = latest.status
 
-        if s in (4, 5, 6):        # ABORTED / CANCELED / SUCCEEDED (terminal)
-            if s == 4:             # STATUS_ABORTED
-                self._planner_failed = True
-                self._planner_last_error_time = time.time()
-                self._push_log("WARN", "planner_server",
-                               "GridBased: failed to create plan, no valid path found.")
-                self._push_log("WARN", "planner_server",
-                               "[compute_path_to_pose] [ActionServer] Aborting handle.")
-                self.get_logger().warn(
-                    f"[nav_status_aggregator]: planner FAILED | "
-                    f"goal_status=ABORTED | target was unreachable or in obstacle"
-                )
-                self._fire_alarm(
-                    "PLAN_FAILED", "WARN",
-                    "Planner failed to find valid path — target may be in obstacle or outside map"
-                )
-            elif s == 3:           # STATUS_SUCCEEDED
-                if self._planner_failed:
-                    self.get_logger().info("[nav_status_aggregator]: planner recovered — plan OK")
-                self._planner_failed = False
-                self._fire_alarm_clear("PLAN_FAILED")
+        if s == GoalStatus.STATUS_ABORTED:
+            self._planner_failed = True
+            self._planner_last_error_time = time.time()
+            self._push_log("WARN", "planner_server",
+                           "GridBased: failed to create plan, no valid path found.")
+            self._push_log("WARN", "planner_server",
+                           "[compute_path_to_pose] [ActionServer] Aborting handle.")
+            self.get_logger().warn(
+                f"[nav_status_aggregator]: planner FAILED | "
+                f"goal_status=ABORTED | target was unreachable or in obstacle"
+            )
+            self._fire_alarm(
+                "PLAN_FAILED", "WARN",
+                "Planner failed to find valid path — target may be in obstacle or outside map"
+            )
+        elif s == GoalStatus.STATUS_SUCCEEDED:
+            if self._planner_failed:
+                self.get_logger().info("[nav_status_aggregator]: planner recovered — plan OK")
+            self._planner_failed = False
+            self._fire_alarm_clear("PLAN_FAILED")
+
+    @staticmethod
+    def _normalize_log_level(level: Any) -> int:
+        """Humble /rosout may deliver level as int or single-byte buffer."""
+        if isinstance(level, bytes):
+            return int(level[0]) if level else 0
+        return int(level)
 
     def _cb_rosout(self, msg: Log) -> None:
         """Capture WARN/ERROR from /rosout (may be empty in component-container setups).
@@ -352,9 +378,10 @@ class NavStatusAggregator(Node):
         aggregator's own health observers (_cb_planner_status,
         _update_stuck_detection, _update_loc_health).
         """
-        if msg.level < Log.WARN:
+        level = self._normalize_log_level(msg.level)
+        if level < _LOG_WARN:
             return
-        node = getattr(msg, 'name', '')
+        node = str(getattr(msg, "name", "") or "")
         if not node:
             return
         nav_keywords = (
@@ -364,9 +391,18 @@ class NavStatusAggregator(Node):
         if not any(kw in node for kw in nav_keywords):
             return
 
-        level_name = {10: "DEBUG", 20: "INFO", 30: "WARN", 40: "ERROR", 50: "FATAL"}
-        self._push_log(level_name.get(msg.level, str(msg.level)),
-                       node, msg.msg)
+        level_name = {
+            _LOG_DEBUG: "DEBUG",
+            _LOG_INFO: "INFO",
+            _LOG_WARN: "WARN",
+            _LOG_ERROR: "ERROR",
+            _LOG_FATAL: "FATAL",
+        }
+        self._push_log(
+            level_name.get(level, str(level)),
+            node,
+            str(getattr(msg, "msg", "") or ""),
+        )
 
     def _push_log(self, level: str, node: str, message: str) -> None:
         self._recent_logs.append({
@@ -536,12 +572,22 @@ class NavStatusAggregator(Node):
 
         elif curr == "FAILED":
             error_code = self._last_error or "MISSION_FAILED"
-            self._fire_event("TASK_FAILED", {
+            n2_msg = getattr(self, "_nav2_error_msg", "") or ""
+            detail: Dict[str, Any] = {
                 "task_id": self._task_id,
                 "error_code": error_code,
                 "failed_waypoint_index": self._waypoint_completed,
                 "reason": f"Mission failed with error: {error_code}",
-            })
+            }
+            if n2_msg:
+                detail["nav2_error_code"] = getattr(self, "_nav2_error_code", 0)
+                detail["nav2_error_msg"] = n2_msg
+                self._push_log(
+                    "ERROR", "mission_bridge",
+                    f"Nav2 FollowWaypoints error ({error_code}): "
+                    f"code={detail['nav2_error_code']} msg={n2_msg}"
+                )
+            self._fire_event("TASK_FAILED", detail)
 
         elif prev == "RUNNING" and curr == "IDLE":
             self._fire_event("TASK_CANCELLED", {
