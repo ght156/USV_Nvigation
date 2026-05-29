@@ -39,3 +39,8 @@ Thumbs.db
 # 大文件/非代码资源 — 避免仓库膨胀
 map/
 /docs/
+/test/
+/tools/
+*.pgm
+src/**/docs/
+src/**/map/
