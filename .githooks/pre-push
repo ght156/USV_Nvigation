@@ -13,7 +13,11 @@ is_allowed_path() {
     return 0
   fi
 
-  if [[ "$f" =~ (^|/)(build|install|log|map|tools)(/|$) ]]; then
+  # 仅匹配目录段 map/，避免误伤 docs/map与gnss*.md 等文件名
+  if [[ "$f" =~ /map/ ]] || [[ "$f" =~ ^map/ ]]; then
+    return 1
+  fi
+  if [[ "$f" =~ (^|/)(build|install|log|tools)(/|$) ]]; then
     return 1
   fi
   if [[ "$f" =~ \.(pgm|tar\.gz)$ ]]; then
@@ -32,7 +36,7 @@ is_allowed_path() {
   fi
 
   if [[ "$f" =~ ^src/ ]]; then
-    if [[ "$f" =~ (^|/)map/ ]] || [[ "$f" =~ \.pgm$ ]]; then
+    if [[ "$f" =~ /map/ ]] || [[ "$f" =~ \.pgm$ ]]; then
       return 1
     fi
     return 0
@@ -50,7 +54,7 @@ collect_blocked() {
     if ! is_allowed_path "$f"; then
       blocked+="${f}"$'\n'
     fi
-  done < <(git diff --name-only --diff-filter=ACDMR "$range" 2>/dev/null || true)
+  done < <(git -c core.quotepath=false diff --name-only --diff-filter=ACDMR "$range" 2>/dev/null || true)
   printf '%s' "$blocked"
 }
 
