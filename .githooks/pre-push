@@ -48,7 +48,7 @@ collect_blocked() {
     if ! is_allowed_path "$f"; then
       blocked+="${f}"$'\n'
     fi
-  done < <(git -c core.quotepath=false diff --name-only --diff-filter=ACDMR "$range" 2>/dev/null || true)
+  done < <(git -c core.quotepath=false diff --name-only --diff-filter=ACMR "$range" 2>/dev/null || true)
   printf '%s' "$blocked"
 }
 
