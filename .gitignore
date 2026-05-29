@@ -34,6 +34,7 @@ Makefile
 
 # 大数据 / 部署临时文件（不上传）
 map/
+**/map/*.pgm
 tools/
 *.pgm
 *.tar.gz
