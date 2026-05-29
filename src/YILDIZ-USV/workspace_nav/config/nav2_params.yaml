@@ -61,11 +61,15 @@ controller_server:
       plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
       desired_linear_vel: 1.2        
       max_angular_accel: 2.0           
-      allow_reversing: false 
-     #船越容易画圈，就把速度降下来、前视距离加大、曲率限速放宽一点。
+      allow_reversing: false
+      # —— 前瞻 (lookahead / carrot) ——
+      # L ≈ clamp(v×lookahead_time, min, max)。须与船最小转弯半径 R_min 匹配：
+      #   min 过小：carrot 易落在弯内侧，船未转完前瞻点已到近处 → S 线、左右震荡，严重时像反向走。
+      #   max 过大：沿路径切线直行过久 → 有效转弯半径大，目标在船后时先冲很远再拐。
+      # 船易画圈/S 线：先降 desired_linear_vel，再加大 min（≥R_min），勿只加大角速度。
       lookahead_time: 2.0
       use_velocity_scaled_lookahead_dist: true
-      min_lookahead_dist: 1.0
+      min_lookahead_dist: 1.0   # 仿真船体小；过小易 carrot 在 R_min 内侧
       max_lookahead_dist: 3.0
       cost_scaling_factor: 0.5
       inflation_radius: 1.5

@@ -1,7 +1,26 @@
 # 导航 Service 接口 — 本地测试说明
 
 > 用于验证**竞赛上层**使用的四个 Service 与反馈 Topic 是否正常。  
-> 地面站 GCS 走 Topic（`/waypoint` 等），**不在此测试范围内**。
+> 地面站 GCS 走 Topic（`/waypoint` 等），GCS 全链路见地面站仓库；**实船迁移 mock 测试**见 [`MISSION_MIGRATION_TEST.md`](./MISSION_MIGRATION_TEST.md)。
+
+---
+
+## 0. 实船迁移冒烟（USV_NAV）
+
+从仿真仓运行，source **实船** `USV_NAV/install` 后验证迁移后的 mission 栈：
+
+```bash
+cd /home/ght/wuxihik_navigation
+bash test/run_usv_migrate_smoke_test.sh
+# 或: USV_WS=/path/to/USV_NAV bash test/run_usv_migrate_smoke_test.sh
+```
+
+方案、用例、最近结果：**[`test/MISSION_MIGRATION_TEST.md`](./MISSION_MIGRATION_TEST.md)**。
+
+| 脚本 | 用途 |
+|------|------|
+| `usv_migrate_smoke_test.py` | 实船 map + MAVROS 话题 mock 冒烟 |
+| `run_usv_migrate_smoke_test.sh` | 一键入口 |
 
 ---
 
@@ -112,6 +131,8 @@ CLI 测试使用 **mock action**，不能代替实船。实船需：
 | `fake_odom_pub.py` | 发布 `/odometry/filtered` |
 | `run_cli_service_test.sh` | 一键 CLI 集成测试 |
 | `run_service_integration_test.sh` | 起栈 + Python 全量测试 |
+| `run_usv_migrate_smoke_test.sh` | 实船 USV_NAV 迁移 mock 冒烟 |
+| `MISSION_MIGRATION_TEST.md` | 实船迁移测试方案与结果记录 |
 
 ---
 

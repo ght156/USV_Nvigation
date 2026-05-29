@@ -1,0 +1,12 @@
+# 上层 → 导航：急停（Service 接口）
+#
+# 实现：m_common/srv/EmergencyStop.srv
+# Service：/mission_bridge/emergency_stop
+#
+# 即刻 cancel goal，清空航点/缓冲，进入 EMERGENCY（不自动回 IDLE）
+# 已 EMERGENCY → 幂等 success=true
+# 退出急停：调用 /mission_bridge/cancel_mission（CancelMission）
+
+---
+bool success
+string message

@@ -1,6 +1,6 @@
 # 实船 mission_bridge + nav_status_aggregator 参数示例
 # 用法（在实船 bringup 中 include mission_bridge.launch.py 时）:
-#   params_file:=<本文件绝对路径或 install/share/.../mission_stack.example.yaml>
+#   mission_stack_params_file:=<本文件绝对路径或 install/share/.../mission_stack.example.yaml>
 # launch 内联参数（如 odom_topic:=）会覆盖本文件中同名项。
 #
 # 注意: nav_status_aggregator.odom_topic 由 launch 自动与 mission_bridge.odom_topic 绑定，

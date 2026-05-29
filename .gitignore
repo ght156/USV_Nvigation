@@ -36,11 +36,13 @@ Makefile
 .DS_Store
 Thumbs.db
 
-# 大文件/非代码资源 — 避免仓库膨胀
+# 大文件 / 本地临时 / 非仓库内容
 map/
-/docs/
-/test/
-/tools/
+tools/
 *.pgm
-src/**/docs/
-src/**/map/
+*.tar.gz
+ESKF_*.tar.gz
+test.txt
+
+# 未纳入本仓维护的实验包（本地保留）
+src/perception/

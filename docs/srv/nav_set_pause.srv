@@ -1,0 +1,15 @@
+# 上层 → 导航：暂停/继续（Service 接口）
+#
+# 实现：m_common/srv/SetPause.srv
+# Service：/mission_bridge/set_pause
+#
+# 暂停：保存当前进度（剩余航点 + 当前 index），取消 Nav2 goal，进入 PAUSED
+# 继续：从断点恢复，重新提交 Nav2 goal，进入 RUNNING
+#
+# PAUSED 不会自动回 IDLE；须 cancel_mission 或 send_waypoints 抢占。
+# WAITING_SYSTEM / EMERGENCY → success=false
+
+bool pause    # true=暂停，false=继续
+---
+bool success          # true=操作成功
+string message        # 失败时含原因（如 "Cannot pause in state IDLE"）

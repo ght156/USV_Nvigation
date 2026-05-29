@@ -33,11 +33,13 @@ source install/setup.bash
 |:---:|------|
 | **1** | `ros2 launch workspace_gz simulation.launch.py` |
 | **2** | `ros2 launch workspace_ros localization.launch.py use_sim_time:=true` |
-| **3** | `ros2 launch workspace_nav nav2.launch.py use_sim_time:=true`（地面站联调可加 **`enable_mission_bridge:=true`**） |
+| **3** | `ros2 launch workspace_nav nav2.launch.py use_sim_time:=true`（地面站联调：**`enable_mission_bridge:=true`**） |
 
 可选第四终端：`ros2 run workspace_ros converter`（`/cmd_vel_nav` → 仿真推进器）。
 
-默认地图：`workspace_nav/config/map_hk.yaml`。换图时对 `nav2.launch.py` 传同一 `map:=` 路径，并同步 `navsat.yaml` 的 `datum`。
+默认地图：`workspace_nav/config/map_hk.yaml`。换图时只对 `nav2.launch.py` 传 **`map:=`**；`enable_mission_bridge:=true` 时 mission 地图自动同源。须同步 `navsat.yaml` 的 `datum`（见 [`docs/项目运行与联调.md`](../../docs/项目运行与联调.md)）。
+
+**mission 栈（可选）**：默认不加载 `mission_bridge_params_file` 即可；需改 debounce/GCS 话题时再传 YAML。勿与 Nav2 的 `params_file` 混用。
 
 ## 任务下发流程
 

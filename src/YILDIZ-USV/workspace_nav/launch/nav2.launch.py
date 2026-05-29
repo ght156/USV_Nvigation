@@ -104,7 +104,7 @@ def generate_launch_description():
         launch_arguments=[
             ('use_sim_time', use_sim_time),
             ('map_yaml_path', map_topic),
-            ('params_file', LaunchConfiguration('mission_bridge_params_file')),
+            ('mission_stack_params_file', LaunchConfiguration('mission_bridge_params_file')),
         ],
         condition=IfCondition(enable_mission_bridge),
     )

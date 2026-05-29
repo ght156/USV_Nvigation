@@ -42,7 +42,9 @@ nav2_maps:
   # 切换地图时的调参检查项：
   #   - FollowPath.regulated_linear_scaling_min_speed（确保低速仍有舵效）
   #   - FollowPath.regulated_linear_scaling_min_radius（与地图分辨率匹配）
-  #   - FollowPath.min_lookahead_dist（低速时 carrot 不能太远）
+  #   - FollowPath.min_lookahead_dist（宜 ≥ 最小转弯半径 R_min；过小则 carrot 在弯内侧 → S 线/震荡）
+  #   - FollowPath.max_lookahead_dist（过大 → 有效转弯半径大、先冲远再拐）
+  #   详见 docs/Nav2参数详解与调参指南.md §2.2
   #   - converter 的 linear_scale / angular_scale 通常无需因地图而改
 
 cmd_vel_to_thrusters_sim:

@@ -1,6 +1,6 @@
 # 仿真 → 实船（USV_NAV）Mission / 上层对接同步方案
 
-> **状态**：规划稿，待确认后再动手  
+> **状态**：Phase 1 已完成（2026-05-29）| mock 测试 PASS 见 `wuxihik_navigation/test/MISSION_MIGRATION_TEST.md`
 > **源（已冻结接口）**：`/home/ght/wuxihik_navigation`（`YILDIZ-USV/workspace_nav` + `src/m_common`）  
 > **目标**：`/home/ght/USV_NAV`（`USV_NAV/workspace_nav` + `workspace_ros`）  
 > **契约文档**：`docs/nav_task_interface.md` v4.1（GCS Topic + 上层 Service + `/nav_status`/`/task_event`）
@@ -131,7 +131,7 @@ nav_status_aggregator:
 | 1 | MAVROS | 不变 |
 | 2 | `real_boat_bringup.launch.py` | 不变 |
 | 3 | `nav2_real_mavros.launch.py` | 不变 |
-| **4** | `ros2 launch workspace_nav mission_bridge.launch.py use_sim_time:=false params_file:=<mission_stack.real_boat.yaml> map_yaml_path:=<与 Nav2 同源>` | **新增** |
+| **4** | `ros2 launch workspace_nav nav2_real_mavros.launch.py`（默认含 mission；`map:=` 与 bringup 同源即可）或独立 `mission_bridge.launch.py` + `mission_stack_params_file:=...` | **已接入** |
 
 **不再默认启动**（除非调试 legacy）：
 

@@ -17,13 +17,13 @@ def _setup_nodes(context, *args, **kwargs):
     use_sim_time = lc("use_sim_time")
     odom_topic = lc("odom_topic")
 
-    params_file = lc("params_file").perform(context).strip()
+    mission_stack_params_file = lc("mission_stack_params_file").perform(context).strip()
 
     mission_bridge_params = []
     aggregator_params = []
-    if params_file:
-        mission_bridge_params.append(params_file)
-        aggregator_params.append(params_file)
+    if mission_stack_params_file:
+        mission_bridge_params.append(mission_stack_params_file)
+        aggregator_params.append(mission_stack_params_file)
 
     mission_bridge_params.extend(
         [
@@ -137,15 +137,16 @@ def generate_launch_description():
         [
             _decl("use_sim_time", "true", "与定位 / Nav2 的 use_sim_time 一致"),
             _decl(
-                "params_file",
+                "mission_stack_params_file",
                 "",
                 "可选：ROS2 参数 YAML（含 mission_bridge / nav_status_aggregator 两节）。"
-                "为空则不加载。示例见 share/workspace_nav/config/mission_stack.example.yaml",
+                "为空则不加载。示例见 share/workspace_nav/config/mission_stack.example.yaml。"
+                "勿与 Nav2 的 params_file 同名，避免 launch 参数冲突。",
             ),
             _decl(
                 "map_yaml_path",
                 default_map_yaml,
-                "与 Nav2 同源地图；可被 params_file 或 launch 覆盖",
+                "与 Nav2 同源地图；可被 mission_stack_params_file 或 launch 覆盖",
             ),
             _decl("follow_waypoints_action", "follow_waypoints", "FollowWaypoints action"),
             _decl("waypoint_topic", "/waypoint", "航点话题"),
