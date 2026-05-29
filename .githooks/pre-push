@@ -1,46 +1,42 @@
 #!/usr/bin/env bash
-# pre-push: 允许 src/、docs/；禁止 map/pgm/飞控参数草稿等。
-# 与 wuxihik_navigation 仓库规则一致（本仓无 test/ 目录可忽略）。
+# pre-push: 允许 src/、docs/*.md；禁止 map/pgm/本地部署草稿等。
 
 set -euo pipefail
 
 ROOT_ALLOW_RE='^(\.gitignore|\.gitattributes|README\.md|\.githooks/|scripts/)'
 
-is_blocked_path() {
+is_allowed_path() {
   local f="$1"
 
   if [[ "$f" =~ $ROOT_ALLOW_RE ]]; then
+    return 0
+  fi
+
+  if [[ "$f" =~ /map/ ]] || [[ "$f" =~ ^map/ ]]; then
+    return 1
+  fi
+  if [[ "$f" =~ (^|/)(build|install|log|tools)(/|$) ]]; then
+    return 1
+  fi
+  if [[ "$f" =~ \.(pgm|tar\.gz)$ ]]; then
+    return 1
+  fi
+  if [[ "$f" == apm.params ]] || [[ "$f" == push_build_nx.sh ]] || [[ "$f" == rviz2.rviz ]]; then
     return 1
   fi
 
-  if [[ "$f" =~ (^|/)(build|install|log)/ ]]; then
-    return 0
-  fi
-  if [[ "$f" =~ (^|/)map/ ]] || [[ "$f" =~ (^|/)tools/ ]]; then
-    return 0
-  fi
-  if [[ "$f" =~ \.pgm$ ]] || [[ "$f" =~ \.tar\.gz$ ]]; then
-    return 0
-  fi
-  if [[ "$f" == apm.params ]] || [[ "$f" == push_build_nx.sh ]]; then
+  if [[ "$f" =~ ^docs/.+\.md$ ]]; then
     return 0
   fi
 
-  if [[ "$f" =~ ^docs/ ]]; then
-    if [[ "$f" =~ \.md$ ]]; then
+  if [[ "$f" =~ ^src/ ]]; then
+    if [[ "$f" =~ /map/ ]] || [[ "$f" =~ \.pgm$ ]]; then
       return 1
     fi
     return 0
   fi
 
-  if [[ "$f" =~ ^src/ ]]; then
-    if [[ "$f" =~ (^|/)map/ ]] || [[ "$f" =~ \.pgm$ ]]; then
-      return 0
-    fi
-    return 1
-  fi
-
-  return 0
+  return 1
 }
 
 collect_blocked() {
@@ -49,10 +45,10 @@ collect_blocked() {
   local f
   while IFS= read -r f; do
     [[ -z "$f" ]] && continue
-    if is_blocked_path "$f"; then
+    if ! is_allowed_path "$f"; then
       blocked+="${f}"$'\n'
     fi
-  done < <(git diff --name-only --diff-filter=ACDMR "$range" 2>/dev/null || true)
+  done < <(git -c core.quotepath=false diff --name-only --diff-filter=ACDMR "$range" 2>/dev/null || true)
   printf '%s' "$blocked"
 }
 
