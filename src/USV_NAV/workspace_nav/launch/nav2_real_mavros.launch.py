@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 
 # ----------------------------------------------------------------------------------------------- #
-# 实船 Nav2：默认 nav2_params_real_mavros.yaml + map_real_boat_hk.yaml。
+# 实船 Nav2：默认 nav2_params_real_mavros.yaml + map.yaml。
+# 可选 enable_mission_bridge:=true 一并启动 mission_bridge + nav_status_aggregator。
 # ----------------------------------------------------------------------------------------------- #
 
 import os
@@ -22,6 +23,10 @@ def generate_launch_description():
     real_nav2_config = PathJoinSubstitution(
         [package_share, 'config', 'nav2_params_real_mavros.yaml'])
     map_default = PathJoinSubstitution([package_share, 'config', 'map.yaml'])
+    mission_bridge_launch = PathJoinSubstitution(
+        [package_share, 'launch', 'mission_bridge.launch.py'])
+    mission_params_default = PathJoinSubstitution(
+        [package_share, 'config', 'mission_stack.real_boat.yaml'])
 
     map_arg = LaunchConfiguration('map')
     use_sim_time = LaunchConfiguration('use_sim_time')
@@ -30,6 +35,9 @@ def generate_launch_description():
     log_level = LaunchConfiguration('log_level')
     use_rviz = LaunchConfiguration('use_rviz')
     rviz_config = LaunchConfiguration('rviz_config')
+    enable_mission_bridge = LaunchConfiguration('enable_mission_bridge')
+    mission_params_file = LaunchConfiguration('mission_params_file')
+    mission_odom_topic = LaunchConfiguration('mission_odom_topic')
 
     nav2_bringup_share = get_package_share_directory('nav2_bringup')
     default_rviz_config = os.path.join(nav2_bringup_share, 'rviz', 'nav2_default_view.rviz')
@@ -77,6 +85,24 @@ def generate_launch_description():
         description='Optional RViz config path',
     )
 
+    declare_enable_mission_bridge = DeclareLaunchArgument(
+        'enable_mission_bridge',
+        default_value='true',
+        description='为 true 时一并启动 mission_bridge + nav_status_aggregator（GCS/上层对接）',
+    )
+
+    declare_mission_params_file = DeclareLaunchArgument(
+        'mission_params_file',
+        default_value=mission_params_default,
+        description='mission 栈参数 YAML（mission_stack.real_boat.yaml）',
+    )
+
+    declare_mission_odom_topic = DeclareLaunchArgument(
+        'mission_odom_topic',
+        default_value='/mavros/local_position/odom',
+        description='mission_bridge / nav_status_aggregator 共用 odom 话题',
+    )
+
     bringup = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(bringup_launch_path),
         launch_arguments={
@@ -86,6 +112,17 @@ def generate_launch_description():
             'autostart': autostart,
             'log_level': log_level,
         }.items(),
+    )
+
+    mission_bridge = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(mission_bridge_launch),
+        launch_arguments={
+            'use_sim_time': use_sim_time,
+            'map_yaml_path': map_arg,
+            'params_file': mission_params_file,
+            'odom_topic': mission_odom_topic,
+        }.items(),
+        condition=IfCondition(enable_mission_bridge),
     )
 
     rviz = Node(
@@ -105,6 +142,10 @@ def generate_launch_description():
         declare_log_level,
         declare_use_rviz,
         declare_rviz_cfg,
+        declare_enable_mission_bridge,
+        declare_mission_params_file,
+        declare_mission_odom_topic,
         bringup,
+        mission_bridge,
         rviz,
     ])

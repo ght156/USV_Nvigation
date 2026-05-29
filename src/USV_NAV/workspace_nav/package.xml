@@ -17,6 +17,7 @@
   <buildtool_depend>ament_python</buildtool_depend>
   
   <depend>rclpy</depend>
+  <depend>m_common</depend>
   <depend>launch</depend>
   <depend>launch_ros</depend>
   <depend>ros_gz_bridge</depend>
@@ -24,6 +25,9 @@
   <depend>rosgraph_msgs</depend>
   <depend>geometry_msgs</depend>
   <depend>sensor_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>nav2_msgs</depend>
+  <depend>action_msgs</depend>
   <depend>std_msgs</depend>
   <depend>tf2</depend>
   <depend>tf2_ros</depend>

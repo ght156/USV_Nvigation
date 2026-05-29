@@ -1,0 +1,9 @@
+# push_url：远端媒体服务器上的完整 RTSP ingest 地址（rtsp://...）
+# enable：true 启动向该 URL 的转推；false 停止该路转推
+# camera_id：本机相机 id，须与 cameras/*.yaml 中 camera_id 一致；空则兼容旧协议（从 push_url 路径解析 sn/camera_id）
+string push_url
+bool enable
+string camera_id
+---
+int32 result
+string msg

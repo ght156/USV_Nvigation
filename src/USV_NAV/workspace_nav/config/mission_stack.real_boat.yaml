@@ -1,0 +1,28 @@
+# 实船 mission_bridge + nav_status_aggregator 参数
+# 用法:
+#   ros2 launch workspace_nav mission_bridge.launch.py \
+#     use_sim_time:=false \
+#     params_file:=<install/share/workspace_nav/config/mission_stack.real_boat.yaml> \
+#     map_yaml_path:=<与 Nav2 map:= 同源>
+#
+# map_yaml_path / odom_topic 建议由 launch 内联覆盖，与 Nav2 / bringup 保持一致。
+
+mission_bridge:
+  ros__parameters:
+    map_yaml_path: ""
+    odom_topic: "/mavros/local_position/odom"
+    global_frame: "map"
+    robot_frame: "base_link"
+    map_datum_ref_key: "ref_gnss_10"
+    waypoint_command_mode: "debounce"
+    allow_replace_running_mission: false
+    mission_cancel_topic: "/gcs_mission/cancel"
+
+nav_status_aggregator:
+  ros__parameters:
+    gps_topic: "/mavros/global_position/raw/fix"
+    publish_rate: 2.0
+    vehicle_id: "usv_real_001"
+    odom_timeout: 2.0
+    gps_timeout: 5.0
+    stuck_progress_timeout: 12.0

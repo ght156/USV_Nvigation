@@ -36,6 +36,14 @@ Makefile
 map/
 tools/
 
+# 文档 / 测试 / 可视化配置 — 仅本地，不推远程（配合 .githooks/pre-push）
+/docs/
+/test/
+/rviz2.rviz
+*.pgm
+src/**/docs/
+src/**/map/
+
 # 系统
 .DS_Store
 Thumbs.db

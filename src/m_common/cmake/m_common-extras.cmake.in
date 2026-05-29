@@ -1,0 +1,93 @@
+# m_common-extras.cmake
+#
+# Provides namespaced IMPORTED targets for header-only / utility libraries
+# bundled by the `m_common` ROS2 package. Downstream packages can link:
+#   - m_common::mlogger     (spdlog-based logging wrapper, header-only)
+#
+# These targets carry their own INTERFACE_INCLUDE_DIRECTORIES and
+# INTERFACE_LINK_LIBRARIES, so consumers do not need to manually add include
+# paths or link spdlog.
+
+get_filename_component(_m_common_prefix "${m_common_DIR}/../../../" ABSOLUTE)
+set(_m_common_include_dir "${_m_common_prefix}/include")
+set(_m_common_lib_dir     "${_m_common_prefix}/lib")
+
+# spdlog is a runtime/link dependency of mlogger.
+find_package(spdlog QUIET)
+
+# ---------- m_common::mlogger (header-only) ----------
+if(NOT TARGET m_common::mlogger)
+  add_library(m_common::mlogger INTERFACE IMPORTED)
+  set_target_properties(m_common::mlogger PROPERTIES
+    INTERFACE_INCLUDE_DIRECTORIES "${_m_common_include_dir}"
+    INTERFACE_COMPILE_FEATURES "cxx_std_17"
+  )
+  if(TARGET spdlog::spdlog)
+    set_property(TARGET m_common::mlogger APPEND PROPERTY
+      INTERFACE_LINK_LIBRARIES spdlog::spdlog)
+  endif()
+endif()
+
+# ---------- m_common::m_utils (compiled static lib) ----------
+# m_utils.a 在实现里使用了 mlogger -> spdlog，因此把 m_common::mlogger
+# 作为 INTERFACE_LINK_LIBRARIES 传播给下游，避免下游手动补 spdlog。
+if(NOT TARGET m_common::m_utils)
+  add_library(m_common::m_utils STATIC IMPORTED)
+  set_target_properties(m_common::m_utils PROPERTIES
+    IMPORTED_LOCATION "${_m_common_lib_dir}/libm_common_m_utils.a"
+    INTERFACE_INCLUDE_DIRECTORIES "${_m_common_include_dir}"
+    INTERFACE_COMPILE_FEATURES "cxx_std_17"
+  )
+  if(TARGET m_common::mlogger)
+    set_property(TARGET m_common::m_utils APPEND PROPERTY
+      INTERFACE_LINK_LIBRARIES m_common::mlogger)
+  endif()
+endif()
+
+# ---------- m_common::rtsp_interface（GStreamer RTSP） ----------
+# 静态库通过 INTERFACE_LINK_LIBRARIES 传播 GStreamer 与 OpenCV。
+include("${CMAKE_CURRENT_LIST_DIR}/rtsp_interface_features.cmake" OPTIONAL)
+
+find_package(OpenCV QUIET)
+find_package(PkgConfig QUIET)
+
+if(NOT TARGET m_common::rtsp_interface)
+  add_library(m_common::rtsp_interface STATIC IMPORTED)
+  set_target_properties(m_common::rtsp_interface PROPERTIES
+    IMPORTED_LOCATION "${_m_common_lib_dir}/libm_common_rtsp_interface.a"
+    INTERFACE_INCLUDE_DIRECTORIES "${_m_common_include_dir}"
+    INTERFACE_COMPILE_FEATURES "cxx_std_17"
+  )
+
+  if(OpenCV_FOUND)
+    set_property(TARGET m_common::rtsp_interface APPEND PROPERTY
+      INTERFACE_INCLUDE_DIRECTORIES ${OpenCV_INCLUDE_DIRS})
+    set_property(TARGET m_common::rtsp_interface APPEND PROPERTY
+      INTERFACE_LINK_LIBRARIES ${OpenCV_LIBS})
+  endif()
+
+  # GStreamer：gstreamer-1.0 + app + rtsp-server
+  if(_M_COMMON_RTSP_IF_HAS_GSTREAMER)
+    if(PkgConfig_FOUND AND NOT TARGET PkgConfig::m_common_rtsp_if_gst)
+      pkg_check_modules(m_common_rtsp_if_gst QUIET IMPORTED_TARGET
+        gstreamer-1.0>=1.16
+        gstreamer-app-1.0
+        gstreamer-rtsp-server-1.0)
+    endif()
+    if(TARGET PkgConfig::m_common_rtsp_if_gst)
+      set_property(TARGET m_common::rtsp_interface APPEND PROPERTY
+        INTERFACE_LINK_LIBRARIES PkgConfig::m_common_rtsp_if_gst)
+    else()
+      set_property(TARGET m_common::rtsp_interface APPEND PROPERTY
+        INTERFACE_LINK_LIBRARIES
+        gstrtspserver-1.0 gstapp-1.0 gstreamer-1.0 gobject-2.0 glib-2.0)
+    endif()
+  endif()
+
+  set_property(TARGET m_common::rtsp_interface APPEND PROPERTY
+    INTERFACE_LINK_LIBRARIES pthread)
+endif()
+
+unset(_m_common_prefix)
+unset(_m_common_include_dir)
+unset(_m_common_lib_dir)
