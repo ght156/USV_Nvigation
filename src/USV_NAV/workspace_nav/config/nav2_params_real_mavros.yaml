@@ -1,24 +1,27 @@
 # -----------------------------------------------------------------------------
-# 实船 / MAVROS（PX4）用 Nav2 参数（与仿真 nav2_params.yaml 独立）。
-# - use_sim_time: false（无 Gazebo /clock）
-# - bt_navigator / velocity_smoother 的 odom_topic 指向 MAVROS 局域里程：
-#   /mavros/local_position/odom  （PX4 滤波器融合结果，通常已含 GNSS；非「纯手动 GPS 话题」）
-# 原始 GNSS 监视：/mavros/global_position/raw/fix 等；与海图对齐仍须令 PX4 HOME / local origin 与
-# map.yaml / 队里 datum 约定一致，否则 map 上会有平移偏差。
-# 改激光/点云话题、footprint、控制器增益请优先只动本文件，避免影响仿真参数。
-# 实机 Livox：local/global 使用 VoxelLayer + PointCloud2（默认话题 /livox/lidar，请用 ros2 topic list 核对）。
+# 实船 / MAVROS（PX4）Nav2 参数（与仿真 nav2_params.yaml 独立，勿混用）。
 #
-# 保守试验标定（首次下水）：下列速度与加速度与 workspace_ros nav2_cmd_vel_to_mavros
-# 映射输入（max_linear_x 等）同量级，
-# 水面惯量大，先小后大；膨胀略放大以留安全余量。完整动力学标定后再逐步放开。
-# 控制器频率建议 5~10 Hz、速度/航向加速度限得很小，并放宽朝向容差，减轻水面上的过修正振荡。
+# 逐参说明与调参顺序：docs/Nav2参数详解与调参指南.md（本仓库根目录 docs/）
+#
+# 里程计 / TF：
+#   - odom→base_link：MAVROS local_position（本文件 odom_topic 一致）
+#   - map→odom：gnss_odom_map_tf（real_boat_bringup），与 map_server 同源 map.yaml
+#
+# 速度链：controller_server → /cmd_vel_nav → nav2_cmd_vel_to_mavros（默认绕过 velocity_smoother）
+#
+# RPP 前瞻 L≈clamp(v×lookahead_time, min, max)：
+#   min 过小 → carrot 在转弯半径内侧 → S 线/震荡；max 过大 → 先冲远再拐（目标在船后明显）
+#   min 宜 ≥ 船头前伸(1.4m) 且 ≥ 最小转弯半径（见 regulated_linear_scaling_min_radius）
+#
+# 保守下水：速度与 nav2_cmd_vel_to_mavros 的 max_linear_x / max_angular_z 同量级，先小后大。
+# Livox：/livox/lidar；footprint 见 local/global costmap 注释。
 # -----------------------------------------------------------------------------
 bt_navigator:
   ros__parameters:
-    use_sim_time: false 
-    global_frame: map
-    robot_base_frame: base_link
-    odom_topic: "/mavros/local_position/odom"
+    use_sim_time: false
+    global_frame: map              # 与 global_costmap、规划目标一致，固定 map
+    robot_base_frame: base_link   # MAVROS odom 子帧
+    odom_topic: "/mavros/local_position/odom"  # 与 mission_bridge、velocity_smoother、速度桥一致
     bt_loop_duration: 10
     default_server_timeout: 20
     wait_for_service_timeout: 1000
@@ -53,7 +56,7 @@ bt_navigator_navigate_to_pose_rclcpp_node:
 controller_server:
   ros__parameters:
     use_sim_time: false
-    # —— 控制器频率 (Hz)。实船建议 5~10 Hz；过高易与水面惯量叠加导致扭动 ——
+    # —— 控制器频率 (Hz)。20 为 Nav2 默认；水面扭动大时可试 10，与 smoothing_frequency 对齐 ——
     controller_frequency: 20.0
     # —— 速度死区：低于此阈值的指令视为零（与 velocity_smoother.deadband_velocity 对齐）——
     min_x_velocity_threshold: 0.05
@@ -74,34 +77,39 @@ controller_server:
       stateful: true
       plugin: "nav2_controller::SimpleGoalChecker"
       # —— 到达判定容差：xy (米) / yaw (弧度)。船体 1.6 m，容差略大于船体半长 ——
-      xy_goal_tolerance: 1.0
-      yaw_goal_tolerance: 1.0
+      xy_goal_tolerance: 2.0
+      yaw_goal_tolerance: 2.0
     FollowPath:
       plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
       # —— 期望线速度 (m/s)。下水首试偏保守 (0.2)；稳定后可逐步放宽 ——
       desired_linear_vel: 1.2
       # —— 最大角加速度 (rad/s²)。水面惯量大，小值抑制摇头 ——
-      max_angular_accel: 2.0
-      # —— 是否允许倒车（本船若不能倒车务必 false）——
+      max_angular_accel: 1.0
+      # —— 是否允许倒车。false：目标在船后时只能绕弧前进，无法倒车对准；全局路径会先向前再拐 ——
       allow_reversing: false
 
-      # —— 前视距离 (m)：base_link 距船头 1.4 m，min 须 >1.4 否则 carrot 落在船内 ——
-      lookahead_time: 2.0
+      # —— 前瞻 (lookahead / carrot)，L≈clamp(v×lookahead_time, min, max) ——
+      # base_link 在船尾、船头前伸约 1.4 m：min 须 >1.4，否则 carrot 落在船体内。
+      # 与最小转弯半径 R_min 匹配（宜 min ≥ R_min，与 regulated_linear_scaling_min_radius 同量级）：
+      #   min 过小：carrot 在弯内侧，船未转完前瞻点已到近处 → S 线、左右震荡，严重时像反向拧。
+      #   max 过大：沿路径直行过久 → 转弯滞后、有效半径大，目标在船后时先冲很远再拐。
+      lookahead_time: 5.0
       use_velocity_scaled_lookahead_dist: true
-      min_lookahead_dist: 1.2
-      max_lookahead_dist: 2.2
+      min_lookahead_dist: 1.5
+      max_lookahead_dist: 5.0
       cost_scaling_factor: 0.5
-      inflation_radius: 1.5
+      inflation_radius: 2.0
 
-      # —— 速度缩放：弯道自动减速 ——
+      # —— 曲率限速：路径转弯半径 < min_radius 时线速度向 min_speed 靠拢 ——
+      # min_radius 宜与船体最小转弯半径、min_lookahead_dist 同量级；过小 → 频繁压到 min_speed 走走停停
       use_regulated_linear_velocity_scaling: true
-      regulated_linear_scaling_min_speed: 0.1       # 弯道减速下限 (m/s)
-      regulated_linear_scaling_min_radius: 2.0       # 触发减速的转弯半径 (m)，略大于船宽
+      regulated_linear_scaling_min_speed: 0.1       # 急弯最低速；过小舵效差易画圈，可试 0.2~0.3
+      regulated_linear_scaling_min_radius: 3.0       # 触发减速的等效转弯半径 (m)
 
       # —— 代价缩放：接近高代价区域 (障碍/膨胀) 时自动减速 ——
       use_cost_regulated_linear_velocity_scaling: true
-      cost_scaling_dist: 4.0        # 开始减速的代价距离 (m)，≈ 船头前伸 1.4 + 余量 1.1
-      cost_scaling_gain: 0.8        # 减速强度 (0~1, 越大越激进)
+      cost_scaling_dist: 3.0        # 开始减速的代价距离 (m)，≈ 船头前伸 1.4 + 余量 1.1
+      cost_scaling_gain: 1.0        # 减速强度 (0~1, 越大越激进)
       inflation_cost_scaling_factor: 1.0
 
       # —— 接近目标时减速。距离须 ≥ 船头前伸量，否则到达前已全速冲过 ——
@@ -134,7 +142,7 @@ local_costmap:
       # —— 窗口尺寸 (米)：宽 20 × 高 15，分辨率 0.05 m/格 ——
       width: 20
       height: 15
-      resolution: 0.05
+      resolution: 0.1
       # —— 船体 footprint (米)：1.6 m 长 × 0.8 m 宽。base_link 在船尾往前 0.2 m，故前向 1.4 m / 后向 0.2 m ——
       footprint: "[[1.15, 0.4], [1.15, -0.4], [-0.3, -0.4], [-0.3, 0.4]]"
       plugins: ["voxel_layer", "inflation_layer"]
@@ -145,20 +153,20 @@ local_costmap:
         cost_scaling_factor: 1.0
         # —— 膨胀半径 (m)：从障碍物边界向外扩展的距离。
         #    船体半宽 0.4 m + 水面安全余量 ≈ 0.8 m → 设 1.2 m ——
-        inflation_radius: 1.5
+        inflation_radius: 2.0
       # —— Voxel 层：将 3D 点云投影为 2D 障碍标记 ——
       voxel_layer:
         plugin: "nav2_costmap_2d::VoxelLayer"
         enabled: true
         # —— 发布体素网格 (RViz 可订阅 /local_costmap/voxel_grid 查看) ——调试时true,实船false
-        publish_voxel_map: true
+        publish_voxel_map: false
         # —— 体素 z 轴范围：origin_z=-0.5, z_res=0.2, z_voxels=12 → 覆盖 -0.5~1.9 m (相对 base_link) ——
-        origin_z: -0.2       # 体素底部 z 坐标 (米, 相对 base_link)
-        z_resolution: 0.2    # z 轴分辨率 (米/层)
-        z_voxels: 12         # z 轴层数
+        origin_z: -3.0      # 相对base_link开始建立体素，这三个参数只定义VoxelLayer 能处理的 z 范围：
+        z_resolution: 0.4    # z 轴分辨率 (米/层)
+        z_voxels: 30         # z 轴层数
         max_obstacle_height: 2.0
         # —— 标记阈值：一个体素列中至少 mark_threshold 个点被占据才标为障碍。0=首次点击即标记 (水面杂波多时可增大到 1~2) ——
-        mark_threshold: 2
+        mark_threshold: 0
         observation_sources: livox_cloud
         livox_cloud:
           topic: /livox/lidar
@@ -167,13 +175,13 @@ local_costmap:
           clearing: true
           marking: true
           # —— 障碍距离与高度过滤 ——
-          obstacle_min_range: 0.8    # 盲区 (米)，小于此距离的点忽略
+          obstacle_min_range: 0.5    # 盲区 (米)，小于此距离的点忽略
           obstacle_max_range: 10.0   # 最大检测距离 (米)
-          raytrace_min_range: 0.8
+          raytrace_min_range: 0.5
           raytrace_max_range: 10.0   # 射线清除最大距离 (一般比 obstacle_max_range 大一点)
           # —— 障碍高度筛选：低于 min / 高于 max 的点不参与标记。min 设负值可滤除水面波纹 (相对 base_link) ——
-          min_obstacle_height: -0.1  # 以map的高度为基准 (滤水面)
-          max_obstacle_height: 1.5   # 高于 2 m 的点忽略 (滤桥梁/树冠)
+          min_obstacle_height: 0.0  # 以上面设置   global_frame: odom为准
+          max_obstacle_height: 2.0   # 高于 2 m 的点忽略 (滤桥梁/树冠)
       always_send_full_costmap: true #稳定后改false
       
 global_costmap:
@@ -187,7 +195,7 @@ global_costmap:
       rolling_window: false
       # —— 船体 footprint: 1.6 m × 0.8 m。base_link 在船尾往前 0.2 m，前向 1.4 m / 后向 0.2 m，同 local ——
       footprint: "[[1.15, 0.4], [1.15, -0.4], [-0.3, -0.4], [-0.3, 0.4]]"
-      # —— 全局代价地图分辨率 (m/格)。地图本身 1.0 m/px，0.5 已足够精细 ——
+      # —— 全局代价地图分辨率 (m/格)。原则：全局代价地图分辨率 = 地图分辨率 ——
       resolution: 0.5
       track_unknown_space: True
       # —— global 挂 voxel_layer 用于远距离障碍预判（max 40m，local 30m）。
@@ -198,8 +206,8 @@ global_costmap:
       # —— Voxel 层（全局远距离） ——
       voxel_layer:
         plugin: "nav2_costmap_2d::VoxelLayer"
-        enabled: true
-        publish_voxel_map: true
+        enabled: false
+        publish_voxel_map: false
         origin_z: -0.2 #体素地图在z方向上的底面高度
         z_resolution: 0.2
         z_voxels: 12
@@ -250,8 +258,9 @@ planner_server:
     planner_plugins: ["GridBased"]
     GridBased:
       plugin: "nav2_smac_planner/SmacPlanner2D"
-      # —— 路径终点容差 (m) ——
-      tolerance: 0.125
+      # —— 路径终点容差 (m)。粗分辨率地图可适当加大 ——
+      # 路径曲折会加剧 RPP 曲率检测；换图后若 S 线/画圈，同步查 global resolution 与 RPP min_radius
+      tolerance: 1.0
       # —— 代价穿越乘数：>1 时规划器更倾向绕开代价区而非穿越。水面避障建议 2.0~3.0 ——
       cost_travel_multiplier: 2.0
       downsample_costmap: false
@@ -323,9 +332,9 @@ waypoint_follower:
 #   controller_server  → /cmd_vel_nav
 #   velocity_smoother  订阅 /cmd_vel_nav，发布 /cmd_vel
 #
-# 本仓实船速度桥 nav2_cmd_vel_to_mavros 默认 cmd_vel_src=/cmd_vel_nav（绕过 smoother，
-# 由桥节点做限幅/死区/超时/OFFBOARD）。若要用 Nav2 平滑结果，起桥时 cmd_vel_src:=/cmd_vel。
-# 与仿真 converter.py 一致：仿真也订阅 /cmd_vel_nav。
+# 实船速度桥 nav2_cmd_vel_to_mavros 默认 cmd_vel_src=/cmd_vel_nav（绕过本 smoother）。
+# 改 RPP 的 desired_linear_vel 时，须同步 workspace_ros 桥节点 max_linear_x / max_angular_z。
+# 若 cmd_vel_src:=/cmd_vel，则以下限幅才会作用到 PX4。
 # ————————————————————————————————————————————————————————————————————————————
 velocity_smoother:
   ros__parameters:
@@ -347,5 +356,5 @@ velocity_smoother:
     odom_topic: "/mavros/local_position/odom"
     odom_duration: 0.1
     # —— 速度死区：低于此值输出 0 ——
-    deadband_velocity: [0.03, 0.0, 0.03]
+    deadband_velocity: [0.02, 0.0, 0.02]
     velocity_timeout: 1.0

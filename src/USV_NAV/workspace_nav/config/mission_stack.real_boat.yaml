@@ -2,8 +2,8 @@
 # 用法:
 #   ros2 launch workspace_nav mission_bridge.launch.py \
 #     use_sim_time:=false \
-#     params_file:=<install/share/workspace_nav/config/mission_stack.real_boat.yaml> \
-#     map_yaml_path:=<与 Nav2 map:= 同源>
+#     mission_stack_params_file:=<install/share/workspace_nav/config/mission_stack.real_boat.yaml>
+# map_yaml_path 由 nav2_real_mavros.launch.py 自动与 map:= 一致，一般无需再设
 #
 # map_yaml_path / odom_topic 建议由 launch 内联覆盖，与 Nav2 / bringup 保持一致。
 

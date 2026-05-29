@@ -19,7 +19,7 @@ dist/
 .coverage
 htmlcov/
 
-# CMake 生成物（若出现在源码树中）
+# CMake 生成物
 CMakeCache.txt
 CMakeFiles/
 cmake_install.cmake
@@ -32,17 +32,14 @@ Makefile
 *.swp
 *~
 
-# 大数据 / 部署文件（不上传）
+# 大数据 / 部署临时文件（不上传）
 map/
 tools/
-
-# 文档 / 测试 / 可视化配置 — 仅本地，不推远程（配合 .githooks/pre-push）
-/docs/
-/test/
-/rviz2.rviz
 *.pgm
-src/**/docs/
-src/**/map/
+*.tar.gz
+apm.params
+push_build_nx.sh
+rviz2.rviz
 
 # 系统
 .DS_Store

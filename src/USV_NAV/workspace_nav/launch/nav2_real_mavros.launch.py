@@ -119,7 +119,7 @@ def generate_launch_description():
         launch_arguments={
             'use_sim_time': use_sim_time,
             'map_yaml_path': map_arg,
-            'params_file': mission_params_file,
+            'mission_stack_params_file': mission_params_file,
             'odom_topic': mission_odom_topic,
         }.items(),
         condition=IfCondition(enable_mission_bridge),

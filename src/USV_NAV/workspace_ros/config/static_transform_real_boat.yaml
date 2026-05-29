@@ -3,7 +3,7 @@
 static_transforms:
   - parent: "base_link"
     child: "livox_frame"
-    translation: [0.2, 0.0, 0.45]
+    translation: [0.5, 0.0, 0.3]
     rotation_rpy: [0.0, 0.0, 0.0]
 
   - parent: "base_link"

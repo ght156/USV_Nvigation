@@ -1,33 +1,42 @@
 #!/usr/bin/env bash
-# pre-push: 仅允许推送 src/ 下功能包代码；禁止 docs / test / map(pgm) 等上大仓。
-# 启用: ./scripts/install-git-hooks.sh
+# pre-push: 允许 src/、docs/；禁止 map/pgm/飞控参数草稿等。
+# 与 wuxihik_navigation 仓库规则一致（本仓无 test/ 目录可忽略）。
 
 set -euo pipefail
 
-ROOT_ALLOW_RE='^(\.gitignore|\.gitattributes|README\.md|\.githooks/|scripts/install-git-hooks\.sh|scripts/git-untrack-non-src\.sh)$'
+ROOT_ALLOW_RE='^(\.gitignore|\.gitattributes|README\.md|\.githooks/|scripts/)'
 
-is_allowed_path() {
+is_blocked_path() {
   local f="$1"
 
   if [[ "$f" =~ $ROOT_ALLOW_RE ]]; then
+    return 1
+  fi
+
+  if [[ "$f" =~ (^|/)(build|install|log)/ ]]; then
+    return 0
+  fi
+  if [[ "$f" =~ (^|/)map/ ]] || [[ "$f" =~ (^|/)tools/ ]]; then
+    return 0
+  fi
+  if [[ "$f" =~ \.pgm$ ]] || [[ "$f" =~ \.tar\.gz$ ]]; then
+    return 0
+  fi
+  if [[ "$f" == apm.params ]] || [[ "$f" == push_build_nx.sh ]]; then
     return 0
   fi
 
-  if [[ "$f" != src/* ]]; then
-    return 1
+  if [[ "$f" =~ ^docs/ ]]; then
+    if [[ "$f" =~ \.md$ ]]; then
+      return 1
+    fi
+    return 0
   fi
 
-  # src 内：文档、地图资源、测试目录
-  if [[ "$f" =~ (^|/)docs/ ]]; then
-    return 1
-  fi
-  if [[ "$f" =~ (^|/)test/ ]]; then
-    return 1
-  fi
-  if [[ "$f" =~ (^|/)map/ ]]; then
-    return 1
-  fi
-  if [[ "$f" =~ \.pgm$ ]]; then
+  if [[ "$f" =~ ^src/ ]]; then
+    if [[ "$f" =~ (^|/)map/ ]] || [[ "$f" =~ \.pgm$ ]]; then
+      return 0
+    fi
     return 1
   fi
 
@@ -40,7 +49,7 @@ collect_blocked() {
   local f
   while IFS= read -r f; do
     [[ -z "$f" ]] && continue
-    if ! is_allowed_path "$f"; then
+    if is_blocked_path "$f"; then
       blocked+="${f}"$'\n'
     fi
   done < <(git diff --name-only --diff-filter=ACDMR "$range" 2>/dev/null || true)
@@ -66,12 +75,8 @@ while read -r local_ref local_sha remote_ref remote_sha; do
 done
 
 if [[ -n "$blocked_all" ]]; then
-  echo "pre-push 拒绝：远程仅允许 src/ 功能包代码（及 .gitignore / .githooks / scripts/install-git-hooks.sh）。" >&2
-  echo "以下路径不应推送（docs / test / map / *.pgm 等）：" >&2
+  echo "pre-push 拒绝：以下路径不应推送（map/pgm/apm.params 等）：" >&2
   echo -n "$blocked_all" | sort -u >&2
-  echo "" >&2
-  echo "本地保留、从 Git 索引移除: ./scripts/git-untrack-non-src.sh" >&2
-  echo "规则说明见 scripts/install-git-hooks.sh" >&2
   exit 1
 fi
 

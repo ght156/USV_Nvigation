@@ -43,20 +43,25 @@ source ~/USV_NAV/install/setup.bash   # 按实际路径
 |:---:|------|
 | **1** | `ros2 launch workspace_ros mavros_px4_usv.launch.py fcu_url:=serial:///dev/ttyACM0:57600` |
 | **2** | `ros2 launch workspace_ros real_boat_bringup.launch.py use_sim_time:=false enable_nav2_cmd_vel_to_mavros:=true` |
-| **3** | `ros2 launch workspace_nav nav2_real_mavros.launch.py` |
+| **3** | `ros2 launch workspace_nav nav2_real_mavros.launch.py`（默认含 **mission_bridge**） |
 
-换海图时，终端 2 的 **`map_config_yaml:=`** 与终端 3 的 **`map:=`** 必须为**同一路径**（默认 `map_real_boat_hk.yaml`）。
+换海图时，终端 2 的 **`map_config_yaml:=`** 与终端 3 的 **`map:=`** 必须为**同一路径**；mission 的 `map_yaml_path` **随终端 3 的 `map:=` 自动一致**，无需再配。
+
+关闭 mission 栈：`enable_mission_bridge:=false`。mission 参数默认 `mission_stack.real_boat.yaml`，一般不必手传。详见 [`docs/项目运行与联调.md`](../docs/项目运行与联调.md)。
 
 **控制链**：Nav2 `controller` → `/cmd_vel_nav` →（可选 `velocity_smoother` → `/cmd_vel`）→ `nav2_cmd_vel_to_mavros`（默认 `/cmd_vel_nav`）→ PX4 OFFBOARD。
 
 详细步骤、TF、HOME、换图、**`/cmd_vel`↔`/cmd_vel_nav` 调试命令**：[`docs/项目运行与联调.md`](../docs/项目运行与联调.md)。
 
-## 可选节点（地面站 / 任务）
+## 地面站 / 任务（默认 mission_bridge）
+
+终端 3 已默认启动 `mission_bridge` + `nav_status_aggregator`（`/waypoint`、`/nav_status`）。**勿与**下列 legacy 节点并行：
 
 ```bash
+# 仅 enable_mission_bridge:=false 时使用
 ros2 run workspace_nav waypoint_transform
 ros2 run workspace_nav waypoint_with_state
-ros2 run workspace_ros target_buoy    # 需 GCS 提供目标信息
+ros2 run workspace_ros target_buoy
 ```
 
 ## 文档索引
@@ -64,6 +69,7 @@ ros2 run workspace_ros target_buoy    # 需 GCS 提供目标信息
 | 文档 | 用途 |
 |------|------|
 | [`docs/项目运行与联调.md`](../docs/项目运行与联调.md) | **主入口**：启动顺序、速度桥、换图、ROS_DOMAIN_ID |
+| [`docs/Nav2参数详解与调参指南.md`](../docs/Nav2参数详解与调参指南.md) | **Nav2 实船调参**：`nav2_params_real_mavros.yaml` |
 | [`docs/实船调试.md`](docs/实船调试.md) | MAVROS、TF 复盘、HOME、避障、echo 调试 |
 | [`docs/实船配置修改清单.md`](docs/实船配置修改清单.md) | 按文件改参数 |
 | [`docs/PROJECT_ARCHITECTURE_AND_NAV2.md`](docs/PROJECT_ARCHITECTURE_AND_NAV2.md) | 实船数据流与 Nav2 要点 |
