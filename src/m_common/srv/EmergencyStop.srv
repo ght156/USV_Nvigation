@@ -1,0 +1,4 @@
+# 上层 → 导航：急停
+---
+bool success
+string message

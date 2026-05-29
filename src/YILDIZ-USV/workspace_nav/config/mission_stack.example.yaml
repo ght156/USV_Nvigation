@@ -12,6 +12,11 @@ mission_bridge:
     odom_topic: "/mavros/local_position/odom"
     global_frame: "map"
     robot_frame: "base_link"
+    # 地面站 GCS（Topic，与上层 Service 并行，launch 默认值见 mission_bridge.launch.py）
+    # waypoint_topic: "/waypoint"
+    # color_topic: "/color_code"
+    # mission_cancel_topic: "/gcs_mission/cancel"
+    # mission_start_topic: ""   # start_pulse 时填 "/gcs_mission/start"
     waypoint_command_mode: "debounce"
     allow_replace_running_mission: false
 

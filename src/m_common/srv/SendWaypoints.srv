@@ -1,0 +1,7 @@
+# 上层 → 导航：下发航线
+geometry_msgs/PoseStamped[] waypoints
+string mission_id
+string command_id
+---
+bool success
+string message

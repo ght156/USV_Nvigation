@@ -270,9 +270,12 @@ class NavStatusAggregator(Node):
             self._nav2_error_code = 0
             self._nav2_error_msg = ""
 
-        # Detect mission state transitions and fire events
+        transition_reason = data.get("transition_reason")
+
         if prev_state != self._mission_state:
-            self._detect_mission_transition(prev_state, self._mission_state)
+            self._detect_mission_transition(
+                prev_state, self._mission_state, transition_reason
+            )
             self._prev_mission_state = prev_state
 
     def _cb_odom(self, msg: Odometry) -> None:
@@ -554,7 +557,9 @@ class NavStatusAggregator(Node):
     # Mission transition detection
     # ----------------------------------------------------------------------- #
 
-    def _detect_mission_transition(self, prev: str, curr: str) -> None:
+    def _detect_mission_transition(
+        self, prev: str, curr: str, transition_reason: Optional[str] = None
+    ) -> None:
         """Fire task events based on mission state transitions."""
         if prev == "IDLE" and curr == "RUNNING":
             self._last_error = None
@@ -590,9 +595,34 @@ class NavStatusAggregator(Node):
             self._fire_event("TASK_FAILED", detail)
 
         elif prev == "RUNNING" and curr == "IDLE":
-            self._fire_event("TASK_CANCELLED", {
+            if transition_reason not in ("replace", "complete"):
+                self._fire_event("TASK_CANCELLED", {
+                    "task_id": self._task_id,
+                    "source": "cancel",
+                })
+        elif prev in ("PAUSED", "EMERGENCY") and curr == "IDLE":
+            if transition_reason == "cancel":
+                self._fire_event("TASK_CANCELLED", {
+                    "task_id": self._task_id,
+                    "source": "cancel",
+                })
+
+        elif curr == "PAUSED":
+            self._fire_event("TASK_PAUSED", {
                 "task_id": self._task_id,
-                "source": "system",
+                "waypoint_index": self._waypoint_current_index,
+            })
+
+        elif prev == "PAUSED" and curr == "RUNNING":
+            self._fire_event("TASK_RESUMED", {
+                "task_id": self._task_id,
+                "waypoint_index": self._waypoint_current_index,
+            })
+
+        elif curr == "EMERGENCY":
+            self._last_error = "EMERGENCY_STOP"
+            self._fire_event("EMERGENCY_STOP", {
+                "task_id": self._task_id,
             })
 
     # ----------------------------------------------------------------------- #
@@ -721,7 +751,7 @@ class NavStatusAggregator(Node):
             },
             "flags": {
                 "manual_override": False,
-                "emergency_stop": False,
+                "emergency_stop": self._mission_state == "EMERGENCY",
                 "recovery_active": nav_phase == "RECOVERY",
             },
             "alerts": {
@@ -730,6 +760,8 @@ class NavStatusAggregator(Node):
                 "mission_bridge_alive": mb_alive,
                 "planner_error": planner_status == "FAILED",
                 "controller_error": controller_status in ("FAILED", "STUCK"),
+                "emergency_active": self._mission_state == "EMERGENCY",
+                "mission_paused": self._mission_state == "PAUSED",
             },
             "recent_logs": list(self._recent_logs),
         }
@@ -746,6 +778,10 @@ class NavStatusAggregator(Node):
         """Derive navigation phase from available data."""
         if self._mission_state == "IDLE":
             return "IDLE"
+        if self._mission_state == "PAUSED":
+            return "PAUSED"
+        if self._mission_state == "EMERGENCY":
+            return "EMERGENCY"
         if self._controller_stuck:
             return "STUCK"
         if self._waypoint_goal_active:

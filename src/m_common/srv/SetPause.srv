@@ -1,0 +1,5 @@
+# 上层 → 导航：暂停/继续
+bool pause    # true=暂停，false=继续
+---
+bool success
+string message

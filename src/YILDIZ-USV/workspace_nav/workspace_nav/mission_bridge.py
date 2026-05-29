@@ -35,6 +35,8 @@ from std_msgs.msg import String
 from tf2_ros.buffer import Buffer
 from tf2_ros.transform_listener import TransformListener
 
+from m_common.srv import CancelMission, SendWaypoints, SetPause, EmergencyStop
+
 from workspace_nav.gps_map_conversion import (
     atomic_write_json,
     datum_lat_lon_from_cfg,
@@ -62,8 +64,10 @@ class MissionState(str, Enum):
     WAITING_SYSTEM = "WAITING_SYSTEM"
     IDLE = "IDLE"
     RUNNING = "RUNNING"
+    PAUSED = "PAUSED"
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
+    EMERGENCY = "EMERGENCY"
 
 
 def _find_workspace_root() -> Optional[Path]:
@@ -285,7 +289,7 @@ class MissionBridgeNode(Node):
         self._odom_topic = self.get_parameter("odom_topic").value
         self._tolerance = float(self.get_parameter("waypoint_tolerance_m").value)
 
-        self._sm_lock = threading.Lock()
+        self._sm_lock = threading.RLock()
         self._state = MissionState.WAITING_SYSTEM
         self._running_mission_hash: Optional[str] = None
         self._last_completed_mission_hash: Optional[str] = None
@@ -337,6 +341,8 @@ class MissionBridgeNode(Node):
         )
         self._nav_xy: List[Tuple[float, float]] = []
         self.current_index = 0
+        self._paused_nav_xy: List[Tuple[float, float]] = []
+        self._paused_index: int = 0
         self.navigating = False
         self._current_pose_xy = (0.0, 0.0)
         self._current_mission_id: Optional[str] = None
@@ -380,6 +386,7 @@ class MissionBridgeNode(Node):
                 )
                 raise SystemExit(1)
 
+        # Ground station (GCS) — Topic control; kept parallel to upper-layer Services.
         _wp_in = self.get_parameter("waypoint_topic").value
         _cg_in = self.get_parameter("color_topic").value
         self.create_subscription(String, _wp_in, self._cb_waypoint, 10)
@@ -407,6 +414,24 @@ class MissionBridgeNode(Node):
         self._status_detail_pub = self.create_publisher(String, '/mission_bridge/status_detail', 10)
         self._status_detail_timer = self.create_timer(0.5, self._status_detail_heartbeat)
 
+        # Service servers for upper-layer task management
+        self._srv_cg = MutuallyExclusiveCallbackGroup()
+        self._srv_send = self.create_service(
+            SendWaypoints, 'mission_bridge/send_waypoints',
+            self._cb_send_waypoints, callback_group=self._srv_cg)
+        self._srv_pause = self.create_service(
+            SetPause, 'mission_bridge/set_pause',
+            self._cb_set_pause, callback_group=self._srv_cg)
+        self._srv_emerg = self.create_service(
+            EmergencyStop, 'mission_bridge/emergency_stop',
+            self._cb_emergency_stop, callback_group=self._srv_cg)
+        self._srv_cancel = self.create_service(
+            CancelMission, 'mission_bridge/cancel_mission',
+            self._cb_cancel_mission, callback_group=self._srv_cg)
+        self.get_logger().info(
+            "Service servers ready: send_waypoints, set_pause, emergency_stop, cancel_mission")
+        self._publish_status_detail()
+
         self._suppress_passive_waypoints = False
         self._last_passive_waypoint_wall = 0.0
 
@@ -429,11 +454,10 @@ class MissionBridgeNode(Node):
     def _publish_status_detail(self, state_override: Optional[str] = None,
                                error_code: Optional[str] = None,
                                nav2_error_code: int = 0,
-                               nav2_error_msg: str = "") -> None:
+                               nav2_error_msg: str = "",
+                               transition_reason: Optional[str] = None) -> None:
         """Publish /mission_bridge/status_detail JSON for nav_status_aggregator."""
         with self._sm_lock:
-            if state_override is None and self._state != MissionState.RUNNING:
-                return
             state = state_override or self._state.value
             task_id = self._current_mission_id or ""
             command_id = self._current_command_id or ""
@@ -443,7 +467,7 @@ class MissionBridgeNode(Node):
             elapsed = 0.0
             if self._mission_start_wall > 0.0:
                 elapsed = time.time() - self._mission_start_wall
-        payload = {
+        payload: Dict[str, Any] = {
             "state": state,
             "task_id": task_id,
             "command_id": command_id,
@@ -456,33 +480,86 @@ class MissionBridgeNode(Node):
         if nav2_error_code or nav2_error_msg:
             payload["nav2_error_code"] = nav2_error_code
             payload["nav2_error_msg"] = nav2_error_msg
+        if transition_reason:
+            payload["transition_reason"] = transition_reason
         msg = String()
         msg.data = json.dumps(payload)
         self._status_detail_pub.publish(msg)
 
     def _status_detail_heartbeat(self) -> None:
-        """2 Hz heartbeat — only publishes status_detail when RUNNING."""
+        """2 Hz heartbeat — keep /nav_status in sync for all task states."""
         self._publish_status_detail()
 
-    def _transition_state(self, new_state: MissionState) -> None:
-        """Set internal state and publish to /mission_bridge/state for GCS."""
-        prev = self._state
-        self._state = new_state
+    def _transition_state(self, new_state: MissionState,
+                          transition_reason: Optional[str] = None) -> None:
+        """Set internal state and publish to /mission_bridge/state + status_detail."""
+        with self._sm_lock:
+            prev = self._state
+            self._state = new_state
         if new_state != prev:
             msg = String()
             msg.data = str(new_state.value)
             self._state_pub.publish(msg)
             self.get_logger().info(f"STATE -> {new_state.value}")
+            self._publish_status_detail(transition_reason=transition_reason)
+
+    def _cancel_active_nav2_goal(self) -> None:
+        """Cancel in-flight FollowWaypoints goal and stop send timer."""
+        gh = self._active_goal_handle
+        self._active_goal_handle = None
+        if gh is not None:
+            try:
+                gh.cancel_goal_async()
+            except Exception as ex:
+                self.get_logger().warning(f"cancel_goal_async: {ex}")
+        try:
+            if self._send_timer is not None:
+                self._send_timer.cancel()
+                self._send_timer = None
+        except Exception:
+            pass
+        with self._sm_lock:
+            self.navigating = False
+
+    def _on_system_not_ready(self) -> None:
+        """TF or Nav2 action unavailable — stop execution and enter WAITING_SYSTEM."""
+        with self._sm_lock:
+            prev = self._state
+            if prev == MissionState.WAITING_SYSTEM:
+                return
+            if prev in (MissionState.RUNNING, MissionState.PAUSED):
+                self._mission_token += 1
+        self._cancel_active_nav2_goal()
+        with self._sm_lock:
+            self._transition_state(MissionState.WAITING_SYSTEM)
+        self.get_logger().warning(
+            "System not ready (TF or FollowWaypoints) — STATE -> WAITING_SYSTEM"
+        )
 
     def _tick_ready(self) -> None:
+        tf_ok = self._tf_ok()
+        action_ok = self._waypoint_client.wait_for_server(timeout_sec=0.2)
+
         with self._sm_lock:
-            if self._state != MissionState.WAITING_SYSTEM:
-                return
-            if self._tf_ok() and self._waypoint_client.wait_for_server(timeout_sec=0.2):
+            state = self._state
+
+        if state == MissionState.WAITING_SYSTEM:
+            if tf_ok and action_ok:
                 self._transition_state(MissionState.IDLE)
                 self._log_green(f"TF ready: {self._global_frame} -> {self._robot_frame}")
                 self.get_logger().info("FollowWaypoints action server ready")
-                self.get_logger().info("STATE -> IDLE")
+            return
+
+        if not tf_ok or not action_ok:
+            if state in (
+                MissionState.IDLE,
+                MissionState.RUNNING,
+                MissionState.PAUSED,
+                MissionState.COMPLETED,
+                MissionState.FAILED,
+            ):
+                self._on_system_not_ready()
+            return
 
     def _tf_ok(self) -> bool:
         try:
@@ -543,13 +620,20 @@ class MissionBridgeNode(Node):
             wps, mh, from_start_pulse=True, explicit_replan=True
         )
 
-    def _cb_mission_cancel(self, _: Empty) -> None:
-        self.get_logger().info("mission_cancel: clearing waypoint buffers")
+    def _apply_mission_cancel(self) -> Tuple[bool, str]:
+        """Cancel mission / clear EMERGENCY.
+
+        Shared by upper-layer ``cancel_mission`` Service and GCS ``mission_cancel_topic``
+        (default ``/gcs_mission/cancel``).
+        """
+        with self._sm_lock:
+            state = self._state
+
+        if state == MissionState.WAITING_SYSTEM:
+            return False, "System not ready (WAITING_SYSTEM)"
+
         if self._suppress_passive_after_cancel:
             self._suppress_passive_waypoints = True
-            self.get_logger().info(
-                "mission_cancel: suppress_passive_waypoints=True until explicit_replan or start_pulse"
-            )
         self._deb_route = None
         self._startpulse_route = None
         self._cancel_waypoint_commit_timer()
@@ -564,11 +648,49 @@ class MissionBridgeNode(Node):
             self._delayed_mission_timer = None
         self._delayed_mission = None
 
-        with self._sm_lock:
-            running = self._state == MissionState.RUNNING
+        if state == MissionState.EMERGENCY:
+            self._suppress_passive_waypoints = False
+            self._paused_nav_xy = []
+            self._paused_index = 0
+            with self._sm_lock:
+                self._nav_xy = []
+                self.current_index = 0
+                self._running_mission_hash = None
+                self._transition_state(MissionState.IDLE, transition_reason="cancel")
+            self.get_logger().info("EMERGENCY cleared via cancel → IDLE")
+            return True, "Emergency cleared, state IDLE"
 
-        if running:
-            self._preempt_running_mission_for_new_waypoints()
+        if state == MissionState.PAUSED:
+            self._paused_nav_xy = []
+            self._paused_index = 0
+            with self._sm_lock:
+                self._nav_xy = []
+                self.current_index = 0
+                self._running_mission_hash = None
+                self._transition_state(MissionState.IDLE, transition_reason="cancel")
+            self.get_logger().info("PAUSED cancelled → IDLE")
+            return True, "Paused mission cancelled, state IDLE"
+
+        if state == MissionState.RUNNING:
+            self._preempt_running_mission_for_new_waypoints(for_replace=False)
+            with self._sm_lock:
+                self._nav_xy = []
+                self.current_index = 0
+            return True, "Running mission cancelled, state IDLE"
+
+        if state == MissionState.IDLE:
+            return True, "Already idle (idempotent)"
+
+        # COMPLETED / FAILED — already settling to IDLE
+        with self._sm_lock:
+            self._transition_state(MissionState.IDLE, transition_reason="cancel")
+        return True, "Mission cleared, state IDLE"
+
+    def _cb_mission_cancel(self, _: Empty) -> None:
+        self.get_logger().info("mission_cancel (topic): clearing mission")
+        success, message = self._apply_mission_cancel()
+        if not success:
+            self.get_logger().warning(message)
 
     def _consume_waypoint_command(
         self,
@@ -611,6 +733,12 @@ class MissionBridgeNode(Node):
                 )
                 return
 
+            if self._state == MissionState.EMERGENCY:
+                self.get_logger().warning(
+                    "EMERGENCY active — waypoint ignored (send cancel to clear)"
+                )
+                return
+
             if self._state == MissionState.RUNNING:
                 if mh == self._running_mission_hash:
                     if operator_explicit:
@@ -632,6 +760,17 @@ class MissionBridgeNode(Node):
                     return
                 else:
                     preempt = True
+            elif self._state == MissionState.PAUSED:
+                if operator_explicit:
+                    # Discard paused progress, execute new mission
+                    self._paused_nav_xy = []
+                    self._paused_index = 0
+                    preempt = True
+                else:
+                    self.get_logger().warning(
+                        "PAUSED — waypoint ignored (send explicit_replan to replace)"
+                    )
+                    return
             elif self._state not in (
                 MissionState.IDLE,
                 MissionState.COMPLETED,
@@ -654,7 +793,7 @@ class MissionBridgeNode(Node):
                 return
 
         if preempt:
-            self._preempt_running_mission_for_new_waypoints()
+            self._preempt_running_mission_for_new_waypoints(for_replace=True)
             self._delayed_mission = (wps, mh)
 
             def _deferred_execute() -> None:
@@ -787,43 +926,21 @@ class MissionBridgeNode(Node):
             wps, mh, from_start_pulse=False, explicit_replan=explicit
         )
 
-    def _preempt_running_mission_for_new_waypoints(self) -> None:
-        """取消当前发往 Nav2 的 FollowWaypoints，使后续新航线能重新触发全局规划。"""
+    def _preempt_running_mission_for_new_waypoints(self, *, for_replace: bool = False) -> None:
+        """Cancel active FollowWaypoints so a new route or cancel can proceed."""
+        reason = "replace" if for_replace else "cancel"
         self.get_logger().info(
-            "New GCS waypoint set while navigating — canceling active FollowWaypoints goal"
+            f"Preempt active mission (reason={reason}) — canceling FollowWaypoints goal"
         )
-        gh = self._active_goal_handle
-        self._active_goal_handle = None
-
-        if gh is not None or self.navigating:
+        if self._active_goal_handle is not None or self.navigating:
             self._mission_token += 1
             self.get_logger().info(
                 f"Mission token bumped to {self._mission_token} (preempt)"
             )
-        with self._sm_lock:
-            self.navigating = False
-
-        if gh is not None:
-            try:
-                gh.cancel_goal_async()
-            except Exception as ex:
-                self.get_logger().warning(f"cancel_goal_async: {ex}")
-
-        try:
-            if self._send_timer is not None:
-                try:
-                    self._send_timer.cancel()
-                except Exception:
-                    pass
-                self._send_timer = None
-        except Exception:
-            pass
-
+        self._cancel_active_nav2_goal()
         with self._sm_lock:
             self._running_mission_hash = None
-            self._transition_state(MissionState.IDLE)
-
-        self._publish_status_detail(state_override="IDLE")
+            self._transition_state(MissionState.IDLE, transition_reason=reason)
 
     def _execute_mission_atomic(self, wps: List[Tuple[float, float]], mh: str) -> None:
         try:
@@ -1122,8 +1239,6 @@ class MissionBridgeNode(Node):
             self._transition_state(MissionState.COMPLETED)
         self.get_logger().info("All waypoints completed.")
 
-        self._publish_status_detail(state_override="COMPLETED")
-
         try:
             if self._odom_sub is not None:
                 self.destroy_subscription(self._odom_sub)
@@ -1170,9 +1285,11 @@ class MissionBridgeNode(Node):
             f"MISSION FAILED — STATE -> FAILED "
             f"error_code={error_code} nav2_error_code={nav2_error_code} nav2_error_msg={nav2_error_msg}"
         )
-        self._publish_status_detail(state_override="FAILED", error_code=error_code,
-                                     nav2_error_code=nav2_error_code,
-                                     nav2_error_msg=nav2_error_msg)
+        self._publish_status_detail(
+            error_code=error_code,
+            nav2_error_code=nav2_error_code,
+            nav2_error_msg=nav2_error_msg,
+        )
         self._state_to_idle_relaxed()
 
     def _on_nav_failed(self, **kwargs: Any) -> None:
@@ -1199,7 +1316,235 @@ class MissionBridgeNode(Node):
     def _defer_idle(self) -> None:
         with self._sm_lock:
             if self._state in (MissionState.COMPLETED, MissionState.FAILED):
-                self._transition_state(MissionState.IDLE)
+                self._transition_state(MissionState.IDLE, transition_reason="complete")
+            # PAUSED and EMERGENCY do NOT auto-transition to IDLE
+
+
+    # ----------------------------------------------------------------------- #
+    # Service callbacks
+    # ----------------------------------------------------------------------- #
+
+    def _cb_send_waypoints(self, request: SendWaypoints.Request,
+                           response: SendWaypoints.Response) -> SendWaypoints.Response:
+        """Service: 下发航线 (SendWaypoints). Service 调用等价于 explicit_replan，可抢占 RUNNING/PAUSED。"""
+        wps = request.waypoints
+        mission_id = request.mission_id.strip() if request.mission_id else ""
+        command_id = request.command_id.strip() if request.command_id else ""
+
+        if not wps:
+            response.success = False
+            response.message = "Waypoints list is empty"
+            self.get_logger().warning(response.message)
+            return response
+
+        self.get_logger().info(
+            f"[service] send_waypoints: {len(wps)} waypoints, "
+            f"mission_id={mission_id!r} command_id={command_id!r}"
+        )
+
+        with self._sm_lock:
+            current_state = self._state
+
+        if current_state == MissionState.WAITING_SYSTEM:
+            response.success = False
+            response.message = "System not ready (WAITING_SYSTEM)"
+            self.get_logger().warning(response.message)
+            return response
+
+        if current_state == MissionState.EMERGENCY:
+            response.success = False
+            response.message = "In EMERGENCY — call cancel_mission before sending waypoints"
+            self.get_logger().warning(response.message)
+            return response
+
+        nav_xy: List[Tuple[float, float]] = []
+        for ps in wps:
+            nav_xy.append((float(ps.pose.position.x), float(ps.pose.position.y)))
+
+        mh = waypoint_mission_hash(nav_xy, mission_id)
+
+        with self._sm_lock:
+            if self._state in (MissionState.RUNNING, MissionState.PAUSED):
+                self.get_logger().info(
+                    f"Service replacing active mission (state={self._state.value})"
+                )
+                self._preempt_running_mission_for_new_waypoints(for_replace=True)
+                self._paused_nav_xy = []
+                self._paused_index = 0
+
+        try:
+            document = {
+                "waypoints": [{"x": x, "y": y} for x, y in nav_xy],
+            }
+            atomic_write_json(self._waypoints_path.parent, self._waypoints_path, document)
+        except Exception as e:
+            response.success = False
+            response.message = f"Failed to write waypoints.json: {e}"
+            self.get_logger().error(response.message)
+            return response
+
+        self._current_mission_id = mission_id if mission_id else None
+        self._current_command_id = command_id if command_id else None
+        self._suppress_passive_waypoints = False
+
+        self._mission_token += 1
+        with self._sm_lock:
+            self._nav_xy = nav_xy
+            self.current_index = 0
+            self.navigating = False
+            self._running_mission_hash = mh
+            self._transition_state(MissionState.RUNNING)
+        self._mission_start_wall = time.time()
+        self._start_nav_stack()
+
+        response.success = True
+        response.message = f"Mission started: {len(nav_xy)} waypoints, hash={mh[:12]}…"
+        self._log_green(response.message)
+        return response
+
+    def _cb_set_pause(self, request: SetPause.Request,
+                      response: SetPause.Response) -> SetPause.Response:
+        """Service: 暂停/继续 (SetPause)."""
+        pause = request.pause
+
+        with self._sm_lock:
+            current_state = self._state
+
+        if current_state == MissionState.WAITING_SYSTEM:
+            response.success = False
+            response.message = "System not ready (WAITING_SYSTEM)"
+            return response
+
+        if current_state == MissionState.EMERGENCY:
+            response.success = False
+            response.message = "In EMERGENCY — call cancel_mission first"
+            return response
+
+        if pause:
+            if current_state == MissionState.RUNNING:
+                self._pause_mission()
+                response.success = True
+                response.message = "Mission paused; progress saved"
+                self.get_logger().info("[service] set_pause: true → PAUSED")
+            elif current_state == MissionState.PAUSED:
+                response.success = True
+                response.message = "Already paused (idempotent)"
+            elif current_state == MissionState.IDLE:
+                response.success = False
+                response.message = "No active mission to pause"
+            else:
+                response.success = False
+                response.message = f"Cannot pause in state {current_state.value}"
+                self.get_logger().warning(response.message)
+        else:
+            if current_state == MissionState.PAUSED:
+                self._resume_mission()
+                response.success = True
+                response.message = "Mission resumed from saved progress"
+                self.get_logger().info("[service] set_pause: false → RUNNING")
+            elif current_state == MissionState.RUNNING:
+                response.success = True
+                response.message = "Already running (idempotent)"
+            else:
+                response.success = False
+                response.message = f"Cannot resume in state {current_state.value}"
+                self.get_logger().warning(response.message)
+
+        return response
+
+    def _cb_cancel_mission(self, _request: CancelMission.Request,
+                           response: CancelMission.Response) -> CancelMission.Response:
+        """Service: 取消任务 / 退出急停 (CancelMission)."""
+        self.get_logger().info("[service] cancel_mission")
+        success, message = self._apply_mission_cancel()
+        response.success = success
+        response.message = message
+        if success:
+            self.get_logger().info(f"[service] cancel_mission: {message}")
+        else:
+            self.get_logger().warning(f"[service] cancel_mission: {message}")
+        return response
+
+    def _cb_emergency_stop(self, request: EmergencyStop.Request,
+                           response: EmergencyStop.Response) -> EmergencyStop.Response:
+        """Service: 急停 (EmergencyStop)."""
+        with self._sm_lock:
+            current_state = self._state
+
+        if current_state == MissionState.EMERGENCY:
+            response.success = True
+            response.message = "Already in EMERGENCY (idempotent)"
+            return response
+
+        self._emergency_stop()
+        response.success = True
+        response.message = "Emergency stop executed"
+        self.get_logger().error("[service] emergency_stop → EMERGENCY")
+        return response
+
+    # ----------------------------------------------------------------------- #
+    # PAUSED / EMERGENCY internal logic
+    # ----------------------------------------------------------------------- #
+
+    def _pause_mission(self) -> None:
+        """Save progress, cancel current goal, enter PAUSED. No auto-IDLE."""
+        with self._sm_lock:
+            self._paused_nav_xy = list(self._nav_xy)
+            self._paused_index = self.current_index
+
+        self._mission_token += 1
+        self._cancel_active_nav2_goal()
+        with self._sm_lock:
+            self._transition_state(MissionState.PAUSED)
+        self.get_logger().info(
+            f"PAUSED — saved {len(self._paused_nav_xy)} waypoints, "
+            f"index={self._paused_index}"
+        )
+
+    def _resume_mission(self) -> None:
+        """Restore saved waypoints and continue from breakpoint."""
+        with self._sm_lock:
+            self._nav_xy = list(self._paused_nav_xy)
+            self.current_index = self._paused_index
+            self._paused_nav_xy = []
+            self._paused_index = 0
+            self._transition_state(MissionState.RUNNING)
+
+        self._start_nav_stack()
+        self.get_logger().info(
+            f"RESUMED — continuing from waypoint {self.current_index + 1}/{len(self._nav_xy)}"
+        )
+
+    def _emergency_stop(self) -> None:
+        """Cancel everything, clear state, enter EMERGENCY. No auto-IDLE."""
+        for tmr_attr in ("_waypoint_commit_timer", "_delayed_mission_timer"):
+            tmr = getattr(self, tmr_attr, None)
+            if tmr is not None:
+                try:
+                    tmr.cancel()
+                except Exception:
+                    pass
+                setattr(self, tmr_attr, None)
+
+        self._mission_token += 1
+        self._cancel_active_nav2_goal()
+
+        with self._sm_lock:
+            self._nav_xy = []
+            self.current_index = 0
+            self._paused_nav_xy = []
+            self._paused_index = 0
+            self._running_mission_hash = None
+            self._transition_state(MissionState.EMERGENCY)
+
+        self._suppress_passive_waypoints = True
+        self._deb_route = None
+        self._startpulse_route = None
+        self._delayed_mission = None
+        self._clear_waypoint_file()
+
+        self._publish_status_detail(error_code="EMERGENCY_STOP")
+        self.get_logger().error("EMERGENCY STOP — all state cleared")
 
 
 def main(args: Optional[list] = None) -> None:

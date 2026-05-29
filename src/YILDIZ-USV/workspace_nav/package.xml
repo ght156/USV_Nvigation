@@ -17,6 +17,7 @@
   <buildtool_depend>ament_python</buildtool_depend>
   
   <depend>rclpy</depend>
+  <depend>m_common</depend>
   <depend>launch</depend>
   <depend>launch_ros</depend>
   <depend>ros_gz_bridge</depend>
