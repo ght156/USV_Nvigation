@@ -95,7 +95,7 @@ controller_server:
       #   max 过大：沿路径直行过久 → 转弯滞后、有效半径大，目标在船后时先冲很远再拐。
       lookahead_time: 5.0
       use_velocity_scaled_lookahead_dist: true
-      min_lookahead_dist: 1.5
+      min_lookahead_dist: 4.0
       max_lookahead_dist: 5.0
       cost_scaling_factor: 0.5
       inflation_radius: 2.0

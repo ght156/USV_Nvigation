@@ -87,7 +87,7 @@ def generate_launch_description():
 
     declare_enable_mission_bridge = DeclareLaunchArgument(
         'enable_mission_bridge',
-        default_value='true',
+        default_value='false',
         description='为 true 时一并启动 mission_bridge + nav_status_aggregator（GCS/上层对接）',
     )
 
