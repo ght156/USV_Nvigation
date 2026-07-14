@@ -2,7 +2,7 @@
 
 # ----------------------------------------------------------------------------------------------- #
 # 实船 Nav2：默认 nav2_params_real_mavros.yaml + map.yaml。
-# 可选 enable_mission_bridge:=true 一并启动 mission_bridge + nav_status_aggregator。
+# 默认 enable_mission_bridge:=true 一并启动 mission_bridge + nav_status_aggregator。
 # ----------------------------------------------------------------------------------------------- #
 
 import os
@@ -87,8 +87,8 @@ def generate_launch_description():
 
     declare_enable_mission_bridge = DeclareLaunchArgument(
         'enable_mission_bridge',
-        default_value='false',
-        description='为 true 时一并启动 mission_bridge + nav_status_aggregator（GCS/上层对接）',
+        default_value='true',
+        description='为 true 时一并启动 mission_bridge + nav_status_aggregator（GCS/上层对接；实船默认开启）',
     )
 
     declare_mission_params_file = DeclareLaunchArgument(

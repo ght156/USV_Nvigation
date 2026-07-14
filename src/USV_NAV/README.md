@@ -14,9 +14,12 @@
 USV_NAV/
 ├── docs/                    # 联调、NX 部署、地图/GNSS 说明
 ├── map/                     # 栅格图源（如 HK 园区）
-└── src/USV_NAV/
-    ├── workspace_nav/       # Nav2、地图 yaml、航点节点
-    └── workspace_ros/       # MAVROS 桥接、gnss_odom_map_tf、速度桥
+└── src/
+    ├── apriltag_localization/   # AprilTag 船坞定位（感知）
+    ├── m_common/                # 公共消息/Service/工具库
+    └── USV_NAV/
+        ├── workspace_nav/       # Nav2、地图 yaml、mission 栈
+        └── workspace_ros/       # MAVROS 桥接、gnss_odom_map_tf、速度桥
 ```
 
 ## 依赖与编译

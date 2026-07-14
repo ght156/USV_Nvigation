@@ -1,7 +1,7 @@
 # mission_bridge 与上层 / 地面站对接（实船）
 
 > 实船 **USV_NAV** 自 2026-05 起与仿真仓 `wuxihik_navigation` 共用同一套 mission 接口。  
-> **接口契约全文**：仿真仓 `docs/nav_task_interface.md` v4.1（本地可复制一份到 `USV_NAV/docs/` 备查）。
+> **接口契约全文**：[`docs/nav_task_interface.md`](../../../docs/nav_task_interface.md) v4.1
 
 ---
 
@@ -49,7 +49,7 @@ Nav2 使用非默认地图时再传：`map_yaml_path:=<与 Nav2 map:= 相同的�
 |----|-----|
 | odom | `/mavros/local_position/odom` |
 | GPS（aggregator） | `/mavros/global_position/raw/fix` |
-| GCS 航线 | `/waypoint`（WGS84 JSON） |
+| GCS 航线 | `/waypoint`（WGS84 JSON，**debounce** 约 0.45s 后自动开始） |
 | GCS 取消 | `/gcs_mission/cancel` |
 | 目标色 | `/color_code` |
 | 状态反馈 | `/nav_status`、`/task_event` |

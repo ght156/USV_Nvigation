@@ -65,14 +65,8 @@ def _setup_nodes(context, *args, **kwargs):
                 "target_buoy_force_rewrite": ParameterValue(
                     lc("target_buoy_force_rewrite"), value_type=bool
                 ),
-                "waypoint_command_mode": ParameterValue(
-                    lc("waypoint_command_mode"), value_type=str
-                ),
                 "waypoint_commit_delay_sec": ParameterValue(
                     lc("waypoint_commit_delay_sec"), value_type=float
-                ),
-                "mission_start_topic": ParameterValue(
-                    lc("mission_start_topic"), value_type=str
                 ),
                 "mission_cancel_topic": ParameterValue(
                     lc("mission_cancel_topic"), value_type=str
@@ -185,19 +179,9 @@ def generate_launch_description():
                 "每次 /color_code 是否强制写 target_buoy.json",
             ),
             _decl(
-                "waypoint_command_mode",
-                "debounce",
-                "immediate | debounce | start_pulse",
-            ),
-            _decl(
                 "waypoint_commit_delay_sec",
                 "0.45",
-                "debounce 静默窗口 (s)",
-            ),
-            _decl(
-                "mission_start_topic",
-                "",
-                'start_pulse 时必填，如 "/gcs_mission/start"',
+                "GCS /waypoint debounce 静默窗口 (s)，无新消息后执行最后一次航线",
             ),
             _decl(
                 "mission_cancel_topic",

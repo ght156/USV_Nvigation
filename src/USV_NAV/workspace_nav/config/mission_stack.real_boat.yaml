@@ -14,7 +14,7 @@ mission_bridge:
     global_frame: "map"
     robot_frame: "base_link"
     map_datum_ref_key: "ref_gnss_10"
-    waypoint_command_mode: "debounce"
+    waypoint_commit_delay_sec: 0.45
     allow_replace_running_mission: false
     mission_cancel_topic: "/gcs_mission/cancel"
 

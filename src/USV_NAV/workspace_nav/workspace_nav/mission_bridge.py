@@ -179,9 +179,7 @@ class MissionBridgeNode(Node):
         self.declare_parameter("allow_replace_running_mission", False)
         self.declare_parameter("allow_repeat_identical_route", False)
         self.declare_parameter("target_buoy_force_rewrite", False)
-        self.declare_parameter("waypoint_command_mode", "immediate")
         self.declare_parameter("waypoint_commit_delay_sec", 0.45)
-        self.declare_parameter("mission_start_topic", "")
         self.declare_parameter("mission_cancel_topic", "")
         self.declare_parameter("discard_watchdog_sec", 4.0)
         self.declare_parameter("suppress_passive_waypoints_after_cancel", True)
@@ -303,27 +301,12 @@ class MissionBridgeNode(Node):
             self.get_parameter("target_buoy_force_rewrite").value
         )
 
-        wm = (
-            self.get_parameter("waypoint_command_mode")
-            .get_parameter_value()
-            .string_value.strip()
-            .lower()
-        )
-        if wm in ("debounce", "debounced"):
-            self._wp_cmd_mode = "debounce"
-        elif wm in ("start_pulse", "start", "pulse"):
-            self._wp_cmd_mode = "start_pulse"
-        else:
-            self._wp_cmd_mode = "immediate"
         self._wp_commit_delay = float(
             self.get_parameter("waypoint_commit_delay_sec").value
         )
         if self._wp_commit_delay < 0.05:
             self._wp_commit_delay = 0.05
 
-        ms_top = (
-            self.get_parameter("mission_start_topic").get_parameter_value().string_value.strip()
-        )
         mc_top = (
             self.get_parameter("mission_cancel_topic")
             .get_parameter_value()
@@ -362,43 +345,22 @@ class MissionBridgeNode(Node):
         self._deb_route: Optional[
             Tuple[List[Tuple[float, float]], str, bool]
         ] = None
-        self._startpulse_route: Optional[
-            Tuple[List[Tuple[float, float]], str, bool]
-        ] = None
 
-        self._mission_start_topic = ms_top
         self._mission_cancel_topic = mc_top.strip()
 
         self.get_logger().info(
-            "waypoint_command_mode=%s (commit_delay=%.2fs, start_topic=%s, cancel_topic=%s)"
+            "GCS /waypoint debounce enabled (commit_delay=%.2fs, cancel_topic=%s)"
             % (
-                self._wp_cmd_mode,
                 self._wp_commit_delay,
-                self._mission_start_topic or "(empty)",
                 self._mission_cancel_topic or "(empty)",
             )
         )
-
-        if self._wp_cmd_mode == "start_pulse":
-            if not self._mission_start_topic:
-                self.get_logger().fatal(
-                    'waypoint_command_mode=start_pulse 时必须设置 mission_start_topic（例如 "/gcs_mission/start")'
-                )
-                raise SystemExit(1)
 
         # Ground station (GCS) — Topic control; kept parallel to upper-layer Services.
         _wp_in = self.get_parameter("waypoint_topic").value
         _cg_in = self.get_parameter("color_topic").value
         self.create_subscription(String, _wp_in, self._cb_waypoint, 10)
         self.create_subscription(String, _cg_in, self._cb_color, 10)
-        if self._wp_cmd_mode == "start_pulse":
-            self.create_subscription(
-                Empty,
-                self._mission_start_topic,
-                self._cb_mission_start,
-                10,
-            )
-            self._log_green(f"listening start_pulse.Empty on {self._mission_start_topic!r}")
         if self._mission_cancel_topic:
             self.create_subscription(
                 Empty,
@@ -597,27 +559,12 @@ class MissionBridgeNode(Node):
                 return
             bwps, bmh, bexplicit = bundle
             self._consume_waypoint_command(
-                bwps, bmh, from_start_pulse=False, explicit_replan=bexplicit
+                bwps, bmh, explicit_replan=bexplicit
             )
 
         self._waypoint_commit_timer = self.create_timer(
             float(self._wp_commit_delay),
             _flush_debounced,
-        )
-
-    def _cb_mission_start(self, _: Empty) -> None:
-        bundle = getattr(self, "_startpulse_route", None)
-        if bundle is None or not bundle[0]:
-            self.get_logger().warning(
-                "start_pulse: buffered route empty — publish /waypoint first, then pulse start topic."
-            )
-            return
-        wps, mh, _buffered_explicit = bundle
-        self.get_logger().info(
-            f"start_pulse: executing buffered route ({len(wps)} points, mission hash {mh[:12]}…)"
-        )
-        self._consume_waypoint_command(
-            wps, mh, from_start_pulse=True, explicit_replan=True
         )
 
     def _apply_mission_cancel(self) -> Tuple[bool, str]:
@@ -635,7 +582,6 @@ class MissionBridgeNode(Node):
         if self._suppress_passive_after_cancel:
             self._suppress_passive_waypoints = True
         self._deb_route = None
-        self._startpulse_route = None
         self._cancel_waypoint_commit_timer()
         self._clear_waypoint_file()
 
@@ -697,10 +643,9 @@ class MissionBridgeNode(Node):
         wps: List[Tuple[float, float]],
         mh: str,
         *,
-        from_start_pulse: bool,
         explicit_replan: bool = False,
     ) -> None:
-        operator_explicit = bool(from_start_pulse or explicit_replan)
+        operator_explicit = bool(explicit_replan)
         if operator_explicit:
             self._suppress_passive_waypoints = False
         elif (
@@ -712,7 +657,7 @@ class MissionBridgeNode(Node):
                 setattr(self, "_last_passive_waypoint_wall", time.time())
                 self.get_logger().info(
                     "passive /waypoint discarded after Cancel Nav "
-                    "(need explicit_replan in JSON or start_pulse Empty)"
+                    "(need explicit_replan in JSON)"
                 )
             return
         # 取消遗留的延后启动定时器（防连续改点时任务叠加）
@@ -754,7 +699,7 @@ class MissionBridgeNode(Node):
                 ):
                     self.get_logger().warning(
                         "mission running, new mission rejected "
-                        "(enable allow_replace_running_mission, publish explicit_replan/start_pulse, "
+                        "(enable allow_replace_running_mission, publish explicit_replan, "
                         "or Run Mission from GCS)"
                     )
                     return
@@ -779,8 +724,7 @@ class MissionBridgeNode(Node):
                 self.get_logger().warning(f"Waypoint ignored in state {self._state}")
                 return
             elif (
-                not from_start_pulse
-                and not explicit_replan
+                not explicit_replan
                 and mh == self._last_completed_mission_hash
                 and not self._allow_repeat_identical_route
             ):
@@ -894,37 +838,17 @@ class MissionBridgeNode(Node):
             self._suppress_passive_after_cancel
             and self._suppress_passive_waypoints
             and not explicit
-            and self._wp_cmd_mode in ("immediate", "debounce")
         ):
             _tp = getattr(self, "_last_passive_waypoint_wall", 0.0)
             if time.time() - _tp > 4.0:
                 setattr(self, "_last_passive_waypoint_wall", time.time())
                 self.get_logger().info(
-                    "passive /waypoint ignored after Cancel Nav "
-                    f"(mode={self._wp_cmd_mode!r})"
+                    "passive /waypoint ignored after Cancel Nav"
                 )
             return
 
-        if self._wp_cmd_mode == "start_pulse":
-            self._startpulse_route = (wps, mh, explicit)
-            if self._dbg or (
-                time.time() - getattr(self, "_last_stage_log_wall", 0.0) > 12.0
-            ):
-                self._last_stage_log_wall = time.time()
-                self.get_logger().info(
-                    f"start_pulse: staged {len(wps)} waypoint(s), hash={mh[:12]}… "
-                    f"pulse std_msgs/msg/Empty on {self._mission_start_topic!r} to navigate"
-                )
-            return
-
-        if self._wp_cmd_mode == "debounce":
-            self._deb_route = (wps, mh, explicit)
-            self._reschedule_waypoint_commit_timer()
-            return
-
-        self._consume_waypoint_command(
-            wps, mh, from_start_pulse=False, explicit_replan=explicit
-        )
+        self._deb_route = (wps, mh, explicit)
+        self._reschedule_waypoint_commit_timer()
 
     def _preempt_running_mission_for_new_waypoints(self, *, for_replace: bool = False) -> None:
         """Cancel active FollowWaypoints so a new route or cancel can proceed."""

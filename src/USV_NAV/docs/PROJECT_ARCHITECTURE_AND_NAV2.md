@@ -104,7 +104,7 @@ GCS /color_code ────────────► mission_bridge ──►
 nav_status_aggregator ──► /nav_status、/task_event
 ```
 
-- 默认 **`waypoint_command_mode=debounce`**（GCS 发一次 `/waypoint` 约 0.45s 后自动开走）  
+- GCS `/waypoint` 固定 **debounce**（约 0.45s 静默后自动开走，无需 `/gcs_mission/start`）  
 - **`datum_source:=map_yaml`**，与 `ref_gnss*` 同源  
 - Legacy：`waypoint_transform` → JSON → `waypoint_with_state`（**仅** `enable_mission_bridge:=false` 时使用）
 
