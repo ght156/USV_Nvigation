@@ -39,10 +39,20 @@ Thumbs.db
 # 大文件 / 本地临时 / 非仓库内容
 map/
 tools/
+logs/
 *.pgm
 *.tar.gz
 ESKF_*.tar.gz
 test.txt
 
-# 未纳入本仓维护的实验包（本地保留）
-src/perception/
+# 文档
+docs/
+
+# 测试
+test/
+
+# 编辑器/IDE 工作缓存
+.claude/
+.cursor/
+
+# 说明：感知包见 src/apriltag_localization/（与 m_common 同级，纳入版本控制）

@@ -1,0 +1,163 @@
+# usv_docking — 实船 profile（camera_left_link，参数更保守）
+# 启动：ros2 launch usv_docking docking_controller.launch.py profile:=real use_sim_time:=false
+# 分段说明同 docking_controller_sim.yaml
+
+docking_controller:
+  ros__parameters:
+
+    # ── 话题 / 坐标系 ──
+    dock_pose_topic: "/apriltag_node/dock_pose"   # AprilTag 位姿输入
+    cmd_vel_topic: "/cmd_vel_nav"                   # 速度输出
+    start_topic: "/dock/start"
+    cancel_topic: "/dock/cancel"
+    status_topic: "/dock/status"
+    mission_state_topic: "/mission_bridge/state"
+    odom_topic: "/odometry/filtered"
+
+    camera_frame: "camera_left_link"              # 须与 apriltag frame_id 一致
+    robot_frame: "base_link"
+    tf_timeout_sec: 0.15                          # TF 查询超时 (s)
+    allow_camera_frame_fallback: false
+
+    control_rate: 20.0                            # 控制环频率 (Hz)
+    pose_filter_alpha: 0.30                       # Tag 位姿低通系数
+
+    # ── 段1 GNSS ──
+    gnss_approach_enabled: true                   # false → 跳过 GNSS
+    gnss_topic: "/gps/fixed_cov"                  # ★ 按实船 GNSS 话题改
+    gnss_min_fix_status: 2                        # RTK fix 等级门槛
+    gnss_timeout_sec: 3.0                         # GNSS 断流判丢失 (s)
+    gnss_startup_grace_sec: 4.0                   # 启动宽限 (s)
+    abort_on_gnss_loss: true
+    dock_geometry_path: ""
+    dock_geometry_file: "dock_geometry_real.yaml"
+    gnss_align_yaw_tol: 0.10                      # 对齐完成 |deyaw| (rad)
+    gnss_align_kpsi: 0.30                         # 对齐 / correct ω P 增益
+    gnss_align_omega_max: 0.20                    # 对齐 / correct ω 上限 (rad/s)
+    gnss_entry_dist_tol: 0.4                      # 到虚拟入口距离 (m)
+    gnss_entry_yaw_tol: 0.12                      # 到点艉向 (rad)
+    gnss_overshoot_along_tol_m: 0.20              # 沿 leg 过冲停倒 (m)
+    gnss_back_creep_dist_m: 1.2                   # 近入口 creep 距离 (m)
+    gnss_settle_cycles: 6
+    gnss_back_heading_ok_tol: 0.06                # 滞回参考 (rad)
+    gnss_back_heading_correct_tol: 0.14            # 停倒纠向阈值 (rad)
+    gnss_back_steer_deadband: 0.05                # cruise / walk_fix 分界 (rad)
+    gnss_back_steer_kpsi: 0.18                    # walk_fix ω 增益
+    gnss_back_walk_omega_max: 0.06                # walk_fix ω 上限 (rad/s)
+    gnss_back_walk_speed_scale: 0.70              # walk_fix 倒车速度比例
+    gnss_back_heading_check_min_dist_m: 1.5       # 近入口放宽 correct (m)
+    gnss_back_near_entry_correct_scale: 2.0
+    gnss_heading_align_timeout_sec: 60.0
+    gnss_back_timeout_sec: 120.0
+    gnss_entry_settle_sec: 1.0                    # 到虚拟入口停稳 (s)
+    vision_search_stationary_sec: 0.8
+    vision_search_timeout_sec: 120.0
+
+    # ── 搜 Tag ──
+    wait_tag_timeout_sec: 10.0
+    wait_tag_stationary_sec: 2.0                    # WAIT 静止 (s)
+    enable_tag_search_spin: true
+    tag_search_spin_speed: 0.20                     # 自转 ω (rad/s)
+    tag_search_spin_angle_rad: 6.283185307179586    # 转满判失败 (2π)
+    tag_search_spin_min_sec: 28.0
+    tag_search_spin_timeout_sec: 90.0
+    tag_acquire_cycles: 5                           # 连续 N 帧有 Tag
+
+    # ── 段2 视觉 ──
+    entry_standoff_m: 2.0                         # Tag 深度目标 (m)
+    entry_x_tolerance: 0.25
+    entry_y_limit: 0.45                           # 进 BACK_IN |y| 门槛 (m)
+    entry_yaw_tolerance: 0.12                       # 对准 |heading_error| (rad)
+    entry_settle_cycles: 6
+    align_settle_cycles: 6
+    approach_entry_speed: 0.10                    # 段1 倒车速度上限 (m/s)
+    approach_entry_timeout_sec: 90.0
+    align_entry_timeout_sec: 60.0
+
+    heading_offset_rad: 0.0                         # ★ RTK/标定后填写
+    invert_x: false                               # 位姿符号，标定后改
+    invert_y: false
+    invert_yaw: false
+
+    back_in_speed: 0.12                           # BACK_IN 倒车 (m/s)
+    min_back_in_speed: 0.04
+    back_in_backward_projection_m: 0.20
+    kx: 0.22                                      # 段1 倒车距离增益
+    ky_back: 0.18                                 # 倒车横向 P
+    kyaw_back: 0.35                               # 倒车航向 P
+    flip_lateral_yaw_when_reversing: true
+    back_in_max_yaw_rate: 0.15
+    back_in_y_limit: 0.35
+    back_in_yaw_limit: 0.18
+    back_in_grace_sec: 2.0
+    back_in_violation_cycles: 10
+    yaw_outlier_reject_rad: 1.2                   # yaw 野值剔除 (rad)
+
+    stop_x_threshold: 0.35
+    stop_y_threshold: 0.20
+    yaw_tolerance: 0.10
+    settle_cycles: 6
+
+    # ── Tag 丢失误恢复 ──
+    tag_loss_grace_sec: 0.12
+    tag_timeout: 0.45
+    tag_loss_in_corridor_sec: 0.12
+    tag_search_on_loss: true
+    tag_reacquire_cycles: 12
+    tag_reacquire_min_spin_sec: 3.0
+    approach_tag_loss_hold_sec: 0.8
+    align_tag_loss_hold_sec: 0.5
+    in_dock_tag_search_timeout_sec: 120.0
+    back_in_blind_back_sec: 3.0                   # 盲退时长 (s)
+    back_in_blind_speed: 0.05
+
+    # ── 传感器看门狗 ──
+    odom_timeout_sec: 2.0
+    odom_startup_grace_sec: 3.0
+    dock_pose_msg_timeout_sec: 4.0
+    abort_on_odom_loss: true
+    abort_on_dock_pose_stream_loss: true
+    halt_on_sensor_loss: true
+    resume_on_sensor_recovery: true               # 恢复后续跑
+    sensor_hold_abort_sec: 45.0
+
+    # ── 速度限幅 / 斜坡 ──
+    max_reverse_speed: 0.25
+    max_yaw_rate: 0.30
+    max_linear_accel: 0.10                        # 线速度斜坡 (m/s²)
+    max_angular_accel: 0.30                       # 角速度斜坡 (rad/s²)
+    max_docking_duration_sec: 180.0
+    max_retries: 2
+    auto_retry_recoverable: true
+    require_mission_idle: true
+    allow_unknown_mission_state: false
+    abort_on_mission_emergency: true
+    publish_zero_when_idle: true
+
+    # ── 充电确认（实船）──
+    require_charging_confirm: true
+    charging_status_topic: "/wireless_charging/is_charging"
+    charge_confirm_hold_sec: 4.0                  # 充电持续 N 秒算成功
+    charge_confirm_timeout_sec: 60.0
+    charge_status_stale_sec: 5.0
+    charge_pause_on_pose_settle: true
+    abort_on_charge_pose_drift: false
+    charge_pose_slack_factor: 1.5
+    abort_on_charge_status_loss: false
+
+    dock_bay_name: "bay2"
+    primary_tag_id: 43
+
+    # ── 出泊（odom 平面距离 + 可选航向保持）──
+    undock_topic: "/dock/undock"
+    undock_distance_m: 5.0
+    undock_dist_tol_m: 0.15
+    undock_speed: 0.20
+    undock_min_speed: 0.05
+    undock_creep_dist_m: 1.0
+    undock_heading_hold: true
+    undock_heading_kpsi: 0.35
+    undock_omega_max: 0.12
+    undock_settle_cycles: 5
+    undock_timeout_sec: 60.0
+    require_mission_idle_for_undock: false

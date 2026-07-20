@@ -1,0 +1,16 @@
+# usv_docking — 泊位几何（GNSS 第一阶段，不依赖 map/Nav2）
+# 船位：订阅 gnss_topic（仿真 /gps/fixed_cov，实船 RTK fix）
+# 航向：odom/IMU yaw（docking_controller heading_offset_rad）
+
+bays:
+  bay2:
+    name: "VRX dock_2022 bay2"
+    dock_center_gnss:
+      latitude: 31.48618175
+      longitude: 120.36787674
+      yaw_deg: 0.0              # 虚拟入口对齐时船体航向（船尾朝坞）
+    # 二选一：外推距离 或 直接给虚拟入口经纬度
+    virtual_entry_standoff_m: 2.0 # 坞中心向海侧 2 m（与预泊 staging 相距约 2 m 坞内）
+    # virtual_entry_gnss:
+    #   latitude: 31.48618175
+    #   longitude: 120.36789781

@@ -416,9 +416,49 @@
 
   </gazebo>
 
+  <link name="camera_rear_link">
+
+    <!-- Visual appearance of the rear CAMERA sensor -->
+    <visual name="visual_camera">
+      <origin xyz="-0.005 0.0 0.005" rpy="0 0 3.14159"/>
+      <geometry>
+        <mesh filename="file://$(find workspace_gz)/models/roboboat/sensors/camera/meshes/camera.dae"/>
+      </geometry>
+    </visual>
+
+    <visual name="visual_camera_post">
+      <origin xyz="0.0 0.0 0.0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="file://$(find workspace_gz)/models/roboboat/sensors/camera_post/meshes/post.dae"/>
+      </geometry>
+    </visual>
+
+    <collision name="collision_camera_1">
+      <origin xyz="0.002 0.0 0.005" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.0165 0.0165 0.0165"/>
+      </geometry>
+    </collision>
+
+    <collision name="collision_camera_2">
+      <origin xyz="0.02 0.0 0.005" rpy="0 1.5708 0"/>
+      <geometry>
+        <cylinder length="0.0225" radius="0.0075"/>
+      </geometry>
+    </collision>
+
+    <collision name="collision_camera_post">
+      <origin xyz="0.0 0.0 -0.05" rpy="0.0 0.0 0.0"/>
+      <geometry>
+        <cylinder length="0.1" radius="0.005"/>
+      </geometry>
+    </collision>
+
+  </link>
+
   <gazebo reference="camera_link">
 
-    <!-- Definition of the CAMERA sensor -->
+    <!-- Definition of the forward CAMERA sensor -->
     <sensor name='sensor_camera' type='camera'>
       <camera name='front_camera'>
         <horizontal_fov>1.3962634</horizontal_fov>
@@ -432,6 +472,26 @@
           <far>400</far>
         </clip>
       </camera>  
+    </sensor>
+
+  </gazebo>
+
+  <gazebo reference="camera_rear_link">
+
+    <!-- Definition of the rear CAMERA sensor (docking / reverse approach) -->
+    <sensor name='sensor_camera_rear' type='camera'>
+      <camera name='rear_camera'>
+        <horizontal_fov>1.3962634</horizontal_fov>
+        <image>
+          <width>1280</width>
+          <height>720</height>
+          <format>R8G8B8</format>
+        </image>
+        <clip>
+          <near>0.050000000000000003</near>
+          <far>400</far>
+        </clip>
+      </camera>
     </sensor>
 
   </gazebo>
@@ -535,6 +595,12 @@
     <origin xyz="0.25 0.0 0.35" rpy="0 0 0"/>
     <parent link="base_link"/>
     <child  link="camera_link"/>
+  </joint>
+
+  <joint name="base_link_to_camera_rear_link" type="fixed">
+    <origin xyz="-0.25 0.0 0.35" rpy="0 0 3.14159"/>
+    <parent link="base_link"/>
+    <child  link="camera_rear_link"/>
   </joint>
 
   <joint name="base_link_to_left_housing_link" type="fixed">

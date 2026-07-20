@@ -1,0 +1,117 @@
+<?xml version="1.0"?>
+<sdf version="1.9">
+  <!--
+    单泊位窄通道码头（static，请在 world.sdf 改 include pose）
+    roboboat 船体宽约 0.63 m（双体间距）→ 通道内宽 0.85 m（左右各约 0.11 m 余量）
+    开口默认朝模型 +x；world 里用 yaw=π 使开口朝 -x（对 spawn 船尾）
+    roboboat 船体宽约 0.63 m → 通道内宽 0.85 m
+  -->
+  <model name="usv_dock_narrow">
+    <static>true</static>
+
+    <!-- 通道内宽 0.85 m，墙厚 0.12 m，通道长 3.0 m，墙高 0.5 m -->
+    <link name="left_wall">
+      <pose>1.5 0.485 0.25 0 0 0</pose>
+      <collision name="collision">
+        <geometry>
+          <box>
+            <size>3.0 0.12 0.5</size>
+          </box>
+        </geometry>
+      </collision>
+      <visual name="visual">
+        <geometry>
+          <box>
+            <size>3.0 0.12 0.5</size>
+          </box>
+        </geometry>
+        <material>
+          <ambient>0.45 0.45 0.48 1</ambient>
+          <diffuse>0.55 0.55 0.58 1</diffuse>
+        </material>
+      </visual>
+    </link>
+
+    <link name="right_wall">
+      <pose>1.5 -0.485 0.25 0 0 0</pose>
+      <collision name="collision">
+        <geometry>
+          <box>
+            <size>3.0 0.12 0.5</size>
+          </box>
+        </geometry>
+      </collision>
+      <visual name="visual">
+        <geometry>
+          <box>
+            <size>3.0 0.12 0.5</size>
+          </box>
+        </geometry>
+        <material>
+          <ambient>0.45 0.45 0.48 1</ambient>
+          <diffuse>0.55 0.55 0.58 1</diffuse>
+        </material>
+      </visual>
+    </link>
+
+    <link name="back_wall">
+      <pose>3.06 0 0.25 0 0 0</pose>
+      <collision name="collision">
+        <geometry>
+          <box>
+            <size>0.12 1.09 0.5</size>
+          </box>
+        </geometry>
+      </collision>
+      <visual name="visual">
+        <geometry>
+          <box>
+            <size>0.12 1.09 0.5</size>
+          </box>
+        </geometry>
+        <material>
+          <ambient>0.40 0.40 0.43 1</ambient>
+          <diffuse>0.50 0.50 0.53 1</diffuse>
+        </material>
+      </visual>
+    </link>
+
+    <!-- 通道内入泊判定 -->
+    <plugin
+      filename="gz-sim-performer-detector-system"
+      name="gz::sim::systems::PerformerDetector">
+      <topic>/vrx/usv_dock_narrow/bay_internal/contain</topic>
+      <pose>1.5 0 0.25 0 0 0</pose>
+      <geometry>
+        <box>
+          <size>1.2 0.75 0.6</size>
+        </box>
+      </geometry>
+    </plugin>
+
+    <!-- 入口外预泊/接近区 -->
+    <plugin
+      filename="gz-sim-performer-detector-system"
+      name="gz::sim::systems::PerformerDetector">
+      <topic>/vrx/usv_dock_narrow/bay_external/contain</topic>
+      <pose>-1.0 0 0.25 0 0 0</pose>
+      <geometry>
+        <box>
+          <size>1.5 0.90 0.6</size>
+        </box>
+      </geometry>
+    </plugin>
+
+    <!-- 岸上图案板（左/右，无 PlacardPlugin；AprilTag/二维码位置可自行调整） -->
+    <include>
+      <name>placard_left</name>
+      <pose>3.2 0.95 0.25 0 0 3.141592653589793</pose>
+      <uri>model://placard_2022</uri>
+    </include>
+    <include>
+      <name>placard_right</name>
+      <pose>3.2 -0.95 0.25 0 0 3.141592653589793</pose>
+      <uri>model://placard_2022</uri>
+    </include>
+  </model>
+</sdf>

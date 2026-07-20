@@ -1,0 +1,111 @@
+# usv_docking — 实船 profile（camera_left_link，参数更保守）
+# 启动：ros2 launch usv_docking docking_controller.launch.py profile:=real use_sim_time:=false
+# 分段说明同 docking_controller_sim.yaml
+
+docking_controller:
+  ros__parameters:
+
+    dock_pose_topic: "/apriltag_node/dock_pose"
+    cmd_vel_topic: "/cmd_vel_nav"
+    start_topic: "/dock/start"
+    cancel_topic: "/dock/cancel"
+    status_topic: "/dock/status"
+    mission_state_topic: "/mission_bridge/state"
+    odom_topic: "/odometry/filtered"
+
+    camera_frame: "camera_left_link"
+    robot_frame: "base_link"
+    tf_timeout_sec: 0.15
+    allow_camera_frame_fallback: false
+
+    control_rate: 20.0
+    pose_filter_alpha: 0.30
+
+    wait_tag_timeout_sec: 10.0
+    wait_tag_stationary_sec: 2.0
+    enable_tag_search_spin: true
+    tag_search_spin_speed: 0.20
+    tag_search_spin_angle_rad: 6.283185307179586
+    tag_search_spin_min_sec: 28.0
+    tag_search_spin_timeout_sec: 90.0
+    tag_acquire_cycles: 5
+
+    entry_standoff_m: 2.0
+    entry_x_tolerance: 0.25
+    entry_y_limit: 0.45
+    entry_yaw_tolerance: 0.12
+    entry_settle_cycles: 6
+    align_settle_cycles: 6
+    approach_entry_speed: 0.10
+    approach_entry_timeout_sec: 90.0
+    align_entry_timeout_sec: 60.0
+
+    heading_offset_rad: 0.0                         # ★ 实船须 RTK/标定后填写
+    invert_x: false
+    invert_y: false
+    invert_yaw: false
+
+    back_in_speed: 0.12
+    min_back_in_speed: 0.04
+    back_in_backward_projection_m: 0.20
+    kx: 0.22
+    ky_back: 0.18
+    kyaw_back: 0.35
+    flip_lateral_yaw_when_reversing: true
+    back_in_max_yaw_rate: 0.15
+    back_in_y_limit: 0.35
+    back_in_yaw_limit: 0.18
+    back_in_grace_sec: 2.0
+    back_in_violation_cycles: 10
+    yaw_outlier_reject_rad: 1.2
+
+    stop_x_threshold: 0.35
+    stop_y_threshold: 0.20
+    yaw_tolerance: 0.10
+    settle_cycles: 6
+
+    tag_loss_grace_sec: 0.12
+    tag_timeout: 0.45
+    tag_loss_in_corridor_sec: 0.12
+    tag_search_on_loss: true
+    tag_reacquire_cycles: 12
+    tag_reacquire_min_spin_sec: 3.0
+    approach_tag_loss_hold_sec: 0.8
+    align_tag_loss_hold_sec: 0.5
+    in_dock_tag_search_timeout_sec: 120.0
+    back_in_blind_back_sec: 3.0
+    back_in_blind_speed: 0.05
+
+    odom_timeout_sec: 2.0
+    odom_startup_grace_sec: 3.0
+    dock_pose_msg_timeout_sec: 4.0
+    abort_on_odom_loss: true
+    abort_on_dock_pose_stream_loss: true
+    halt_on_sensor_loss: true
+    resume_on_sensor_recovery: true
+    sensor_hold_abort_sec: 45.0
+
+    max_reverse_speed: 0.25
+    max_yaw_rate: 0.30
+    max_linear_accel: 0.10
+    max_angular_accel: 0.30
+    max_docking_duration_sec: 180.0
+    max_retries: 2
+    auto_retry_recoverable: true
+    require_mission_idle: true
+    allow_unknown_mission_state: false
+    abort_on_mission_emergency: true
+    publish_zero_when_idle: true
+
+    require_charging_confirm: true
+    charging_status_topic: "/wireless_charging/is_charging"
+    charge_confirm_hold_sec: 4.0
+    charge_confirm_timeout_sec: 60.0
+    charge_status_stale_sec: 5.0
+    charge_pause_on_pose_settle: true
+    abort_on_charge_pose_drift: false
+    charge_pose_slack_factor: 1.5
+    abort_on_charge_status_loss: false
+
+    dock_bay_name: "bay2"
+    primary_tag_id: 43

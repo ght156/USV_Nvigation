@@ -336,12 +336,12 @@
       <background>0.8 0.8 0.8</background>
     </scene>
 
-    <!-- Spherical Coordinates -->
+    <!-- 须与 workspace_nav/config/map_hk.yaml ref_gnss_10 一致，否则 /gps/fixed_cov 与 dock_geometry GNSS 标定偏差 >100m -->
     <spherical_coordinates>
       <surface_model>EARTH_WGS84</surface_model>
       <world_frame_orientation>ENU</world_frame_orientation>
-      <latitude_deg> 31.48724</latitude_deg>
-      <longitude_deg>120.36930</longitude_deg>
+      <latitude_deg>31.48618175</latitude_deg>
+      <longitude_deg>120.36793468</longitude_deg>
       <elevation>0</elevation>
       <heading_deg>0</heading_deg>
     </spherical_coordinates>
@@ -702,6 +702,63 @@
       <uri>model://buoys/marker_buoy_black</uri>
     </include>
     <!-- Course 3 Kamikaze Engagement Buoy Positions (Finish) -->
+
+    <!-- ============================================================ -->
+    <!-- dock_2022 单通道码头（static，改下面 <pose> 调 world 位置）     -->
+    <!-- 船 spawn (0,0) 船头 +x；yaw=π 开口朝 -x；y=9 使通道中心对准船尾 -->
+    <!-- ============================================================ -->
+    <include>
+      <uri>model://dock_2022</uri>
+      <pose>-4.0 9.0 0 0 0 3.141592653589793</pose>
+    </include>
+
+    <plugin
+      filename="libScanDockScoringPlugin.so"
+      name="vrx::ScanDockScoringPlugin">
+      <vehicle>roboboat</vehicle>
+      <task_name>roboboat_dock</task_name>
+      <task_info_topic>/vrx/task/info</task_info_topic>
+      <initial_state_duration>5</initial_state_duration>
+      <ready_state_duration>5</ready_state_duration>
+      <running_state_duration>600</running_state_duration>
+      <release_topic>/vrx/release</release_topic>
+      <enable_color_checker>false</enable_color_checker>
+      <color_sequence_topic>/vrx/roboboat_dock/color_sequence</color_sequence_topic>
+      <color_1>red</color_1>
+      <color_2>green</color_2>
+      <color_3>blue</color_3>
+      <dock_bonus_points>15</dock_bonus_points>
+      <correct_dock_bonus_points>5</correct_dock_bonus_points>
+      <bays>
+        <bay>
+          <name>bay1</name>
+          <internal_activation_topic>/vrx/dock_2022/bay_1/contain</internal_activation_topic>
+          <external_activation_topic>/vrx/dock_2022/bay_1_external/contain</external_activation_topic>
+          <symbol_topic>/vrx/dock_2022_placard1/symbol</symbol_topic>
+          <min_dock_time>5.0</min_dock_time>
+          <correct_dock>False</correct_dock>
+          <symbol>red_rectangle</symbol>
+        </bay>
+        <bay>
+          <name>bay2</name>
+          <internal_activation_topic>/vrx/dock_2022/bay_2/contain</internal_activation_topic>
+          <external_activation_topic>/vrx/dock_2022/bay_2_external/contain</external_activation_topic>
+          <symbol_topic>/vrx/dock_2022_placard2/symbol</symbol_topic>
+          <min_dock_time>5.0</min_dock_time>
+          <correct_dock>True</correct_dock>
+          <symbol>blue_triangle</symbol>
+        </bay>
+        <bay>
+          <name>bay3</name>
+          <internal_activation_topic>/vrx/dock_2022/bay_3/contain</internal_activation_topic>
+          <external_activation_topic>/vrx/dock_2022/bay_3_external/contain</external_activation_topic>
+          <symbol_topic>/vrx/dock_2022_placard3/symbol</symbol_topic>
+          <min_dock_time>5.0</min_dock_time>
+          <correct_dock>False</correct_dock>
+          <symbol>yellow_circle</symbol>
+        </bay>
+      </bays>
+    </plugin>
 
   </world>
 </sdf>

@@ -1,0 +1,124 @@
+# usv_docking — 仿真 profile（Gazebo + 后向相机 camera_rear_link）
+# 启动：ros2 launch usv_docking docking_controller.launch.py profile:=sim use_sim_time:=true
+#
+# ═══ v4.1 两次到港（Tag 闭环）════════════════════════════════════════════
+#   段0  WAIT_TAG / SEARCH_SPIN           预泊点找 Tag
+#   段1a APPROACH_ENTRY                   向虚拟入口倒（depth → entry_standoff_m）
+#   段1b ALIGN_ENTRY                      原地修 y + heading
+#   段2  BACK_IN → STOP                   向真中心倒（depth → 0）
+#   段1a APPROACH_ENTRY  Tag 丢 → 自转搜（稳定 N 帧 + 最少转 2.5s 才恢复）
+#   段1b ALIGN_ENTRY     v=0 原地旋转对齐 y/heading；Tag 闪断继续转；丢久才搜
+#   段2  BACK_IN          Tag 丢 → 盲退 3s 后停，不搜；Tag 有 → 微调
+#
+# ★ entry_standoff_m：x_base = 真船坞中心 P 在 base_link 下的深度（camera→TF→base_link）。
+#   目标 x_base ≈ entry_standoff_m → 船在中心外 N 米（沿接近轴、远离码头）。
+#   本仿真 profile 用 5.0m（非 dock_database S2 的 2m）；按场景改此参数即可。
+
+docking_controller:
+  ros__parameters:
+
+    dock_pose_topic: "/apriltag_node/dock_pose"
+    cmd_vel_topic: "/cmd_vel_nav"
+    start_topic: "/dock/start"
+    cancel_topic: "/dock/cancel"
+    status_topic: "/dock/status"
+    mission_state_topic: "/mission_bridge/state"
+    odom_topic: "/odometry/filtered"
+
+    camera_frame: "camera_rear_link"
+    robot_frame: "base_link"
+    tf_timeout_sec: 0.1
+    allow_camera_frame_fallback: false
+
+    control_rate: 20.0
+    pose_filter_alpha: 0.35
+
+    wait_tag_timeout_sec: 10.0
+    wait_tag_stationary_sec: 1.5
+    enable_tag_search_spin: true
+    tag_search_spin_speed: 0.25
+    tag_search_spin_angle_rad: 6.283185307179586
+    tag_search_spin_min_sec: 22.0
+    tag_search_spin_timeout_sec: 90.0
+    tag_acquire_cycles: 5
+
+    # 段1：虚拟入口（本仿真：中心外 5m；仅改 entry_standoff_m 即可）
+    entry_standoff_m: 5.0
+    entry_x_tolerance: 0.50
+    entry_y_limit: 0.55
+    entry_yaw_tolerance: 0.18
+    entry_settle_cycles: 5
+    align_settle_cycles: 5
+    approach_entry_speed: 0.5
+    approach_entry_timeout_sec: 90.0
+    align_entry_timeout_sec: 45.0
+
+    heading_offset_rad: 3.141592653589793
+    invert_x: false
+    invert_y: false
+    invert_yaw: false
+
+    back_in_speed: 0.5
+    min_back_in_speed: 0.05
+    back_in_backward_projection_m: 0.25
+    kx: 0.25
+    ky_back: 0.20
+    kyaw_back: 0.40
+    flip_lateral_yaw_when_reversing: true
+    back_in_max_yaw_rate: 0.18
+    back_in_y_limit: 0.55
+    back_in_yaw_limit: 0.25
+    back_in_grace_sec: 1.5
+    back_in_violation_cycles: 10
+    yaw_outlier_reject_rad: 1.5
+
+    stop_x_threshold: 0.40
+    stop_y_threshold: 0.25
+    yaw_tolerance: 0.12
+    settle_cycles: 5
+
+    tag_loss_grace_sec: 0.15
+    tag_timeout: 0.5
+    tag_loss_in_corridor_sec: 0.20
+    tag_search_on_loss: true
+    tag_reacquire_cycles: 12
+    tag_reacquire_min_spin_sec: 2.5
+    approach_tag_loss_hold_sec: 0.6
+    align_tag_loss_hold_sec: 0.5
+    in_dock_tag_search_timeout_sec: 120.0
+    back_in_blind_back_sec: 3.0
+    back_in_blind_speed: 0.06
+
+    odom_timeout_sec: 1.5
+    odom_startup_grace_sec: 2.0
+    dock_pose_msg_timeout_sec: 3.0
+    abort_on_odom_loss: true
+    abort_on_dock_pose_stream_loss: true
+    halt_on_sensor_loss: true
+    resume_on_sensor_recovery: true
+    sensor_hold_abort_sec: 30.0
+
+    max_reverse_speed: 0.5
+    max_yaw_rate: 0.35
+    max_linear_accel: 0.12
+    max_angular_accel: 0.35
+    max_docking_duration_sec: 150.0
+    max_retries: 2
+    auto_retry_recoverable: true
+    require_mission_idle: true
+    allow_unknown_mission_state: true
+    abort_on_mission_emergency: true
+    publish_zero_when_idle: true
+
+    require_charging_confirm: false
+    charging_status_topic: "/wireless_charging/is_charging"
+    charge_confirm_hold_sec: 4.0
+    charge_confirm_timeout_sec: 60.0
+    charge_status_stale_sec: 5.0
+    charge_pause_on_pose_settle: true
+    abort_on_charge_pose_drift: false
+    charge_pose_slack_factor: 1.5
+    abort_on_charge_status_loss: false
+
+    dock_bay_name: "bay2"
+    primary_tag_id: 43

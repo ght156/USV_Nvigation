@@ -1,0 +1,14 @@
+# 仿真泊位元数据（Tag ID、预泊 hint）
+#
+# ★ GNSS 虚拟入口 / dock_enu 几何 → config/dock_geometry_sim.yaml
+# ★ Nav2 预泊 map/GNSS 坐标 → dock_mission/config/dock_database.yaml
+
+bays:
+  bay2:
+    name: "VRX dock_2022 bay2"
+    primary_tag_id: 43
+    secondary_tag_ids: [0]
+    staging_hint:
+      distance_m: 4.0
+      stern_faces_dock: true
+    notes: "仿真 scan_dock 默认目标 bay"

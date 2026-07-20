@@ -195,6 +195,10 @@ install(DIRECTORY
   DESTINATION share/${PROJECT_NAME}/
 )
 
+install(PROGRAMS scripts/stop_simulation.sh
+  DESTINATION share/${PROJECT_NAME}/scripts
+)
+
 # --------------------------------------------------
 # Export Settings
 # --------------------------------------------------

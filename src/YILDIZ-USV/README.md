@@ -12,6 +12,9 @@ src/YILDIZ-USV/
 ├── workspace_gz/      # Gazebo 世界、模型、桥接
 ├── workspace_ros/     # localization.launch.py、converter、感知脚本
 └── workspace_nav/     # nav2.launch.py、地图、航点
+
+src/usv_docking/       # 归港入泊（AprilTag + corridor-gated 倒车）
+src/apriltag_localization/  # 船坞 Tag 定位 → /apriltag_node/dock_pose
 ```
 
 ## 依赖与编译
@@ -27,6 +30,9 @@ source install/setup.bash
 
 ## 仿真快速启动（三终端）
 
+**开新 Gazebo 前**：先在终端1 **Ctrl+C** 停旧 launch；若仍有 `gz sim` 残留，运行  
+`bash src/YILDIZ-USV/workspace_gz/scripts/stop_simulation.sh`（详见 [`docs/项目运行与联调.md`](../../docs/项目运行与联调.md)）。
+
 每终端先：`source /opt/ros/humble/setup.bash` 与 `source install/setup.bash`。
 
 | 终端 | 命令 |
@@ -36,6 +42,8 @@ source install/setup.bash
 | **3** | `ros2 launch workspace_nav nav2.launch.py use_sim_time:=true`（地面站联调：**`enable_mission_bridge:=true`**） |
 
 可选第四终端：`ros2 run workspace_ros converter`（`/cmd_vel_nav` → 仿真推进器）。
+
+**传感器（桥接话题）**：前向相机 `/roboboat/sensors/camera/*`；**后向相机** `/roboboat/sensors/camera_rear/*`（归港 AprilTag 用）。详见 [`../../docs/仿真码头与AprilTag配置.md`](../../docs/仿真码头与AprilTag配置.md)。
 
 默认地图：`workspace_nav/config/map_hk.yaml`。换图时只对 `nav2.launch.py` 传 **`map:=`**；`enable_mission_bridge:=true` 时 mission 地图自动同源。须同步 `navsat.yaml` 的 `datum`（见 [`docs/项目运行与联调.md`](../../docs/项目运行与联调.md)）。
 
@@ -52,6 +60,8 @@ source install/setup.bash
 | 文档 | 说明 |
 |------|------|
 | [`../../docs/项目运行与联调.md`](../../docs/项目运行与联调.md) | **仿真**主入口 |
+| [`../../docs/仿真码头与AprilTag配置.md`](../../docs/仿真码头与AprilTag配置.md) | **归港**码头 / Tag / 后向相机 |
+| [`../../src/usv_docking/README.md`](../../usv_docking/README.md) | **归港入泊**包说明 |
 | [`docs/PROJECT_ARCHITECTURE_AND_NAV2.md`](docs/PROJECT_ARCHITECTURE_AND_NAV2.md) | 包分工与数据流 |
 | [`../../docs/工作进度汇报.md`](../../docs/工作进度汇报.md) | **绩效/工作报告**、仿真↔实船分工 |
 

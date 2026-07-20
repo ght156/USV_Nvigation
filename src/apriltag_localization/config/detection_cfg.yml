@@ -1,0 +1,32 @@
+# =============================================================================
+# 实船专用 — apriltag_localization（ZED 相机）
+# dock_offset 几何与 dock_2022 一致；tag_size 须为实船打印边长
+# =============================================================================
+apriltag_node:
+  ros__parameters:
+    # 订阅（ZED RGB  rect 话题）
+    camera_info_topic: "/zed/zed_node/rgb/color/rect/camera_info"
+    image_topic: "/zed/zed_node/rgb/color/rect/image"
+    detection_result_topic: "/apriltag_node/dock_pose"
+    frame_id: camera_left_link                             # 实船相机系
+
+    apriltag_family_name: tag36h11
+    tag_size: 2.0                   # 实船 Tag 实际打印边长(m)
+
+    tag_ids: [0, 43]
+
+    tag_0:
+      dock_offset_x: -4.52
+      dock_offset_y: -3.0
+      dock_offset_z: 2.52
+      dock_offset_roll: -180.0
+      dock_offset_pitch: 0.0
+      dock_offset_yaw: 0.0
+
+    tag_43:
+      dock_offset_x: -4.52
+      dock_offset_y: 3.0
+      dock_offset_z: 2.52
+      dock_offset_roll: -180.0
+      dock_offset_pitch: 0.0
+      dock_offset_yaw: 0.0

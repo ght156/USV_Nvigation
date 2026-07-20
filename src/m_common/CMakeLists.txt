@@ -42,6 +42,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/SetPause.srv"
   "srv/EmergencyStop.srv"
   "srv/CancelMission.srv"
+  "srv/DockTaskCommand.srv"
   DEPENDENCIES builtin_interfaces geometry_msgs sensor_msgs std_msgs
 )
 ament_export_dependencies(rosidl_default_runtime)

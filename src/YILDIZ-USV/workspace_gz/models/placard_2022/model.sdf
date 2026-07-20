@@ -1,0 +1,30 @@
+<?xml version="1.0" ?>
+<sdf version="1.6">
+  <model name="placard">
+    <pose>0 0 1 0 0 0</pose>
+    <!-- 仅保留立柱；展示板由 dock_2022 上 tag_visual 二维码平面担任 -->
+    <link name="link">
+      <collision name="collision_base">
+        <pose>0 0 -0.336 0 0 0</pose>
+        <geometry>
+          <box>
+            <size>2.0 0.5 2.328</size>
+          </box>
+        </geometry>
+      </collision>
+
+      <visual name="post_visual">
+        <pose>0 0 -0.336 0 0 0</pose>
+        <geometry>
+          <box>
+            <size>2.0 0.5 2.328</size>
+          </box>
+        </geometry>
+        <material>
+          <ambient>0.45 0.45 0.48 1</ambient>
+          <diffuse>0.55 0.55 0.58 1</diffuse>
+        </material>
+      </visual>
+    </link>
+  </model>
+</sdf>

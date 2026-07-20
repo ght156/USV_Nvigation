@@ -1,0 +1,5 @@
+# dock_mission — 实船 profile（WGS84 预泊点）
+dock_mission_node:
+  ros__parameters:
+    use_gnss_staging: true
+    bay_id: "bay2"

@@ -1,0 +1,36 @@
+# dock_mission — Phase 2 编排
+dock_mission_node:
+  ros__parameters:
+    bay_id: "bay2"
+    dock_database_path: ""          # 空=用 share/dock_mission/config/dock_database.yaml
+    map_yaml_path: ""               # 空=workspace_nav/config/map_hk.yaml
+    use_gnss_staging: false         # 仿真 false 用 map_staging；实船 true 用 gnss_staging
+    staging_retry_max: 3
+    settle_sec: 2.5
+    dock_home_topic: "/dock/home"   # GCS / 上层一键归港 Bool
+    dock_mission_id: "dock_staging" # send_waypoints mission_id（Nav2 紧容差任务）
+    send_waypoints_service: "/mission_bridge/send_waypoints"
+    nav2_controller_node: "/controller_server"
+    goal_checker_selector_topic: "goal_checker_selector"
+    use_goal_checker_selector: true
+    cruise_goal_checker_id: "general_goal_checker"
+    docking_goal_checker_id: "docking_goal_checker"
+    cruise_xy_goal_tolerance: 1.0
+    cruise_yaw_goal_tolerance: 1.0
+    docking_xy_goal_tolerance: 0.6
+    docking_yaw_goal_tolerance: 0.15
+
+dock_entry_validator:
+  ros__parameters:
+    bay_id: "bay2"
+    status_rate_hz: 2.0
+    require_tag_for_proceed: false
+    tag_mismatch_threshold_m: 0.8
+
+speed_arbitrator:
+  ros__parameters:
+    cmd_vel_out_topic: "/cmd_vel_nav"
+    cmd_vel_nav_topic: "/cmd_vel_nav_raw"
+    cmd_vel_dock_topic: "/cmd_vel_dock"
+    authority_topic: "/dock/speed_authority"
+    watchdog_sec: 1.0

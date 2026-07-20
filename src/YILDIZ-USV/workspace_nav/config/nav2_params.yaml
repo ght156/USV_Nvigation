@@ -44,7 +44,7 @@ controller_server:
     min_theta_velocity_threshold: 0.05
 
     progress_checker_plugin: "progress_checker"
-    goal_checker_plugins: ["general_goal_checker"]
+    goal_checker_plugins: ["general_goal_checker", "docking_goal_checker"]
     controller_plugins: ["FollowPath"]
 
     progress_checker:
@@ -57,6 +57,12 @@ controller_server:
       plugin: "nav2_controller::SimpleGoalChecker"
       xy_goal_tolerance: 1.0
       yaw_goal_tolerance: 1.0
+
+    docking_goal_checker:
+      stateful: true
+      plugin: "nav2_controller::SimpleGoalChecker"
+      xy_goal_tolerance: 0.6
+      yaw_goal_tolerance: 0.15
     FollowPath:
       plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
       desired_linear_vel: 1.2        

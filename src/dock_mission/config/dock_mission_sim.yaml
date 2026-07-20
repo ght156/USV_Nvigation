@@ -1,0 +1,4 @@
+# dock_mission — 仿真 profile overlay
+dock_mission_node:
+  ros__parameters:
+    use_gnss_staging: false

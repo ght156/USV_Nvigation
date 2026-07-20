@@ -1,0 +1,168 @@
+# usv_docking — 仿真 profile（Gazebo + 后向相机 camera_rear_link）
+# 启动：ros2 launch usv_docking docking_controller.launch.py profile:=sim use_sim_time:=true
+#
+# v5：段1 GNSS→虚拟入口 | 段1.5 搜Tag | 段2 视觉倒进坞
+# 坞几何：config/dock_geometry_sim.yaml | 预泊：dock_mission/config/dock_database.yaml
+# gnss_approach_enabled:=false 可回退 v4
+
+docking_controller:
+  ros__parameters:
+
+    # ── 话题 / 坐标系 ──
+    dock_pose_topic: "/apriltag_node/dock_pose"   # AprilTag 位姿输入
+    cmd_vel_topic: "/cmd_vel_nav"                   # 速度输出（接仲裁器）
+    start_topic: "/dock/start"                      # 开始归港
+    cancel_topic: "/dock/cancel"                    # 取消归港
+    status_topic: "/dock/status"                    # JSON 状态发布
+    mission_state_topic: "/mission_bridge/state"    # mission 互锁
+    odom_topic: "/odometry/filtered"                # 航向来源
+
+    camera_frame: "camera_rear_link"              # 须与 apriltag frame_id 一致
+    robot_frame: "base_link"                        # 控制参考系
+    tf_timeout_sec: 0.1                             # TF 查询超时 (s)
+    allow_camera_frame_fallback: false              # 禁止回退到相机系控制
+
+    control_rate: 20.0                            # 控制环频率 (Hz)
+    pose_filter_alpha: 0.35                       # Tag 位姿低通，越大越跟新帧
+
+    # ── 段1 GNSS（位置=经纬度，航向=odom yaw）──
+    gnss_topic: "/gps/fixed_cov"                  # 仿真 Gazebo NavSat
+    gnss_min_fix_status: 0                        # 最低 fix 等级，0=任意
+    gnss_timeout_sec: 2.0                         # GNSS 断流判丢失 (s)
+    gnss_startup_grace_sec: 3.0                   # 启动后 GNSS 宽限 (s)
+    abort_on_gnss_loss: true                      # GNSS 丢失是否 ABORT
+
+    gnss_approach_enabled: true                   # false → 跳过 GNSS，直接 WAIT_TAG
+    dock_geometry_path: ""                        # 非空则覆盖 geometry 文件路径
+    dock_geometry_file: "dock_geometry_sim.yaml"  # 坞中心/虚拟入口 GNSS
+    gnss_align_yaw_tol: 0.08                      # 对齐完成 |deyaw| (rad)
+    gnss_align_kpsi: 0.35                         # 对齐 / correct 角速度 P 增益
+    gnss_align_omega_max: 0.30                    # 对齐 / correct ω 上限 (rad/s)
+    gnss_entry_dist_tol: 0.5                      # 到虚拟入口距离容差 (m)
+    gnss_entry_yaw_tol: 0.10                      # 到点艉向容差 (rad)
+    gnss_overshoot_along_tol_m: 0.25              # 沿 leg 过冲停倒 (m)
+    gnss_back_creep_dist_m: 1.5                   # 近入口 creep 限速距离 (m)
+    gnss_settle_cycles: 5                         # 到点/对齐连续满足 N 周期才转移
+    gnss_back_heading_ok_tol: 0.05                # 滞回参考 (rad)
+    gnss_back_heading_correct_tol: 0.12            # ≥此值停倒原地纠向 (rad)
+    gnss_back_steer_deadband: 0.04                # cruise / walk_fix 分界 (rad)
+    gnss_back_steer_kpsi: 0.20                    # walk_fix 边走边修 ω 增益
+    gnss_back_walk_omega_max: 0.08                # walk_fix ω 上限 (rad/s)
+    gnss_back_walk_speed_scale: 0.75              # walk_fix 倒车速度比例
+    gnss_back_heading_check_min_dist_m: 2.0       # 近入口放宽 correct 阈值距离 (m)
+    gnss_back_near_entry_correct_scale: 2.0       # 近入口 correct 阈值倍数
+    gnss_heading_align_timeout_sec: 45.0          # 段1 对齐超时 (s)
+    gnss_back_timeout_sec: 90.0                   # 段1 倒车超时 (s)
+    gnss_entry_settle_sec: 0.8                    # 到虚拟入口后停稳 (s)
+    vision_search_stationary_sec: 0.5             # 搜 Tag 前先静止 (s)
+    vision_search_timeout_sec: 90.0               # 虚拟入口搜 Tag 总超时 (s)
+
+    # ── 段1.5 / 预泊 搜 Tag ──
+    wait_tag_timeout_sec: 10.0                    # 禁用自转时等 Tag 上限 (s)
+    wait_tag_stationary_sec: 1.5                  # WAIT_TAG 静止时长 (s)
+    enable_tag_search_spin: true                  # 无 Tag 时是否自转搜
+    tag_search_spin_speed: 0.25                     # 自转 ω；过快易漏检 → 调低
+    tag_search_spin_angle_rad: 6.283185307179586    # 须转满此角才判失败 (2π)
+    tag_search_spin_min_sec: 22.0                 # 自转最短时长 (s)
+    tag_search_spin_timeout_sec: 90.0             # 自转搜 Tag 总超时 (s)
+    tag_acquire_cycles: 5                           # 连续 N 帧有 Tag 才离开 WAIT
+
+    # ── 段2 视觉（entry_standoff_m 为 Tag 深度参考，非 GNSS 目标）──
+    entry_standoff_m: 2.0                         # Tag 深度目标 x_base (m)
+    entry_x_tolerance: 0.50                       # 逼近入口 |x| 容差 (m)
+    entry_y_limit: 0.55                           # 进 BACK_IN 前 |y_base| 门槛 (m)
+    entry_yaw_tolerance: 0.18                       # 对准 |heading_error| 门槛 (rad)
+    entry_settle_cycles: 5                        # 到入口连续满足 N 周期
+    align_settle_cycles: 5                        # 对准完成连续满足 N 周期
+    approach_entry_speed: 0.5                       # 段1 倒车速度上限也用此值 (m/s)
+    approach_entry_timeout_sec: 90.0              # APPROACH_ENTRY 超时 (s)
+    align_entry_timeout_sec: 45.0                 # ALIGN_ENTRY 超时 (s)
+
+    heading_offset_rad: 3.141592653589793         # π；spawn 对准时 heading_error≈0
+    invert_x: false                               # 位姿 x 取反
+    invert_y: false                               # 位姿 y 取反
+    invert_yaw: false                             # 位姿 yaw 取反
+
+    back_in_speed: 0.5                            # BACK_IN 倒车速度 (m/s)
+    min_back_in_speed: 0.05                       # 倒车最低速度 (m/s)
+    back_in_backward_projection_m: 0.25           # 倒车投影距离判据 (m)
+    kx: 0.25                                      # 段1 倒车速度距离缩放增益
+    ky_back: 0.20                                 # 倒车横向 P
+    kyaw_back: 0.40                               # 倒车航向 P
+    flip_lateral_yaw_when_reversing: true         # 倒车时横向增益取反
+    back_in_max_yaw_rate: 0.18                    # BACK_IN ω 上限 (rad/s)
+    back_in_y_limit: 0.55                         # BACK_IN |y| 安全限 (m)
+    back_in_yaw_limit: 0.25                       # BACK_IN |heading_error| 限 (rad)
+    back_in_grace_sec: 1.5                        # 进 BACK_IN 后违规宽限 (s)
+    back_in_violation_cycles: 10                  # 连续违规 N 周期才 ABORT
+    yaw_outlier_reject_rad: 1.5                   # 单帧 yaw 野值剔除 (rad)
+
+    stop_x_threshold: 0.40                        # 到坞停止 |x_base| (m)
+    stop_y_threshold: 0.25                        # 到坞停止 |y_base| (m)
+    yaw_tolerance: 0.12                           # 到坞停止 |heading_error| (rad)
+    settle_cycles: 5                              # STOP 判据连续满足 N 周期
+
+    # ── Tag 丢失误恢复 ──
+    tag_loss_grace_sec: 0.15                      # 丢 Tag 后仍用旧位姿 (s)
+    tag_timeout: 0.5                              # 位姿过期阈值 (s)
+    tag_loss_in_corridor_sec: 0.20                # 通道内丢 Tag 宽限 (s)
+    tag_search_on_loss: true                      # 丢 Tag 时是否自转重搜
+    tag_reacquire_cycles: 12                      # 重搜到 Tag 连续 N 帧恢复
+    tag_reacquire_min_spin_sec: 2.5               # 重搜最少自转时长 (s)
+    approach_tag_loss_hold_sec: 0.6               # APPROACH 丢 Tag 保持 (s)
+    align_tag_loss_hold_sec: 0.5                  # ALIGN 丢 Tag 保持 (s)
+    in_dock_tag_search_timeout_sec: 120.0         # 坞内搜 Tag 总超时 (s)
+    back_in_blind_back_sec: 3.0                   # BACK_IN 丢 Tag 盲退时长 (s)
+    back_in_blind_speed: 0.06                     # 盲退速度 (m/s)
+
+    # ── 传感器看门狗 ──
+    odom_timeout_sec: 1.5                         # 里程计断流阈值 (s)
+    odom_startup_grace_sec: 2.0                   # 启动后 odom 宽限 (s)
+    dock_pose_msg_timeout_sec: 3.0                # dock_pose 无消息阈值 (s)
+    abort_on_odom_loss: true                      # odom 丢失是否 ABORT
+    abort_on_dock_pose_stream_loss: true          # 位姿流断是否 ABORT
+    halt_on_sensor_loss: true                     # 断流时是否零速暂停
+    resume_on_sensor_recovery: true               # 断流暂停、恢复后续跑
+    sensor_hold_abort_sec: 30.0                   # 连续断流超此值才 ABORT (s)
+
+    # ── 速度限幅 / 斜坡（全阶段生效）──
+    max_reverse_speed: 0.5                        # 倒车速度硬上限 (m/s)
+    max_yaw_rate: 0.35                            # 角速度硬上限 (rad/s)
+    max_linear_accel: 0.25                        # 线速度斜坡 (m/s²)，越大变向越快
+    max_angular_accel: 0.60                       # 角速度斜坡 (rad/s²)
+    max_docking_duration_sec: 150.0               # 单次归港总超时 (s)
+    max_retries: 2                                  # 可恢复失败自动重试次数
+    auto_retry_recoverable: true                  # 是否自动重试
+    require_mission_idle: true                    # 须 mission IDLE 才启动
+    allow_unknown_mission_state: true             # 无 mission_bridge 联调时 true
+    abort_on_mission_emergency: true              # mission 急停时 ABORT
+    publish_zero_when_idle: true                  # 空闲时发零速
+
+    # ── 充电确认（仿真关闭）──
+    require_charging_confirm: false                 # 是否等待无线充电确认
+    charging_status_topic: "/wireless_charging/is_charging"
+    charge_confirm_hold_sec: 4.0                  # 充电真值持续 N 秒算成功
+    charge_confirm_timeout_sec: 60.0                # 等充电超时 (s)
+    charge_status_stale_sec: 5.0                  # 充电状态过期 (s)
+    charge_pause_on_pose_settle: true             # 到位后暂停等充电
+    abort_on_charge_pose_drift: false             # 等充时位姿漂移是否 ABORT
+    charge_pose_slack_factor: 1.5                 # 等充时位姿容差倍率
+    abort_on_charge_status_loss: false            # 充电话题断是否 ABORT
+
+    # ── 目标泊位 ──
+    dock_bay_name: "bay2"                           # 泊位名，对应 geometry
+    primary_tag_id: 43                              # 主 Tag ID（日志/校验）
+
+    # ── 出泊（odom 平面距离 + 可选航向保持）──
+    undock_topic: "/dock/undock"                    # 出泊触发话题
+    undock_distance_m: 5.0                          # 出泊前进距离 (m)
+    undock_dist_tol_m: 0.15                         # 到达容差 (m)
+    undock_speed: 0.25                              # 出泊巡航速度 (m/s)
+    undock_min_speed: 0.05                          # 出泊最低速度 (m/s)
+    undock_creep_dist_m: 1.0                        # 末端减速距离 (m)
+    undock_heading_hold: true                       # 是否锁定起始航向
+    undock_heading_kpsi: 0.35                        # 航向保持增益
+    undock_omega_max: 0.15                          # 航向保持角速度上限 (rad/s)
+    undock_settle_cycles: 5                         # 到位后零速稳定周期数
+    undock_timeout_sec: 60.0                        # 出泊总超时 (s)
+    require_mission_idle_for_undock: false          # 出泊是否要求 mission IDLE

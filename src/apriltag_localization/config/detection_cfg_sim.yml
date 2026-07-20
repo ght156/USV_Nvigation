@@ -1,0 +1,35 @@
+# =============================================================================
+# Gazebo 仿真 — apriltag_localization
+# 单 bay 双码（dock_2022 placard1/2 @ y=6 / y=12）
+# dock_offset 须在 camera_tag2ros_ 之后表达（见 docs §重算 dock_offset）
+# =============================================================================
+apriltag_node:
+  ros__parameters:
+    # 订阅（须与 Gazebo 后向相机插件话题一致）
+    camera_info_topic: "/roboboat/sensors/camera_rear/camera_info"
+    image_topic: "/roboboat/sensors/camera_rear/image"
+    detection_result_topic: "/apriltag_node/dock_pose"   # usv_docking 消费
+    frame_id: camera_rear_link                             # 输出位姿参考系
+
+    apriltag_family_name: tag36h11
+    tag_size: 0.5                   # = model.sdf tag_visual plane 0.5×0.5 m
+
+    tag_ids: [0, 43]                # 同屏双码取平均；单码亦可
+
+    # dock_offset_*：Tag 在相机系下观测 → bay 中心在 camera_rear_link 下
+    tag_0:
+      dock_offset_x: -2.52
+      dock_offset_y: 3.0
+      dock_offset_z: 2.52
+      dock_offset_roll: -180.0
+      dock_offset_pitch: 0.0
+      dock_offset_yaw: 0.0
+
+
+    tag_43:
+      dock_offset_x: -2.52
+      dock_offset_y: -3.0
+      dock_offset_z: 2.52
+      dock_offset_roll: -180.0
+      dock_offset_pitch: 0.0
+      dock_offset_yaw: 0.0

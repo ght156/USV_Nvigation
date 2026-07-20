@@ -108,6 +108,8 @@ def generate_launch_description():
                 "/world/default/model/roboboat/link/base_link/sensor/sensor_lidar/scan/points@sensor_msgs/msg/PointCloud2@gz.msgs.PointCloudPacked",
                 "/world/default/model/roboboat/link/base_link/sensor/sensor_camera/camera_info@sensor_msgs/msg/CameraInfo@gz.msgs.CameraInfo",
                 "/world/default/model/roboboat/link/base_link/sensor/sensor_camera/image@sensor_msgs/msg/Image@gz.msgs.Image",
+                "/world/default/model/roboboat/link/base_link/sensor/sensor_camera_rear/camera_info@sensor_msgs/msg/CameraInfo@gz.msgs.CameraInfo",
+                "/world/default/model/roboboat/link/base_link/sensor/sensor_camera_rear/image@sensor_msgs/msg/Image@gz.msgs.Image",
             ],
             remappings=[
                 ("/world/default/clock", "/clock"),
@@ -119,6 +121,8 @@ def generate_launch_description():
                 ("/world/default/model/roboboat/link/base_link/sensor/sensor_lidar/scan/points", "/roboboat/sensors/lidar/scan/points"),
                 ("/world/default/model/roboboat/link/base_link/sensor/sensor_camera/camera_info", "/roboboat/sensors/camera/camera_info"),
                 ("/world/default/model/roboboat/link/base_link/sensor/sensor_camera/image", "/roboboat/sensors/camera/image"),
+                ("/world/default/model/roboboat/link/base_link/sensor/sensor_camera_rear/camera_info", "/roboboat/sensors/camera_rear/camera_info"),
+                ("/world/default/model/roboboat/link/base_link/sensor/sensor_camera_rear/image", "/roboboat/sensors/camera_rear/image"),
             ],
             parameters=[{'use_sim_time': True}],
             output='screen'

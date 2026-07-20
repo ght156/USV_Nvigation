@@ -1,0 +1,10 @@
+# usv_docking — 实船泊位几何（RTK 标定后覆盖）
+
+bays:
+  bay2:
+    name: "实船 bay2"
+    dock_center_gnss:
+      latitude: 31.48618175
+      longitude: 120.36787674
+      yaw_deg: 0.0
+    virtual_entry_standoff_m: 5.0

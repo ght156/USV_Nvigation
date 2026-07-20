@@ -1,0 +1,42 @@
+# dock_mission — 泊位数据库
+# gnss_staging：GCS / 实船 WGS84 预泊点（与 map datum 对齐见 map_hk.yaml ref_gnss_10）
+# map_staging：仿真直接 map 坐标（use_gnss_staging:=false 时使用）
+
+bays:
+  bay2:
+    name: "VRX dock_2022 bay2"
+    standoff_m: 4.0
+    # 仿真预泊：船 spawn (0,0) 朝 +x，码头开口 -x，预泊约在 x=3.5 m
+    map_staging:
+      x: 3.5
+      y: 0.0
+      yaw: 0.0
+    # 由 map (3.5,0) @ datum ref_gnss_10 换算，实船请用 RTK 标定后覆盖
+    gnss_staging:
+      latitude: 31.48618175
+      longitude: 120.36797148
+      yaw_deg: 0.0
+    # dock_enu 原点：使 map_staging (3.5,0,yaw=0) ↔ staging_dock_enu (-4,0,π)
+    # 仿真 map≈Gazebo world；船 spawn (0,0) → dock_enu ex≈-0.5
+    origin_map:
+      x: -0.5
+      y: 0.0
+      x_axis_yaw: 3.141592653589793
+    staging_dock_enu:
+      x: -4.0
+      y: 0.0
+      yaw: 3.141592653589793
+    # S2：入口控制 setpoint（S1→S2 段 dock_enu/odom 主控目标，非检查点）
+    entry_point_dock_enu:
+      x: -2.0
+      y: 0.0
+      yaw: 3.141592653589793
+    entry_corridor:
+      x_min: -6.0
+      x_max: 0.0
+      y_max: 1.0
+      yaw_max: 0.15
+    staging_verify:
+      xy_tolerance_m: 0.8
+      yaw_tolerance_rad: 0.15
+      settle_sec: 2.5

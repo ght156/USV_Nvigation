@@ -23,7 +23,7 @@ is_allowed_path() {
   if [[ "$f" =~ \.(pgm|tar\.gz)$ ]]; then
     return 1
   fi
-  if [[ "$f" == test.txt ]] || [[ "$f" =~ ^ESKF_ ]] || [[ "$f" =~ ^src/perception/ ]]; then
+  if [[ "$f" == test.txt ]] || [[ "$f" =~ ^ESKF_ ]]; then
     return 1
   fi
 
