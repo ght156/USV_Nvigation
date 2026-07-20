@@ -30,3 +30,8 @@ apriltag_node:
       dock_offset_roll: -180.0
       dock_offset_pitch: 0.0
       dock_offset_yaw: 0.0
+
+    # 入口相对船坞中心偏移（dock_center → dock_entry）
+    entry_offset_x_dock: -3.0
+    entry_offset_y_dock: 0.0
+    entry_offset_yaw_deg: 0.0

@@ -93,25 +93,6 @@ class DockingController(Node):
         self._needs_reapproach = False
         self._mission_state = "UNKNOWN"
 
-        # ── 新：入口RTK状态 ──
-        self._perception_entry: Optional[tuple[float, float, float]] = None  # (x, y, yaw) in base_link
-        self._perception_center: Optional[tuple[float, float, float]] = None  # (x, y, yaw) in base_link
-        self._perception_confidence = 0.0
-        self._perception_tag_count = 0
-        self._perception_mode = 0  # 0=none, 1=single, 2=dual
-        self._perception_valid = False
-        self._last_perception_time: Optional[rclpy.time.Time] = None
-
-        self._entry_east_filtered: Optional[float] = None
-        self._entry_north_filtered: Optional[float] = None
-        self._dock_yaw_global_filtered: Optional[float] = None
-        self._last_entry_update_time: Optional[rclpy.time.Time] = None
-
-        # Smooth switching between VISION and RTK entry control
-        self._control_sub_mode: str = "IDLE"  # VISION_ENTRY, RTK_ENTRY
-        self._cmd_v_last = 0.0
-        self._cmd_w_last = 0.0
-
         self._last_tag_time: Optional[rclpy.time.Time] = None
         self._last_raw_pose: Optional[list[float]] = None
         self._x_base = 0.0
@@ -202,10 +183,6 @@ class DockingController(Node):
         self.create_subscription(
             Float64MultiArray, self._dock_pose_topic, self._dock_pose_cb, 10
         )
-        # 新增：订阅 /dock/perception（10字段：entry+center+状态）
-        self.create_subscription(
-            Float64MultiArray, self._perception_topic, self._perception_cb, 10
-        )
         self.create_subscription(Bool, self._start_topic, self._start_cb, 10)
         self.create_subscription(Bool, self._undock_topic, self._undock_cb, 10)
         self.create_subscription(Empty, self._cancel_topic, self._cancel_cb, 10)
@@ -229,14 +206,12 @@ class DockingController(Node):
 
         self.get_logger().info(
             f"usv_docking v5 GNSS ready gnss_approach={self._gnss_approach_enabled} "
-            f"topic={self._gnss_topic} perception={self._perception_topic} "
-            f"rate={self._control_rate}Hz"
+            f"topic={self._gnss_topic} rate={self._control_rate}Hz"
         )
 
     def _declare_parameters(self) -> None:
         defaults = {
             "dock_pose_topic": "/apriltag_node/dock_pose",
-            "perception_topic": "/dock/perception",
             "cmd_vel_topic": "/cmd_vel_nav",
             "start_topic": "/dock/start",
             "undock_topic": "/dock/undock",
@@ -360,27 +335,6 @@ class DockingController(Node):
             "vision_search_stationary_sec": 0.5,
             "vision_search_timeout_sec": 90.0,
         }
-        # ── 新参数：入口RTK与视觉-RTK混合控制 ──
-        rtk_defaults = {
-            "tag_timeout_sec": 0.25,
-            "entry_rtk_alpha": 0.2,
-            "entry_update_accept_m": 0.5,
-            "entry_back_speed": 0.05,
-            "kp_entry_yaw": 0.6,
-            "kp_rtk_heading": 0.7,
-            "kp_rtk_cross_track": 0.4,
-            "back_in_speed": 0.02,
-            "kp_back_y": 0.45,
-            "kp_back_yaw": 0.65,
-            "max_back_angular_speed": 0.04,
-            "tag_recover_cycles": 4,
-            "tag_recover_max_position_jump_m": 0.4,
-            "tag_recover_max_yaw_jump_deg": 10.0,
-            "vision_entry_distance_tolerance_m": 0.3,
-            "vision_entry_lateral_tolerance_m": 0.2,
-            "rtk_entry_distance_tolerance_m": 0.35,
-        }
-        defaults.update(rtk_defaults)
         defaults.update(UNDOCK_PARAM_DEFAULTS)
         for name, value in defaults.items():
             if isinstance(value, bool):
@@ -536,26 +490,6 @@ class DockingController(Node):
             g("vision_search_stationary_sec").value
         )
         self._vision_search_timeout_sec = float(g("vision_search_timeout_sec").value)
-
-        # ── 新参数：入口RTK与视觉-RTK混合控制 ──
-        self._perception_topic = str(g("perception_topic").value)
-        self._tag_timeout_sec = float(g("tag_timeout_sec").value)
-        self._entry_rtk_alpha = float(g("entry_rtk_alpha").value)
-        self._entry_update_accept_m = float(g("entry_update_accept_m").value)
-        self._entry_back_speed = float(g("entry_back_speed").value)
-        self._kp_entry_yaw = float(g("kp_entry_yaw").value)
-        self._kp_rtk_heading = float(g("kp_rtk_heading").value)
-        self._kp_rtk_cross_track = float(g("kp_rtk_cross_track").value)
-        # back_in_speed conflicts with existing key; use separate name
-        self._kp_back_y = float(g("kp_back_y").value)
-        self._kp_back_yaw = float(g("kp_back_yaw").value)
-        self._max_back_angular_speed = float(g("max_back_angular_speed").value)
-        self._tag_recover_cycles = int(g("tag_recover_cycles").value)
-        self._tag_recover_max_position_jump_m = float(g("tag_recover_max_position_jump_m").value)
-        self._tag_recover_max_yaw_jump_deg = float(g("tag_recover_max_yaw_jump_deg").value)
-        self._vision_entry_distance_tolerance_m = float(g("vision_entry_distance_tolerance_m").value)
-        self._vision_entry_lateral_tolerance_m = float(g("vision_entry_lateral_tolerance_m").value)
-        self._rtk_entry_distance_tolerance_m = float(g("rtk_entry_distance_tolerance_m").value)
 
     def _odom_reading(self) -> OdomReading:
         return OdomReading(
@@ -745,118 +679,6 @@ class DockingController(Node):
         self._last_raw_pose = list(msg.data)
         self._last_tag_time = self.get_clock().now()
         self._update_pose_estimate()
-
-    # ── 新增：/dock/perception 回调 ──
-    def _perception_cb(self, msg: Float64MultiArray) -> None:
-        if len(msg.data) < 10:
-            return
-        now = self.get_clock().now()
-        self._perception_entry = (msg.data[0], msg.data[1], msg.data[2])
-        self._perception_center = (msg.data[3], msg.data[4], msg.data[5])
-        self._perception_confidence = msg.data[6]
-        self._perception_tag_count = int(msg.data[7])
-        self._perception_mode = int(msg.data[8])
-        self._perception_valid = bool(int(msg.data[9]))
-        self._last_perception_time = now
-        if self._perception_valid and self._perception_tag_count > 0:
-            self._update_entry_rtk_from_vision(*self._perception_entry)
-
-    def _update_entry_rtk_from_vision(
-        self, entry_x_base: float, entry_y_base: float, entry_yaw_base: float
-    ) -> None:
-        if self._odom_yaw is None or self._odom_x is None or self._odom_y is None:
-            return
-        boat_yaw = self._odom_yaw
-        cos_yaw = math.cos(boat_yaw)
-        sin_yaw = math.sin(boat_yaw)
-        offset_east = cos_yaw * entry_x_base - sin_yaw * entry_y_base
-        offset_north = sin_yaw * entry_x_base + cos_yaw * entry_y_base
-        new_entry_east = self._odom_x + offset_east
-        new_entry_north = self._odom_y + offset_north
-        new_dock_yaw_global = _wrap_yaw(boat_yaw + entry_yaw_base)
-
-        if self._entry_east_filtered is not None:
-            delta_east = new_entry_east - self._entry_east_filtered
-            delta_north = new_entry_north - self._entry_north_filtered
-            delta_dist = math.hypot(delta_east, delta_north)
-            if delta_dist > self._entry_update_accept_m:
-                self.get_logger().warn(
-                    f"Entry RTK jump rejected: {delta_dist:.2f}m",
-                    throttle_duration_sec=2.0,
-                )
-                return
-            alpha = self._entry_rtk_alpha
-            self._entry_east_filtered = (
-                alpha * new_entry_east + (1.0 - alpha) * self._entry_east_filtered
-            )
-            self._entry_north_filtered = (
-                alpha * new_entry_north + (1.0 - alpha) * self._entry_north_filtered
-            )
-            yaw_delta = _wrap_yaw(new_dock_yaw_global - self._dock_yaw_global_filtered)
-            self._dock_yaw_global_filtered = _wrap_yaw(
-                self._dock_yaw_global_filtered + alpha * yaw_delta
-            )
-        else:
-            self._entry_east_filtered = new_entry_east
-            self._entry_north_filtered = new_entry_north
-            self._dock_yaw_global_filtered = new_dock_yaw_global
-        self._last_entry_update_time = self.get_clock().now()
-
-    # ── 新增：/dock/perception 回调 ──
-    def _perception_cb(self, msg: Float64MultiArray) -> None:
-        if len(msg.data) < 10:
-            return
-        now = self.get_clock().now()
-        self._perception_entry = (msg.data[0], msg.data[1], msg.data[2])
-        self._perception_center = (msg.data[3], msg.data[4], msg.data[5])
-        self._perception_confidence = msg.data[6]
-        self._perception_tag_count = int(msg.data[7])
-        self._perception_mode = int(msg.data[8])
-        self._perception_valid = bool(int(msg.data[9]))
-        self._last_perception_time = now
-        if self._perception_valid and self._perception_tag_count > 0:
-            self._update_entry_rtk_from_vision(*self._perception_entry)
-
-    def _update_entry_rtk_from_vision(
-        self, entry_x_base: float, entry_y_base: float, entry_yaw_base: float
-    ) -> None:
-        if self._odom_yaw is None or self._odom_x is None or self._odom_y is None:
-            return
-        boat_yaw = self._odom_yaw
-        cos_yaw = math.cos(boat_yaw)
-        sin_yaw = math.sin(boat_yaw)
-        offset_east = cos_yaw * entry_x_base - sin_yaw * entry_y_base
-        offset_north = sin_yaw * entry_x_base + cos_yaw * entry_y_base
-        new_entry_east = self._odom_x + offset_east
-        new_entry_north = self._odom_y + offset_north
-        new_dock_yaw_global = _wrap_yaw(boat_yaw + entry_yaw_base)
-
-        if self._entry_east_filtered is not None:
-            delta_east = new_entry_east - self._entry_east_filtered
-            delta_north = new_entry_north - self._entry_north_filtered
-            delta_dist = math.hypot(delta_east, delta_north)
-            if delta_dist > self._entry_update_accept_m:
-                self.get_logger().warn(
-                    f"Entry RTK jump rejected: {delta_dist:.2f}m",
-                    throttle_duration_sec=2.0,
-                )
-                return
-            alpha = self._entry_rtk_alpha
-            self._entry_east_filtered = (
-                alpha * new_entry_east + (1.0 - alpha) * self._entry_east_filtered
-            )
-            self._entry_north_filtered = (
-                alpha * new_entry_north + (1.0 - alpha) * self._entry_north_filtered
-            )
-            yaw_delta = _wrap_yaw(new_dock_yaw_global - self._dock_yaw_global_filtered)
-            self._dock_yaw_global_filtered = _wrap_yaw(
-                self._dock_yaw_global_filtered + alpha * yaw_delta
-            )
-        else:
-            self._entry_east_filtered = new_entry_east
-            self._entry_north_filtered = new_entry_north
-            self._dock_yaw_global_filtered = new_dock_yaw_global
-        self._last_entry_update_time = self.get_clock().now()
 
     def _start_cb(self, msg: Bool) -> None:
         if not msg.data:
@@ -1135,19 +957,6 @@ class DockingController(Node):
         self._gnss_leg_start_lon = None
         self._gnss_locked_stern_yaw = None
         self._vision_search_start_time = None
-        # ── 新：入口RTK状态重置 ──
-        self._perception_entry = None
-        self._perception_center = None
-        self._perception_confidence = 0.0
-        self._perception_tag_count = 0
-        self._perception_mode = 0
-        self._perception_valid = False
-        self._last_perception_time = None
-        self._entry_east_filtered = None
-        self._entry_north_filtered = None
-        self._dock_yaw_global_filtered = None
-        self._last_entry_update_time = None
-        self._control_sub_mode = "IDLE"
 
     def _transition(self, new_state: DockState, reason: Optional[str] = None) -> None:
         old = self._state

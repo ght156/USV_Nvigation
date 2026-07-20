@@ -306,6 +306,11 @@ private:
   std::vector<int>                        tag_ids_;
   std::unordered_map<int, tf2::Transform> dock_pose_ext_map_;
 
+  // ── 入口偏移参数（dock_center → dock_entry） ──
+  double entry_offset_x_dock_ = -3.0;
+  double entry_offset_y_dock_ = 0.0;
+  double entry_offset_yaw_rad_ = 0.0;
+
   const tf2::Transform camera2camera_link =
       tf2::Transform(tf2::Matrix3x3(0, 0, 1, -1, 0, 0, 0, -1, 0), tf2::Vector3(0, 0, 0));
 
@@ -315,8 +320,11 @@ private:
   geometry_msgs::msg::PoseStamped result_pose_stamp_;
   rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr output_result_array_pose_publisher_;
 
+  // ── 新增：/dock/perception 发布器（10字段：entry+center+状态） ──
+  rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr dock_perception_publisher_;
 
   std_msgs::msg::Float64MultiArray result_array_pose_msg_;
+  std_msgs::msg::Float64MultiArray dock_perception_msg_;
 };
 
 } // namespace perception

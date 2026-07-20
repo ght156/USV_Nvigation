@@ -10,6 +10,7 @@ docking_controller:
 
     # ── 话题 / 坐标系 ──
     dock_pose_topic: "/apriltag_node/dock_pose"   # AprilTag 位姿输入
+    perception_topic: "/dock/perception"           # 新增：融合感知输入
     cmd_vel_topic: "/cmd_vel_nav"                   # 速度输出（接仲裁器）
     start_topic: "/dock/start"                      # 开始归港
     cancel_topic: "/dock/cancel"                    # 取消归港

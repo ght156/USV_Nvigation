@@ -266,6 +266,24 @@ bool AprilTagLocalization::initConfig()
         rpyToTransform(dock_offset_x_val, dock_offset_y_val, dock_offset_z_val,
                        dock_offset_roll_val, dock_offset_pitch_val, dock_offset_yaw_val);
   }
+  // ── 加载入口偏移参数（dock_center → dock_entry） ──
+  if (private_node_ptr_->has_parameter("entry_offset_x_dock"))
+  {
+    entry_offset_x_dock_ = private_node_ptr_->get_parameter("entry_offset_x_dock").as_double();
+  }
+  if (private_node_ptr_->has_parameter("entry_offset_y_dock"))
+  {
+    entry_offset_y_dock_ = private_node_ptr_->get_parameter("entry_offset_y_dock").as_double();
+  }
+  if (private_node_ptr_->has_parameter("entry_offset_yaw_deg"))
+  {
+    double deg = private_node_ptr_->get_parameter("entry_offset_yaw_deg").as_double();
+    entry_offset_yaw_rad_ = degreesToRadians(deg);
+  }
+  MLOGGER_INFO("Entry offset: x={}, y={}, yaw_deg={} (rad={})",
+               entry_offset_x_dock_, entry_offset_y_dock_,
+               entry_offset_yaw_rad_ / DEG_TO_RAD, entry_offset_yaw_rad_);
+
   result_pose_stamp_.header.frame_id = "camera_link";
   if (private_node_ptr_->has_parameter("frame_id"))
   {
@@ -356,6 +374,13 @@ bool AprilTagLocalization::intiNode()
                                                                             10);
   MLOGGER_INFO("interface_msgs::msg::ApriltagPoseList Publisher topic: {}",
                detection_result_topic_.c_str());
+
+  // ── 新增：/dock/perception 发布器（10字段） ──
+  dock_perception_publisher_ =
+      private_node_ptr_->create_publisher<std_msgs::msg::Float64MultiArray>(
+          "/dock/perception", 10);
+  MLOGGER_INFO("/dock/perception publisher created.");
+
   main_loop_ = std::thread(std::bind(&AprilTagLocalization::main_loop, this));
   //
   // std::string test_image_path =
@@ -519,11 +544,13 @@ bool AprilTagLocalization::detect()
     }
     if (dock_pose_ext_map_.find(det->id) == dock_pose_ext_map_.end())
     {
-      // 键不存在g
+      // 键不存在 → 跳过，防止 operator[] 自动创建默认条目
       MLOGGER_EVERY_N_WARN(10, "TAG ID {}, is not exist in config map, skipping.", det->id);
+      continue;
     }
+    const auto &dock_offset = dock_pose_ext_map_[det->id];
     tf2::Transform tf = apriltagPoseToTf2(pose);
-    tf                = camera2camera_link * tf * camera_tag2ros_ * dock_pose_ext_map_[det->id];
+    tf                = camera2camera_link * tf * camera_tag2ros_ * dock_offset;
     result_list.emplace_back(tf);
   }
 
@@ -535,9 +562,6 @@ bool AprilTagLocalization::detect()
   if (!result_list.empty())
   {
     tf2::Transform result_tf = averageTransforms(result_list);
-    // result_pose_stamp_.header.stamp = header.stamp;
-    // tf2::toMsg(result_tf, result_pose_stamp_.pose);
-    // output_result_pose_stamp_publisher_->publish(result_pose_stamp_);
 
     result_array_pose_msg_.data.resize(6);
     transformToXYZRPY(result_tf, result_array_pose_msg_.data[0], result_array_pose_msg_.data[1],
@@ -564,9 +588,43 @@ bool AprilTagLocalization::detect()
       MLOGGER_INFO(
           "===================================================================================");
     }
+
+    // ── 计算入口位姿并发布 /dock/perception（在有效检测分支内） ──
+    tf2::Transform dock_center_to_entry;
+    dock_center_to_entry.setOrigin(tf2::Vector3(entry_offset_x_dock_, entry_offset_y_dock_, 0.0));
+    tf2::Quaternion q_entry;
+    q_entry.setRPY(0.0, 0.0, entry_offset_yaw_rad_);
+    dock_center_to_entry.setRotation(q_entry);
+
+    tf2::Transform base_to_entry = result_tf * dock_center_to_entry;
+
+    double entry_x, entry_y, entry_z, entry_roll, entry_pitch, entry_yaw;
+    double center_x, center_y, center_z, center_roll, center_pitch, center_yaw;
+    transformToXYZRPY(base_to_entry, entry_x, entry_y, entry_z, entry_roll, entry_pitch, entry_yaw);
+    transformToXYZRPY(result_tf, center_x, center_y, center_z, center_roll, center_pitch, center_yaw);
+
+    int observation_mode = (result_list.size() >= 2) ? 2 : ((result_list.size() == 1) ? 1 : 0);
+    int pose_valid = 1;
+    double confidence = std::min(1.0, result_list.size() / 2.0);
+
+    dock_perception_msg_.data = {
+        entry_x, entry_y, entry_yaw,
+        center_x, center_y, center_yaw,
+        confidence,
+        static_cast<double>(result_list.size()),
+        static_cast<double>(observation_mode),
+        static_cast<double>(pose_valid)
+    };
+    dock_perception_publisher_->publish(dock_perception_msg_);
+    MLOGGER_INFO("/dock/perception: entry({:.3f},{:.3f},{:.3f}) center({:.3f},{:.3f},{:.3f}) tags={} mode={}",
+                 entry_x, entry_y, entry_yaw, center_x, center_y, center_yaw,
+                 result_list.size(), observation_mode);
   } else
   {
     output_result_array_pose_publisher_->publish(result_array_pose_msg_);
+    // 无检测时发布无效感知消息
+    dock_perception_msg_.data = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    dock_perception_publisher_->publish(dock_perception_msg_);
   }
 
   apriltag_detections_destroy(detections_);
