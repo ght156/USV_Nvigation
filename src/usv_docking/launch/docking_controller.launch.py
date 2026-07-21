@@ -22,7 +22,7 @@ def _launch_setup(context, *args, **kwargs):
     if not os.path.isfile(params_file):
         raise RuntimeError(
             f"usv_docking parameter file not found: {params_file} "
-            f"(profile={profile!r}; expected sim or real)"
+            f"(profile={profile!r}, file not found)"
         )
 
     return [
@@ -42,7 +42,7 @@ def generate_launch_description():
             DeclareLaunchArgument(
                 "profile",
                 default_value="sim",
-                description="Parameter profile: sim | real",
+                description="Parameter profile (default: sim)",
             ),
             DeclareLaunchArgument(
                 "use_sim_time",

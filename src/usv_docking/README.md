@@ -40,7 +40,7 @@
   → VISION_SEARCH_TAG → (无 Tag) SEARCH_SPIN
   → ALIGN_ENTRY → BACK_IN（真中心 depth→0）→ STOP
                                                       ↓
-                                            （实船）WAIT_CHARGE → 充电稳定 → STOP
+                                            WAIT_CHARGE → 充电稳定 → STOP
 ```
 
 **出泊**（`undock_controller.py`，与靠泊状态机分离）：
@@ -54,7 +54,7 @@
 
 定位只用 **`/odometry/filtered`**（默认话题 `odom_topic`），不依赖 Tag/GNSS；可选锁定起始 yaw。取消靠泊/出泊均用 `/dock/cancel`。
 
-**仿真 GNSS**：Gazebo `/roboboat/sensors/gps/navsat` → `workspace_ros` 转发为 **`/gps/fixed_cov`**（`NavSatFix`，无 RTK 时 `status=0` 仍可用）。  
+**GNSS**：Gazebo `/roboboat/sensors/gps/navsat` → `workspace_ros` 转发为 **`/gps/fixed_cov`**（`NavSatFix`）。  
 段 1：**位置** = GNSS 经纬度；**航向** = odom yaw；进入对齐时 **锁定 leg（起点→虚拟入口）与艉向**，`deyaw` 不再追 live bearing（见 [`docs/GNSS阶段一设计与复盘_20260706.md`](docs/GNSS阶段一设计与复盘_20260706.md)）。  
 设 `gnss_approach_enabled: false` 可回退 v4（`WAIT_TAG → APPROACH_ENTRY`）。
 
@@ -116,17 +116,13 @@ source install/setup.bash
 
 ```text
 usv_docking/config/
-├── docking_controller_sim.yaml   ← 仿真全部参数 ★ 主文件
-├── docking_controller_real.yaml  ← 实船（充电确认、左向相机等）
+├── docking_controller_sim.yaml   ← 全部参数 ★ 主文件
 ├── dock_geometry_sim.yaml        ← 坞中心 GNSS + virtual_entry_standoff_m ★
-├── dock_geometry_real.yaml       ← 实船坞几何
 └── dock_bays_sim.yaml            ← 泊位元数据参考（Tag ID、预泊 hint）
 
 dock_mission/config/
 └── dock_database.yaml            ← 预泊点坐标（Nav 阶段，不是本包算出来的）
 ```
-
-launch 参数 `profile:=sim|real` 选择 `docking_controller_{profile}.yaml`。
 
 **预泊点坐标不在本包 yaml 里改**，在 `dock_mission/config/dock_database.yaml` 的 `map_staging` / `gnss_staging`。
 
@@ -140,10 +136,10 @@ launch 参数 `profile:=sim|real` 选择 `docking_controller_{profile}.yaml`。
 
 | 参数 | 文件区块 | 说明 |
 |------|----------|------|
-| `camera_frame` | 坐标系 | 仿真 `camera_rear_link`，实船 `camera_left_link`，须与 apriltag 一致 |
+| `camera_frame` | 坐标系 | 默认 `camera_rear_link`，须与 apriltag 一致 |
 | `dock_pose_topic` | 话题接口 | 默认 `/apriltag_node/dock_pose` |
-| `gnss_topic` | GNSS | 仿真 `/gps/fixed_cov`；实船按接收机话题改 |
-| `dock_geometry_file` | 坞几何 | `dock_geometry_sim.yaml` / `dock_geometry_real.yaml` |
+| `gnss_topic` | GNSS | 默认 `/gps/fixed_cov` |
+| `dock_geometry_file` | 坞几何 | `dock_geometry_sim.yaml` |
 | `heading_offset_rad` | 位姿符号 | 后向相机通常 ≈ π，使对准通道时 `heading_error≈0` |
 | `invert_x/y/yaw` | 位姿符号 | 与 URDF / 标定一致，不对则倒船方向反 |
 | `require_mission_idle` | Mission 互锁 | `true` 时 mission_bridge 须 IDLE 才开跑 |
@@ -220,19 +216,13 @@ U 型坞侧偏大：先调 dock_mission 重 Nav 预泊 + Entry 走廊；仍进�
 | `yaw_tolerance` | 0.12 rad | \|heading_error\| 到位 |
 | `settle_cycles` | 5 | 连续 N 帧满足 → DOCK_STOP |
 
-**实船**（`require_charging_confirm: true`，见 `docking_controller_real.yaml`）：
+**充电确认**（`require_charging_confirm: true` 时启用）：
 
 | 参数 | 默认 | 含义 |
 |------|------|------|
 | `charge_confirm_hold_sec` | 4.0 s | charging=true **稳定**多久算成功 |
 | `charge_confirm_timeout_sec` | 60 | 等充电超时 |
 | `charge_pause_on_pose_settle` | true | 视觉到位但未充电 → 先停住等 |
-
-实船成功 **只看充电稳定**，不与位姿同时满足。测试：
-
-```bash
-ros2 topic pub -r 10 /wireless_charging/is_charging std_msgs/Bool "{data: true}"
-```
 
 ---
 
@@ -254,7 +244,7 @@ ros2 topic pub -r 10 /wireless_charging/is_charging std_msgs/Bool "{data: true}"
 | 组件 | 说明 |
 |------|------|
 | `apriltag_localization` | `/apriltag_node/dock_pose` |
-| TF | `camera_rear_link`（仿真）或 `camera_left_link`（实船）→ `base_link` |
+| TF | `camera_rear_link` → `base_link` |
 | `mission_bridge` | `/mission_bridge/state`，默认要求 `IDLE` |
 | Nav2 | 入泊前须 **deactivate** `controller_server` |
 | `converter`（仿真） | `/cmd_vel_nav` → Gazebo 推力 |
@@ -272,7 +262,7 @@ ros2 topic pub -r 10 /wireless_charging/is_charging std_msgs/Bool "{data: true}"
 | 订 | `/dock/undock` | `Bool` |
 | 订 | `/dock/cancel` | `Empty` |
 | 订 | `/mission_bridge/state` | `String` |
-| 订 | `/wireless_charging/is_charging` | `Bool`（实船） |
+| 订 | `/wireless_charging/is_charging` | `Bool` |
 | 发 | `/cmd_vel_nav` | `Twist` |
 | 发 | `/dock/status` | `String` (JSON) |
 
@@ -327,7 +317,7 @@ DOCK_IDLE → PRECHECK → WAIT_TAG ──(无 Tag)──► SEARCH_SPIN
            DOCK_BACK_IN       ★ Tag 闭环，depth → 0（真坞中心）
                 │
                 ▼
-            DOCK_STOP / DOCK_WAIT_CHARGE（实船）
+            DOCK_STOP / DOCK_WAIT_CHARGE
 ```
 
 全程 **Tag→base_link** 同一套 P 控制，只改深度目标；odom 用于搜 Tag 转角、传感器看门狗，**出泊段则全程用 odom 计距**。

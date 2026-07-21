@@ -120,19 +120,12 @@ ros2 topic echo /dock/entry_status     # 入口验收
 
 ---
 
-## 快速上手（实船）
-
-与仿真相同，但 launch 时改 profile：
+## 快速上手
 
 ```bash
-ros2 launch dock_mission dock_mission.launch.py profile:=real use_sim_time:=false
-ros2 launch usv_docking docking_controller.launch.py profile:=real use_sim_time:=false
+ros2 launch dock_mission dock_mission.launch.py profile:=sim use_sim_time:=true
+ros2 launch usv_docking docking_controller.launch.py profile:=sim use_sim_time:=true
 ```
-
-**实船必做两件事**：
-
-1. 用 RTK 在预泊点实测，更新 [`config/dock_database.yaml`](config/dock_database.yaml) 里的 `gnss_staging`
-2. 确认 `map_hk.yaml` 的 `ref_gnss_10` 与现场 datum 一致
 
 ---
 
@@ -144,10 +137,9 @@ ros2 launch usv_docking docking_controller.launch.py profile:=real use_sim_time:
 dock_mission/
 ├── config/
 │   ├── dock_mission.yaml          ← 三个节点的 ROS 参数（主配置）
-│   ├── dock_mission_sim.yaml      ← 仿真 overlay：use_gnss_staging=false
-│   ├── dock_mission_real.yaml     ← 实船 overlay：use_gnss_staging=true
+│   ├── dock_mission_sim.yaml      ← 仿真 overlay
 │   └── dock_database.yaml         ← 泊位几何 + 预泊点坐标（GNSS/map）★ 最常改
-└── launch/dock_mission.launch.py  ← profile:=sim|real 选择 overlay
+└── launch/dock_mission.launch.py  ← profile:=sim 选择 overlay
 
 workspace_nav/config/
 └── nav2_params.yaml               ← general / docking 两个 GoalChecker ★ Nav 容差
@@ -169,11 +161,11 @@ usv_docking/config/
 
 **改这里** → [`config/dock_database.yaml`](config/dock_database.yaml)
 
-| 字段 | 仿真 | 实船 |
-|------|------|------|
-| `map_staging.x/y/yaw` | 直接 map 坐标 | 一般不改 |
-| `gnss_staging.latitude/longitude/yaw_deg` | 占位 | **RTK 标定后填写** |
-| `standoff_m` | 预泊离坞中心距离参考（4 m） | 同上 |
+| 字段 | 说明 |
+|------|------|
+| `map_staging.x/y/yaw` | 直接 map 坐标 |
+| `gnss_staging.latitude/longitude/yaw_deg` | GNSS 预泊（需 use_gnss_staging=true） |
+| `standoff_m` | 预泊离坞中心距离参考（4 m） |
 
 仿真默认：船 spawn `(0,0)` 朝 +x，预泊 `(3.5, 0, yaw=0)`。
 
@@ -181,7 +173,7 @@ usv_docking/config/
 
 | 参数 | 文件 | 说明 |
 |------|------|------|
-| `use_gnss_staging` | `dock_mission_sim/real.yaml` | `false`=用 map，`true`=用 GNSS |
+| `use_gnss_staging` | `dock_mission_sim.yaml` | `false`=用 map 坐标 |
 | `bay_id` | `dock_mission.yaml` | 对应 `dock_database.yaml` 里的 bay 名 |
 
 ---
@@ -252,7 +244,7 @@ Service 固定为 `/dock/mission/start`、`/dock/mission/cancel`，一般不用�
 
 默认 **不要求** Tag（`require_tag_for_proceed: false`），只靠 RTK/odom + 走廊。
 
-实船若要加强：
+若要加强校验：
 
 ```yaml
 # dock_mission.yaml → dock_entry_validator
@@ -361,7 +353,6 @@ MONITOR_DOCK（等 /dock/status success 或 needs_reapproach）
 | `send_waypoints service unavailable` | mission_bridge 未跑 | 先起 mission_bridge |
 | Nav 完成但 entry 失败 | 预泊点或走廊参数不对 | 调 `dock_database.yaml` entry_corridor / map_staging |
 | `/dock/start` 后 usv_docking 不动 | Nav2 未 deactivate | 本包 handoff 前需 usv_docking 自己处理；或检查 mission 互锁 |
-| 实船预泊点飘 | GNSS 未标定 | 更新 `gnss_staging`，确认 `use_gnss_staging:=true` |
 | 精靠泊 Tag 搜不到 | 预泊姿态 / 相机 | 调 usv_docking，不是本包 |
 
 ---
