@@ -1,0 +1,26 @@
+# 上层 → 归港编排：一键归港 / 仅精靠泊 / 出泊 / 取消
+#
+# 实现：m_common/srv/DockTaskCommand.srv
+# Service：/dock_task/command
+#
+# 反馈：订 /dock_task/status + /dock_task/event（勿用 /dock/status）
+# 详细说明：docs/nav_task_interface.md §13
+#
+# command 枚举：
+#   1 = ONE_CLICK_DOCK  Nav 预泊 + Entry + 精靠泊
+#   2 = DOCK_ONLY       仅精靠泊（船已在预泊点附近）
+#   3 = UNDOCK          出泊（预留）
+#   4 = CANCEL          取消并释放
+
+uint8 ONE_CLICK_DOCK = 1
+uint8 DOCK_ONLY = 2
+uint8 UNDOCK = 3
+uint8 CANCEL = 4
+
+uint8 command
+string mission_id
+string command_id
+bool require_camera
+---
+bool success
+string message

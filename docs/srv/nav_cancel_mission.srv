@@ -1,0 +1,16 @@
+# 上层 → 导航：取消任务 / 退出急停（Service 接口）
+#
+# 实现：m_common/srv/CancelMission.srv
+# Service：/mission_bridge/cancel_mission
+#
+# RUNNING：取消 Nav2 goal，清空当前航线 → IDLE
+# PAUSED：丢弃已保存断点 → IDLE
+# EMERGENCY：清除急停标志 → IDLE（之后可再 send_waypoints）
+# IDLE：幂等 success=true
+# WAITING_SYSTEM：success=false
+#
+# 与 GCS Topic /gcs_mission/cancel（std_msgs/Empty）等效；上层请用本 Service。
+
+---
+bool success
+string message

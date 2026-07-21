@@ -1,0 +1,16 @@
+# 上层 → 导航：下发航线（Service 接口）
+#
+# 实现：m_common/srv/SendWaypoints.srv
+# Service：/mission_bridge/send_waypoints
+#
+# 坐标：geometry_msgs/PoseStamped[]，frame_id 通常为 map（非 WGS84）
+# 行为：调用即开始；RUNNING/PAUSED 时自动抢占旧任务（等价 explicit_replan）
+#
+# WAITING_SYSTEM / EMERGENCY → success=false
+
+geometry_msgs/PoseStamped[] waypoints
+string mission_id
+string command_id
+---
+bool success
+string message
