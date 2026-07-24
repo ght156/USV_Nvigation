@@ -115,6 +115,7 @@ apriltag_node:
     image_topic: "/roboboat/sensors/camera_rear/image"
     detection_result_topic: "/apriltag_node/dock_pose"
     frame_id: camera_rear_link
+    dock_frame_id: dock_frame        # TF 广播的 dock 坐标系名称（默认 dock_frame）
     apriltag_family_name: tag36h11
     tag_size: 0.5                    # 与 model.sdf plane 边长一致
     tag_ids: [0, 43]
@@ -153,6 +154,8 @@ ros2 launch apriltag_localization apriltag_localization.launch.py profile:=sim u
 
 ## 输出
 
+### 话题输出
+
 | 项 | 值 |
 |----|-----|
 | 话题 | `/apriltag_node/dock_pose` |
@@ -161,6 +164,28 @@ ros2 launch apriltag_localization apriltag_localization.launch.py profile:=sim u
 | 单位 | xyz：**m**；rpy：**rad** |
 
 无 tag 时发布 `data: []`（节点在跑，只是未检测到）。
+
+### TF 广播
+
+节点在每次有效检测后同时广播一条 TF 变换：
+
+| 项 | 值 |
+|----|-----|
+| parent frame | `frame_id` 配置值（仿真 `camera_rear_link`，实船 `camera_left_link`） |
+| child frame | `dock_frame_id` 配置值（默认 `dock_frame`） |
+| 内容 | bay 中心在相机系下的位姿（与 Float64MultiArray 相同，不求逆） |
+| 时间戳 | 与图像帧一致 |
+
+**用途：** 下游节点（如 `usv_docking`）可通过 TF 直接查询 `dock_frame → base_link`，获得船体在船坞坐标系下的位姿，无需手动变换：
+
+```bash
+# 查看船在 dock 坐标系下的位姿
+ros2 run tf2_ros tf2_echo dock_frame base_link
+```
+
+TF2 自动利用 `base_link → camera_rear_link`（固定外参）+ `camera_rear_link → dock_frame`（本节点广播）完成反算。
+
+> **注意：** 无检测时不广播 TF，`dock_frame` 在 TF 树中会超时消失。下游节点需处理 TF 查询失败的情况。
 
 ---
 
@@ -193,3 +218,5 @@ ros2 launch apriltag_localization apriltag_localization.launch.py profile:=sim u
 | [`../../docs/仿真码头与AprilTag配置.md`](../../docs/仿真码头与AprilTag配置.md) | world 布局与联调终端 |
 
 `/apriltag_node/dock_pose` 经 TF（仿真 **`camera_rear_link` → `base_link`**）后由 `usv_docking` 控制；仿真 `frame_id` 须与 URDF 中**归港相机**帧一致（当前 **`camera_rear_link`**）。
+
+节点同时广播 `camera_rear_link → dock_frame` TF，下游也可直接查询 `dock_frame → base_link` 获得船在船坞系下的位姿（x/y/yaw），用于中轴线对准判断。详见 [实船Tag安装与船坞坐标系标定](实船Tag安装与船坞坐标系标定.md)。

@@ -10,6 +10,7 @@ apriltag_node:
     image_topic: "/roboboat/sensors/camera_rear/image"
     detection_result_topic: "/apriltag_node/dock_pose"   # usv_docking 消费
     frame_id: camera_rear_link                             # 输出位姿参考系
+    dock_frame_id: dock_frame                              # TF 广播的 dock 坐标系名称
 
     apriltag_family_name: tag36h11
     tag_size: 0.5                   # = model.sdf tag_visual plane 0.5×0.5 m

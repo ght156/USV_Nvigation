@@ -22,8 +22,9 @@ CameraInfo ────► cameraInfoCallback() ──────────�
                                           ▼
                               多 Tag 位姿平均               (Markley SVD 方法)
                                           │
-                                          ▼
-                              发布 Float64MultiArray        (/apriltag_node/dock_pose)
+                                          ├──► 发布 Float64MultiArray        (/apriltag_node/dock_pose)
+                                          │
+                                          └──► 广播 TF                       (camera_link → dock_frame)
 ```
 
 核心依赖：
@@ -33,7 +34,8 @@ CameraInfo ────► cameraInfoCallback() ──────────�
 | `apriltag` (内嵌 C 库) | Tag 检测与位姿估算 |
 | `cv_bridge` + OpenCV | 图像格式转换 |
 | `Eigen3` | 矩阵运算（旋转平均、SVD） |
-| `tf2` | 坐标系变换 |
+| `tf2` | 坐标系变换（数学库） |
+| `tf2_ros` | TF 广播（`camera_link → dock_frame`） |
 | `yaml-cpp` | 配置文件解析 |
 | `m_common` (mlogger) | 日志输出 |
 
@@ -197,6 +199,7 @@ ros2 launch apriltag_localization apriltag_localization.launch.py profile:=sim
 | `image_topic` | string | 图像话题名，编码须为 `bgr8` (或可被 `cv_bridge` 转换) |
 | `detection_result_topic` | string | 定位结果发布话题，类型 `Float64MultiArray` |
 | `frame_id` | string | 结果帧 ID，须与 TF 树中相机帧一致 |
+| `dock_frame_id` | string | TF 广播的 dock 坐标系名称，默认 `dock_frame` |
 | `apriltag_family_name` | string | Tag 族名称，支持见 [4.3](#43-支持的-tag-族) |
 | `tag_size` | double | Tag 物理边长，单位 **米**，须与实际打印/贴图尺寸严格一致 |
 | `tag_ids` | int[] | 期望检测的 Tag ID 列表 |
@@ -287,6 +290,8 @@ apriltag_node:
 
 ## 5. 输出
 
+### 5.1 话题输出
+
 | 属性 | 值 |
 |------|-----|
 | 话题 | `/apriltag_node/dock_pose` (可配) |
@@ -297,6 +302,20 @@ apriltag_node:
 | 坐标系 | 相机坐标系 (`camera_link` / `camera_left_link`) |
 | 语义 | 船坞泊位 (bay) 中心在相机坐标系下的位姿 |
 | 无检测时 | 发布空数组 (data.size() = 0) |
+
+### 5.2 TF 广播
+
+每次有效检测后广播 `frame_id → dock_frame_id`（默认 `camera_rear_link → dock_frame`）：
+
+| 属性 | 值 |
+|------|-----|
+| parent frame | `frame_id` 配置值 |
+| child frame | `dock_frame_id` 配置值（默认 `dock_frame`） |
+| 内容 | bay 中心在相机系下的位姿（与 Float64MultiArray 一致，不求逆） |
+| 时间戳 | 图像帧时间戳 |
+| 无检测时 | 不广播（dock_frame 在 TF 树中超时消失） |
+
+下游节点可通过 `lookupTransform("dock_frame", "base_link")` 直接获得船体在船坞坐标系下的位姿。
 
 ---
 

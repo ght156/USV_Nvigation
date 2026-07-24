@@ -20,6 +20,7 @@ find_package(rclcpp REQUIRED)
 find_package(rclpy REQUIRED)
 find_package(m_common REQUIRED)
 find_package(tf2 REQUIRED)
+find_package(tf2_ros REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 
@@ -78,11 +79,12 @@ add_executable(apriltag_localization_cpp
   src/apriltag_node.cpp
 )
 
-target_include_directories(apriltag_localization_cpp PUBLIC 
-      include/ 
-      ${EIGEN3_INCLUDE_DIR} 
+target_include_directories(apriltag_localization_cpp PUBLIC
+      include/
+      ${EIGEN3_INCLUDE_DIR}
       ${PCL_INCLUDE_DIRS}
       ${tf2_INCLUDE_DIRS}
+      ${tf2_ros_INCLUDE_DIRS}
       ${tf2_geometry_msgs_INCLUDE_DIRS}
       ${geometry_msgs_INCLUDE_DIRS}
       )
@@ -115,6 +117,7 @@ target_link_libraries(apriltag_localization_cpp PUBLIC
   fmt
   apriltag
   ${tf2_LIBRARIES}
+  ${tf2_ros_LIBRARIES}
   ${tf2_geometry_msgs_LIBRARIES}
   ${geometry_msgs_LIBRARIES}
   # ${ament_cmake_python_LIBRARIES}

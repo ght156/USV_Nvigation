@@ -20,6 +20,7 @@
   <!-- <depend>grap_rgbd</depend> -->
   <!-- <depend>trt_infer_lib</depend> -->
   <depend>m_common</depend>
+  <depend>tf2_ros</depend>
   <!-- <test_depend>ament_lint_auto</test_depend> -->
   <!-- <test_depend>ament_lint_common</test_depend> -->
 

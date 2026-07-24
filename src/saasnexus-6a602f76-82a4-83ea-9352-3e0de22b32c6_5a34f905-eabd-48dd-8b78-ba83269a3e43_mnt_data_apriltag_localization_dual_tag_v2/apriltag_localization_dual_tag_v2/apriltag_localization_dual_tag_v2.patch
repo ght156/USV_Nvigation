@@ -1,0 +1,1227 @@
+diff -ruN apriltag_original/apriltag_localization/CMakeLists.txt apriltag_work/apriltag_localization/CMakeLists.txt
+--- apriltag_original/apriltag_localization/CMakeLists.txt	2026-07-20 09:27:01.000000000 +0000
++++ apriltag_work/apriltag_localization/CMakeLists.txt	2026-07-22 02:48:01.043110262 +0000
+@@ -11,6 +11,7 @@
+ endif()
+ find_package(ament_cmake REQUIRED)
+ find_package(ament_cmake_python REQUIRED)
++find_package(ament_index_cpp REQUIRED)
+ find_package(cv_bridge REQUIRED)
+ find_package(Eigen3 REQUIRED)
+ find_package(yaml-cpp REQUIRED)
+@@ -22,6 +23,8 @@
+ find_package(tf2 REQUIRED)
+ find_package(tf2_geometry_msgs REQUIRED)
+ find_package(geometry_msgs REQUIRED)
++find_package(sensor_msgs REQUIRED)
++find_package(std_msgs REQUIRED)
+ 
+ # if(TARGET Python3::Python)
+ #     set_target_properties(Python3::Python PROPERTIES
+@@ -78,6 +81,17 @@
+   src/apriltag_node.cpp
+ )
+ 
++ament_target_dependencies(apriltag_localization_cpp
++  ament_index_cpp
++  rclcpp
++  cv_bridge
++  tf2
++  tf2_geometry_msgs
++  geometry_msgs
++  sensor_msgs
++  std_msgs
++)
++
+ target_include_directories(apriltag_localization_cpp PUBLIC 
+       include/ 
+       ${EIGEN3_INCLUDE_DIR} 
+@@ -85,6 +99,8 @@
+       ${tf2_INCLUDE_DIRS}
+       ${tf2_geometry_msgs_INCLUDE_DIRS}
+       ${geometry_msgs_INCLUDE_DIRS}
++      ${sensor_msgs_INCLUDE_DIRS}
++      ${std_msgs_INCLUDE_DIRS}
+       )
+ set(PCL_LIBS ${PCL_LIBRARIES})
+ # ament_target_dependencies(apriltag_localization_cpp
+@@ -117,6 +133,8 @@
+   ${tf2_LIBRARIES}
+   ${tf2_geometry_msgs_LIBRARIES}
+   ${geometry_msgs_LIBRARIES}
++  ${sensor_msgs_LIBRARIES}
++  ${std_msgs_LIBRARIES}
+   # ${ament_cmake_python_LIBRARIES}
+   # yolo
+ )
+diff -ruN apriltag_original/apriltag_localization/MODIFICATION_NOTES.md apriltag_work/apriltag_localization/MODIFICATION_NOTES.md
+--- apriltag_original/apriltag_localization/MODIFICATION_NOTES.md	1970-01-01 00:00:00.000000000 +0000
++++ apriltag_work/apriltag_localization/MODIFICATION_NOTES.md	2026-07-22 02:32:54.715132938 +0000
+@@ -0,0 +1,50 @@
++# 修改说明
++
++本次修改采用“默认保留旧逻辑、参数开启增强逻辑”的兼容方式。
++
++## 修改文件
++
++1. `include/apriltag_node.h`
++   - 新增 TagObservation、DockPerception 数据结构。
++   - 新增双 Tag 融合、单 Tag 降级、入口位姿和诊断发布接口。
++   - 新增增强模式参数、历史可靠 yaw 状态和安全退出标志。
++
++2. `src/apriltag_node.cpp`
++   - `use_baseline_yaw=false` 时保留原多 Tag dock 位姿平均逻辑。
++   - 开启后固定使用 `baseline_tag_id_a -> baseline_tag_id_b`，不再由距离决定基线方向。
++   - 配置仍按原语义 `T_tag_dock_center` 读取；理论基线通过逆变换得到 Tag 在 dock 坐标系的位置。
++   - 双 Tag 中心一致时使用基线 yaw；单 Tag 或双 Tag 冲突时使用近 Tag 位置，并可保持历史基线 yaw。
++   - 新增虚拟入口位姿和 `/dock/perception` 17 元素数组。
++   - `max_pose_error`、`max_hamming` 参数化。
++   - 修复未知 Tag 未跳过、AprilTag pose 矩阵未释放、检测线程析构不安全问题。
++
++3. `config/detection_cfg.yml`
++4. `config/detection_cfg_sim.yml`
++   - 新增增强模式参数，默认关闭，因而升级后不会自动改变旧控制链输出。
++
++5. `docs/dual_tag_baseline_mode.md`
++   - 新增模式、降级规则和数组协议说明。
++
++6. `README.md`
++   - 补充旧模式兼容、新模式启用和新话题说明。
++
++7. `CMakeLists.txt`、`package.xml`
++   - 显式补齐 `sensor_msgs`、`std_msgs`、`geometry_msgs`、`tf2` 等依赖。
++
++## 启用方式
++
++在对应配置中改为：
++
++```yaml
++use_baseline_yaw: true
++```
++
++并按实际船坞坐标系填写：
++
++```yaml
++dock_entry_offset_x: 0.0
++dock_entry_offset_y: 0.0
++dock_entry_offset_z: 0.0
++```
++
++首次实船测试建议同时记录 `/apriltag_node/dock_pose` 与 `/dock/perception`，确认 `yaw_source=1` 时的方向和船坞中心位置正确后，再让归港控制器使用动态入口。
+diff -ruN apriltag_original/apriltag_localization/README.md apriltag_work/apriltag_localization/README.md
+--- apriltag_original/apriltag_localization/README.md	2026-07-20 09:27:01.000000000 +0000
++++ apriltag_work/apriltag_localization/README.md	2026-07-22 02:32:23.715133714 +0000
+@@ -33,7 +33,9 @@
+ |------|------|------|
+ | `/apriltag_node/dock_pose` | `Float64MultiArray` | bay 中心在 **`frame_id` 相机系** 下 `[x,y,z,roll,pitch,yaw]`（rad） |
+ 
+-双码（0/43）同屏时取平均；单码亦可输出。节点**持续发布**（无检测时发空数组），供 `usv_docking` 传感器看门狗判断话题是否存活。
++默认 `use_baseline_yaw: false`，行为与原包一致：双码（0/43）同屏时对各 Tag 推算出的 bay 中心位姿求平均，单码亦可输出。节点**持续发布**（无检测时发空数组），供 `usv_docking` 传感器看门狗判断话题是否存活。
++
++设为 `use_baseline_yaw: true` 后，固定按 `baseline_tag_id_a → baseline_tag_id_b` 计算基线 yaw，避免按距离排序造成 180° 翻转；单 Tag 时可保持最近可靠基线 yaw。旧话题仍保持 `[x,y,z,roll,pitch,yaw]` 六元素格式，同时新增 `/dock/perception`，包含 dock 中心、虚拟入口、Tag 数量、yaw 来源和一致性状态。详见 [`docs/dual_tag_baseline_mode.md`](docs/dual_tag_baseline_mode.md)。
+ 
+ ## 与 usv_docking 联调
+ 
+diff -ruN apriltag_original/apriltag_localization/config/detection_cfg.yml apriltag_work/apriltag_localization/config/detection_cfg.yml
+--- apriltag_original/apriltag_localization/config/detection_cfg.yml	2026-07-20 09:27:01.000000000 +0000
++++ apriltag_work/apriltag_localization/config/detection_cfg.yml	2026-07-22 02:31:33.835134962 +0000
+@@ -30,3 +30,34 @@
+       dock_offset_roll: -180.0
+       dock_offset_pitch: 0.0
+       dock_offset_yaw: 0.0
++
++    # -------------------------------------------------------------------------
++    # 增强双 Tag 船坞融合。false 时保持原算法：所有有效 Tag 的 dock 位姿直接平均。
++    # -------------------------------------------------------------------------
++    use_baseline_yaw: false
++    perception_result_topic: "/dock/perception"
++
++    # 固定基线方向，始终按 tag_0 -> tag_43，禁止按观测距离交换方向。
++    baseline_tag_id_a: 0
++    baseline_tag_id_b: 43
++    baseline_yaw_offset_deg: 0.0
++    min_baseline_length_m: 0.05
++
++    # 双 Tag 中心位置/单 Tag 姿态一致性门限。
++    dual_tag_consistency_threshold_m: 0.30
++    dual_tag_yaw_consistency_deg: 180.0  # 180 表示默认不以单 Tag yaw 拒绝双 Tag
++    distance_weighted_position: true
++    hold_baseline_yaw_on_single: true
++
++    # 保留原误差阈值作为默认值，实船采样后可适当放宽。
++    max_pose_error: 0.001
++    max_hamming: 2
++
++    # T_dock_center_entry：虚拟入口在 dock 中心坐标系下的偏移，角度单位为度。
++    # 入口位于船坞正前方时，请按实际 dock 坐标轴方向填写 x/y。
++    dock_entry_offset_x: 0.0
++    dock_entry_offset_y: 0.0
++    dock_entry_offset_z: 0.0
++    dock_entry_offset_roll: 0.0
++    dock_entry_offset_pitch: 0.0
++    dock_entry_offset_yaw: 0.0
+diff -ruN apriltag_original/apriltag_localization/config/detection_cfg_sim.yml apriltag_work/apriltag_localization/config/detection_cfg_sim.yml
+--- apriltag_original/apriltag_localization/config/detection_cfg_sim.yml	2026-07-20 09:27:01.000000000 +0000
++++ apriltag_work/apriltag_localization/config/detection_cfg_sim.yml	2026-07-22 02:31:33.835134962 +0000
+@@ -33,3 +33,27 @@
+       dock_offset_roll: -180.0
+       dock_offset_pitch: 0.0
+       dock_offset_yaw: 0.0
++
++    # -------------------------------------------------------------------------
++    # 增强双 Tag 船坞融合。false 时保持原算法；仿真验证后可改为 true。
++    # -------------------------------------------------------------------------
++    use_baseline_yaw: false
++    perception_result_topic: "/dock/perception"
++    baseline_tag_id_a: 0
++    baseline_tag_id_b: 43
++    baseline_yaw_offset_deg: 0.0
++    min_baseline_length_m: 0.05
++    dual_tag_consistency_threshold_m: 0.30
++    dual_tag_yaw_consistency_deg: 180.0
++    distance_weighted_position: true
++    hold_baseline_yaw_on_single: true
++    max_pose_error: 0.001
++    max_hamming: 2
++
++    # T_dock_center_entry，按仿真 dock 坐标系填写。
++    dock_entry_offset_x: 0.0
++    dock_entry_offset_y: 0.0
++    dock_entry_offset_z: 0.0
++    dock_entry_offset_roll: 0.0
++    dock_entry_offset_pitch: 0.0
++    dock_entry_offset_yaw: 0.0
+diff -ruN apriltag_original/apriltag_localization/docs/dual_tag_baseline_mode.md apriltag_work/apriltag_localization/docs/dual_tag_baseline_mode.md
+--- apriltag_original/apriltag_localization/docs/dual_tag_baseline_mode.md	1970-01-01 00:00:00.000000000 +0000
++++ apriltag_work/apriltag_localization/docs/dual_tag_baseline_mode.md	2026-07-22 02:31:34.335134949 +0000
+@@ -0,0 +1,33 @@
++# 双 Tag 基线增强模式
++
++## 兼容策略
++
++`use_baseline_yaw: false` 为默认值。此时 `/apriltag_node/dock_pose` 仍使用原算法：每个有效 Tag 经原坐标链换算为 dock 中心位姿，再对全部结果求平均；无检测时发布空数组。
++
++设为 `true` 后，旧话题的类型与六元素格式保持不变，但位姿改为增强融合结果；同时发布 `/dock/perception`。
++
++## 固定基线方向
++
++基线始终按 `baseline_tag_id_a -> baseline_tag_id_b` 计算，默认 `0 -> 43`，不会因左右 Tag 距离变化而交换方向。配置中的 `dock_offset_*` 沿用原语义 `T_tag_dock_center`，理论 Tag 基线通过其逆变换 `T_dock_center_tag` 计算。
++
++## 降级规则
++
++双 Tag 中心一致且基线有效时，位置由双 Tag 融合，yaw 由基线计算，并保存为最近可靠 yaw。只看到一个 Tag 或双 Tag 一致性失败时，位置使用最近 Tag；若 `hold_baseline_yaw_on_single=true` 且历史基线存在，则继续保持历史 yaw，否则使用当前单 Tag yaw。
++
++`yaw_source`：0=当前单 Tag；1=当前双 Tag 基线；2=历史双 Tag yaw 保持。
++
++## `/dock/perception` 数组格式
++
++`Float64MultiArray` 共 17 个元素：
++
++```
++[0..5]   center: x,y,z,roll,pitch,yaw
++[6..11]  entry:  x,y,z,roll,pitch,yaw
++[12]     tag_count
++[13]     yaw_source
++[14]     dual_consistent (0/1)
++[15]     valid (0/1)
++[16]     dual center difference, metres
++```
++
++虚拟入口由 `T_camera_dock_center * T_dock_center_entry` 得到，对应 `dock_entry_offset_*` 参数。
+diff -ruN apriltag_original/apriltag_localization/include/apriltag_node.h apriltag_work/apriltag_localization/include/apriltag_node.h
+--- apriltag_original/apriltag_localization/include/apriltag_node.h	2026-07-20 09:27:01.000000000 +0000
++++ apriltag_work/apriltag_localization/include/apriltag_node.h	2026-07-22 02:48:00.415110278 +0000
+@@ -1,4 +1,12 @@
+ #pragma once
++#include <atomic>
++#include <condition_variable>
++#include <functional>
++#include <mutex>
++#include <string>
++#include <thread>
++#include <unordered_map>
++#include <vector>
+ #include "mlogger/mlogger.hpp"
+ #include <rclcpp/rclcpp.hpp>
+ #include <sensor_msgs/msg/image.hpp>
+@@ -273,9 +281,35 @@
+   bool intiNode();
+   void cameraInfoCallback(const sensor_msgs::msg::CameraInfo::SharedPtr msg);
+   void imageCallback(const sensor_msgs::msg::Image::SharedPtr msg);
++  struct TagObservation {
++    int id = -1;
++    double distance = 0.0;
++    double pose_error = 0.0;
++    tf2::Transform tag_pose_camera_link;
++    tf2::Transform dock_center_camera_link;
++  };
++
++  struct DockPerception {
++    tf2::Transform center;
++    tf2::Transform entry;
++    int tag_count = 0;
++    int yaw_source = 0;  // 0=current single tag, 1=current baseline, 2=held baseline
++    bool dual_consistent = false;
++    bool valid = false;
++    double center_diff = 0.0;
++  };
++
+   bool detect();
+   void drawResult(cv::Mat &out_image, apriltag_detection_t *det);
+   void main_loop();
++  const TagObservation *findObservation(
++      const std::vector<TagObservation> &observations, int id) const;
++  tf2::Transform makeSingleTagResult(
++      const TagObservation &observation, int &yaw_source) const;
++  tf2::Transform makeEntryPose(const tf2::Transform &dock_center) const;
++  DockPerception fuseEnhanced(const std::vector<TagObservation> &observations);
++  void publishLegacyPose(const tf2::Transform &pose);
++  void publishPerception(const DockPerception &perception);
+ 
+ private:
+   rclcpp::Node::SharedPtr private_node_ptr_;
+@@ -301,6 +335,7 @@
+ 
+   std::function<void(apriltag_family_t *)> destory_apriltag_family_t_;
+   std::condition_variable                  cond_var_;
++  std::atomic<bool>                        running_{true};
+ 
+ private:
+   std::vector<int>                        tag_ids_;
+@@ -314,7 +349,24 @@
+ 
+   geometry_msgs::msg::PoseStamped result_pose_stamp_;
+   rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr output_result_array_pose_publisher_;
++  rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr perception_result_publisher_;
+ 
++  // Enhanced dual-tag mode. Defaults keep the original behavior unchanged.
++  bool use_baseline_yaw_{false};
++  bool hold_baseline_yaw_on_single_{true};
++  bool distance_weighted_position_{true};
++  int baseline_tag_id_a_{0};
++  int baseline_tag_id_b_{43};
++  int max_hamming_{2};
++  double max_pose_error_{1.0e-3};
++  double dual_tag_consistency_threshold_m_{0.30};
++  double dual_tag_yaw_consistency_deg_{180.0};
++  double min_baseline_length_m_{0.05};
++  double baseline_yaw_offset_deg_{0.0};
++  std::string perception_result_topic_{"/dock/perception"};
++  tf2::Transform dock_center_to_entry_{tf2::Transform::getIdentity()};
++  bool has_baseline_yaw_{false};
++  double last_baseline_yaw_{0.0};
+ 
+   std_msgs::msg::Float64MultiArray result_array_pose_msg_;
+ };
+diff -ruN apriltag_original/apriltag_localization/package.xml apriltag_work/apriltag_localization/package.xml
+--- apriltag_original/apriltag_localization/package.xml	2026-07-20 09:27:01.000000000 +0000
++++ apriltag_work/apriltag_localization/package.xml	2026-07-22 02:48:01.043110262 +0000
+@@ -13,7 +13,12 @@
+ 
+   <exec_depend>rclcpp</exec_depend>
+   <exec_depend>rclpy</exec_depend>
+-  <exec_depend>std_msgs</exec_depend>
++  <depend>ament_index_cpp</depend>
++  <depend>std_msgs</depend>
++  <depend>sensor_msgs</depend>
++  <depend>geometry_msgs</depend>
++  <depend>tf2</depend>
++  <depend>tf2_geometry_msgs</depend>
+   <exec_depend>interface_msgs</exec_depend>
+   
+   <depend>cv_bridge</depend>
+diff -ruN apriltag_original/apriltag_localization/src/apriltag_node.cpp apriltag_work/apriltag_localization/src/apriltag_node.cpp
+--- apriltag_original/apriltag_localization/src/apriltag_node.cpp	2026-07-20 09:27:01.000000000 +0000
++++ apriltag_work/apriltag_localization/src/apriltag_node.cpp	2026-07-22 02:32:23.715133714 +0000
+@@ -2,6 +2,10 @@
+ #include "ament_index_cpp/get_package_prefix.hpp"
+ #include "ament_index_cpp/get_package_share_directory.hpp"
+ #include <filesystem>
++#include <algorithm>
++#include <array>
++#include <chrono>
++#include <cstring>
+ #include <opencv2/opencv.hpp>
+ // 1. 引入占位符 `_1`
+ #if X86_DEBUG_VIEW
+@@ -139,464 +143,588 @@
+   return translation * rotation;
+ }
+ 
++
+ AprilTagLocalization::AprilTagLocalization(const std::string &node_name)
+     : private_node_ptr_(rclcpp::Node::make_shared(
+           node_name, rclcpp::NodeOptions().automatically_declare_parameters_from_overrides(true))),
+       logger_(private_node_ptr_->get_logger()),
+       WORKSPACE_DIR(ament_index_cpp::get_package_prefix("apriltag_localization"))
+ {
+-  MLOGGER_INFO(
+-      "=========================AprilTagLocalization Initing=====================================");
++  MLOGGER_INFO("=========================AprilTagLocalization Initing=====================================");
+   MLOGGER_INFO("WORKSPACE_DIR:[{}]", WORKSPACE_DIR.c_str());
+   if (!initConfig())
+   {
+-    MLOGGER_ERROR("initConfig() Failed!!");
+     throw std::runtime_error("initConfig() Failed!!");
+   }
+   if (!initModel())
+   {
+-    MLOGGER_ERROR("initModel() Failed!!");
+     throw std::runtime_error("initModel() Failed!!");
+   }
+-  MLOGGER_INFO("initModel() Successfully!!");
+   if (!intiNode())
+   {
+-    MLOGGER_ERROR("intiNode() Failed!!");
+     throw std::runtime_error("intiNode() Failed!!");
+   }
+-  MLOGGER_INFO(
+-      "=========================AprilTagLocalization Init "
+-      "Successfully!!=========================\n");
++  MLOGGER_INFO("AprilTagLocalization initialized. enhanced_mode={}", use_baseline_yaw_);
+ }
+ 
+ AprilTagLocalization::~AprilTagLocalization()
+ {
++  running_.store(false);
++  cond_var_.notify_all();
++  if (main_loop_.joinable())
++  {
++    main_loop_.join();
++  }
++  if (detections_ != nullptr)
++  {
++    apriltag_detections_destroy(detections_);
++    detections_ = nullptr;
++  }
+   if (td_ptr_ != nullptr)
+   {
+-    MLOGGER_INFO("Destroying apriltag detector...");
+     apriltag_detector_destroy(td_ptr_);
++    td_ptr_ = nullptr;
+   }
+-  if (tf_ptr_ != nullptr)
++  if (tf_ptr_ != nullptr && destory_apriltag_family_t_)
+   {
+-    MLOGGER_INFO("Destroying apriltag family...");
+     destory_apriltag_family_t_(tf_ptr_);
++    tf_ptr_ = nullptr;
+   }
+-  if (detections_ != nullptr)
+-  {
+-    MLOGGER_INFO("Destroying apriltag detections...");
+-    apriltag_detections_destroy(detections_);
+-  }
+-  return;
+ }
+ 
+ bool AprilTagLocalization::initConfig()
+ {
+-  // private_node_ptr_->declare_parameter<std::string>("camera_info_topic", "");
+-  // private_node_ptr_->declare_parameter<std::string>("image_topic", "");
+-  // private_node_ptr_->declare_parameter<std::string>("apriltag_family_name", "tag25h9");
+-  // private_node_ptr_->declare_parameter<std::string>("detection_result_topic", "");
+-  // private_node_ptr_->declare_parameter<double>("tag_size", 500.0);
+-  // private_node_ptr_->declare_parameter<std::vector<int64_t>>("tag_ids", {});
+-
+-  camera_info_topic_      = private_node_ptr_->get_parameter("camera_info_topic").as_string();
+-  image_topic_            = private_node_ptr_->get_parameter("image_topic").as_string();
++  camera_info_topic_ = private_node_ptr_->get_parameter("camera_info_topic").as_string();
++  image_topic_ = private_node_ptr_->get_parameter("image_topic").as_string();
+   detection_result_topic_ = private_node_ptr_->get_parameter("detection_result_topic").as_string();
+-  tag_size_               = private_node_ptr_->get_parameter("tag_size").as_double();
++  tag_size_ = private_node_ptr_->get_parameter("tag_size").as_double();
+   current_apriltag_family_name_ =
+       private_node_ptr_->get_parameter("apriltag_family_name").as_string();
+ 
+-  if (camera_info_topic_.empty() || image_topic_.empty() || detection_result_topic_.empty())
+-  {
+-    MLOGGER_ERROR("One or more parameters are empty! Please check the configuration.");
+-    return false;
+-  }
+-
+-  if (current_apriltag_family_name_.empty())
+-  {
+-    MLOGGER_ERROR("AprilTag family name is empty! Please check the configuration.");
+-    return false;
+-  }
+-
+-  if (tag_size_ <= 0)
++  if (camera_info_topic_.empty() || image_topic_.empty() || detection_result_topic_.empty() ||
++      current_apriltag_family_name_.empty() || tag_size_ <= 0.0)
+   {
+-    MLOGGER_ERROR("Invalid tag size: {}. Tag size must be positive.", tag_size_);
++    MLOGGER_ERROR("Invalid required AprilTag parameters.");
+     return false;
+   }
+ 
+-  std::vector<int64_t> tag_ids = private_node_ptr_->get_parameter("tag_ids").as_integer_array();
+-  for (const int64_t &id : tag_ids)
+-  {
+-    std::string current_tag_id    = "tag_" + std::to_string(id);
+-    std::string dock_offset_x     = current_tag_id + ".dock_offset_x";
+-    std::string dock_offset_y     = current_tag_id + ".dock_offset_y";
+-    std::string dock_offset_z     = current_tag_id + ".dock_offset_z";
+-    std::string dock_offset_roll  = current_tag_id + ".dock_offset_roll";
+-    std::string dock_offset_pitch = current_tag_id + ".dock_offset_pitch";
+-    std::string dock_offset_yaw   = current_tag_id + ".dock_offset_yaw";
+-    // 检查是否存在 "dock_offset_x"
+-    bool check_param = private_node_ptr_->has_parameter(dock_offset_x) &&
+-                       private_node_ptr_->has_parameter(dock_offset_y) &&
+-                       private_node_ptr_->has_parameter(dock_offset_z) &&
+-                       private_node_ptr_->has_parameter(dock_offset_roll) &&
+-                       private_node_ptr_->has_parameter(dock_offset_pitch) &&
+-                       private_node_ptr_->has_parameter(dock_offset_yaw);
+-    if (!check_param)
++  const auto get_bool = [this](const std::string &name, bool fallback) {
++    return private_node_ptr_->has_parameter(name)
++               ? private_node_ptr_->get_parameter(name).as_bool()
++               : fallback;
++  };
++  const auto get_int = [this](const std::string &name, int fallback) {
++    return private_node_ptr_->has_parameter(name)
++               ? static_cast<int>(private_node_ptr_->get_parameter(name).as_int())
++               : fallback;
++  };
++  const auto get_double = [this](const std::string &name, double fallback) {
++    return private_node_ptr_->has_parameter(name)
++               ? private_node_ptr_->get_parameter(name).as_double()
++               : fallback;
++  };
++  const auto get_string = [this](const std::string &name, const std::string &fallback) {
++    return private_node_ptr_->has_parameter(name)
++               ? private_node_ptr_->get_parameter(name).as_string()
++               : fallback;
++  };
++
++  use_baseline_yaw_ = get_bool("use_baseline_yaw", false);
++  hold_baseline_yaw_on_single_ = get_bool("hold_baseline_yaw_on_single", true);
++  distance_weighted_position_ = get_bool("distance_weighted_position", true);
++  baseline_tag_id_a_ = get_int("baseline_tag_id_a", 0);
++  baseline_tag_id_b_ = get_int("baseline_tag_id_b", 43);
++  max_hamming_ = get_int("max_hamming", 2);
++  max_pose_error_ = get_double("max_pose_error", 1.0e-3);
++  dual_tag_consistency_threshold_m_ =
++      get_double("dual_tag_consistency_threshold_m", 0.30);
++  dual_tag_yaw_consistency_deg_ = get_double("dual_tag_yaw_consistency_deg", 180.0);
++  min_baseline_length_m_ = get_double("min_baseline_length_m", 0.05);
++  baseline_yaw_offset_deg_ = get_double("baseline_yaw_offset_deg", 0.0);
++  perception_result_topic_ = get_string("perception_result_topic", "/dock/perception");
++
++  const double entry_x = get_double("dock_entry_offset_x", 0.0);
++  const double entry_y = get_double("dock_entry_offset_y", 0.0);
++  const double entry_z = get_double("dock_entry_offset_z", 0.0);
++  const double entry_roll = degreesToRadians(get_double("dock_entry_offset_roll", 0.0));
++  const double entry_pitch = degreesToRadians(get_double("dock_entry_offset_pitch", 0.0));
++  const double entry_yaw = degreesToRadians(get_double("dock_entry_offset_yaw", 0.0));
++  dock_center_to_entry_ =
++      rpyToTransform(entry_x, entry_y, entry_z, entry_roll, entry_pitch, entry_yaw);
++
++  const std::vector<int64_t> tag_ids =
++      private_node_ptr_->get_parameter("tag_ids").as_integer_array();
++  for (const int64_t id64 : tag_ids)
++  {
++    const int id = static_cast<int>(id64);
++    const std::string prefix = "tag_" + std::to_string(id) + ".dock_offset_";
++    const std::array<std::string, 6> names = {
++        prefix + "x", prefix + "y", prefix + "z",
++        prefix + "roll", prefix + "pitch", prefix + "yaw"};
++    bool complete = true;
++    for (const auto &name : names)
+     {
+-      MLOGGER_WARN("tag id:{} check_param failed, please check parameters !", id);
++      complete = complete && private_node_ptr_->has_parameter(name);
++    }
++    if (!complete)
++    {
++      MLOGGER_WARN("Tag {} offset parameters incomplete; tag ignored.", id);
+       continue;
+     }
+ 
+-    // 存在且已声明
+-    double dock_offset_x_val     = private_node_ptr_->get_parameter(dock_offset_x).as_double();
+-    double dock_offset_y_val     = private_node_ptr_->get_parameter(dock_offset_y).as_double();
+-    double dock_offset_z_val     = private_node_ptr_->get_parameter(dock_offset_z).as_double();
+-    double dock_offset_roll_val  = private_node_ptr_->get_parameter(dock_offset_roll).as_double();
+-    double dock_offset_pitch_val = private_node_ptr_->get_parameter(dock_offset_pitch).as_double();
+-    double dock_offset_yaw_val   = private_node_ptr_->get_parameter(dock_offset_yaw).as_double();
+-    MLOGGER_INFO(
+-        "Load dock to [tag_{}] parameters:\n dock_offset_x_val: {}\n dock_offset_y_val: {}\n "
+-        "dock_offset_z_val: {}\n dock_offset_roll_val: {}\n dock_offset_pitch_val: {}\n "
+-        "dock_offset_yaw_val: {}",
+-        id, dock_offset_x_val, dock_offset_y_val, dock_offset_z_val, dock_offset_roll_val,
+-        dock_offset_pitch_val, dock_offset_yaw_val);
+-    dock_offset_roll_val  = degreesToRadians(dock_offset_roll_val);
+-    dock_offset_pitch_val = degreesToRadians(dock_offset_pitch_val);
+-    dock_offset_yaw_val   = degreesToRadians(dock_offset_yaw_val);
+-    dock_pose_ext_map_[int(id)] =
+-        rpyToTransform(dock_offset_x_val, dock_offset_y_val, dock_offset_z_val,
+-                       dock_offset_roll_val, dock_offset_pitch_val, dock_offset_yaw_val);
++    const double x = private_node_ptr_->get_parameter(names[0]).as_double();
++    const double y = private_node_ptr_->get_parameter(names[1]).as_double();
++    const double z = private_node_ptr_->get_parameter(names[2]).as_double();
++    const double roll = degreesToRadians(private_node_ptr_->get_parameter(names[3]).as_double());
++    const double pitch = degreesToRadians(private_node_ptr_->get_parameter(names[4]).as_double());
++    const double yaw = degreesToRadians(private_node_ptr_->get_parameter(names[5]).as_double());
++    tag_ids_.push_back(id);
++    dock_pose_ext_map_[id] = rpyToTransform(x, y, z, roll, pitch, yaw);
++    MLOGGER_INFO("Loaded T_tag{}_dock_center: xyz=({},{},{}), rpy_deg=({},{},{})",
++                 id, x, y, z, roll / DEG_TO_RAD, pitch / DEG_TO_RAD, yaw / DEG_TO_RAD);
+   }
+-  result_pose_stamp_.header.frame_id = "camera_link";
+-  if (private_node_ptr_->has_parameter("frame_id"))
++
++  if (dock_pose_ext_map_.empty())
+   {
+-    result_pose_stamp_.header.frame_id = private_node_ptr_->get_parameter("frame_id").as_string();
++    MLOGGER_ERROR("No valid tag offset configuration loaded.");
++    return false;
+   }
++  if (use_baseline_yaw_ &&
++      (dock_pose_ext_map_.count(baseline_tag_id_a_) == 0 ||
++       dock_pose_ext_map_.count(baseline_tag_id_b_) == 0))
++  {
++    MLOGGER_ERROR("Enhanced mode requires configured baseline tags {} and {}.",
++                  baseline_tag_id_a_, baseline_tag_id_b_);
++    return false;
++  }
++
++  result_pose_stamp_.header.frame_id = get_string("frame_id", "camera_link");
+   return true;
+ }
+ 
+ bool AprilTagLocalization::initModel()
+ {
+-  // apriltag_family_t *tf      = NULL;
+   const char *famname = current_apriltag_family_name_.c_str();
+   if (!strcmp(famname, "tag36h11"))
+   {
+-    tf_ptr_                    = tag36h11_create();
+-    destory_apriltag_family_t_ = std::function<void(apriltag_family_t *)>(
+-        std::bind(&tag36h11_destroy, std::placeholders::_1));
++    tf_ptr_ = tag36h11_create();
++    destory_apriltag_family_t_ = tag36h11_destroy;
+   } else if (!strcmp(famname, "tag25h9"))
+   {
+-    tf_ptr_                    = tag25h9_create();
+-    destory_apriltag_family_t_ = std::function<void(apriltag_family_t *)>(
+-        std::bind(&tag25h9_destroy, std::placeholders::_1));
++    tf_ptr_ = tag25h9_create();
++    destory_apriltag_family_t_ = tag25h9_destroy;
+   } else if (!strcmp(famname, "tag16h5"))
+   {
+-    tf_ptr_                    = tag16h5_create();
+-    destory_apriltag_family_t_ = std::function<void(apriltag_family_t *)>(
+-        std::bind(&tag16h5_destroy, std::placeholders::_1));
++    tf_ptr_ = tag16h5_create();
++    destory_apriltag_family_t_ = tag16h5_destroy;
+   } else if (!strcmp(famname, "tagCircle21h7"))
+   {
+-    tf_ptr_                    = tagCircle21h7_create();
+-    destory_apriltag_family_t_ = std::function<void(apriltag_family_t *)>(
+-        std::bind(&tagCircle21h7_destroy, std::placeholders::_1));
++    tf_ptr_ = tagCircle21h7_create();
++    destory_apriltag_family_t_ = tagCircle21h7_destroy;
+   } else if (!strcmp(famname, "tagCircle49h12"))
+   {
+-    tf_ptr_                    = tagCircle49h12_create();
+-    destory_apriltag_family_t_ = std::function<void(apriltag_family_t *)>(
+-        std::bind(&tagCircle49h12_destroy, std::placeholders::_1));
++    tf_ptr_ = tagCircle49h12_create();
++    destory_apriltag_family_t_ = tagCircle49h12_destroy;
+   } else if (!strcmp(famname, "tagStandard41h12"))
+   {
+-    tf_ptr_                    = tagStandard41h12_create();
+-    destory_apriltag_family_t_ = std::function<void(apriltag_family_t *)>(
+-        std::bind(&tagStandard41h12_destroy, std::placeholders::_1));
++    tf_ptr_ = tagStandard41h12_create();
++    destory_apriltag_family_t_ = tagStandard41h12_destroy;
+   } else if (!strcmp(famname, "tagStandard52h13"))
+   {
+-    tf_ptr_                    = tagStandard52h13_create();
+-    destory_apriltag_family_t_ = std::function<void(apriltag_family_t *)>(
+-        std::bind(&tagStandard52h13_destroy, std::placeholders::_1));
++    tf_ptr_ = tagStandard52h13_create();
++    destory_apriltag_family_t_ = tagStandard52h13_destroy;
+   } else if (!strcmp(famname, "tagCustom48h12"))
+   {
+-    tf_ptr_                    = tagCustom48h12_create();
+-    destory_apriltag_family_t_ = std::function<void(apriltag_family_t *)>(
+-        std::bind(&tagCustom48h12_destroy, std::placeholders::_1));
++    tf_ptr_ = tagCustom48h12_create();
++    destory_apriltag_family_t_ = tagCustom48h12_destroy;
+   } else
+   {
+-    MLOGGER_ERROR("Unrecognized tag family name: {}. Use e.g. \"tag36h11\".",
+-                  current_apriltag_family_name_.c_str());
++    MLOGGER_ERROR("Unrecognized tag family: {}", current_apriltag_family_name_);
+     return false;
+   }
++
+   td_ptr_ = apriltag_detector_create();
+   apriltag_detector_add_family(td_ptr_, tf_ptr_);
+   if (errno == ENOMEM)
+   {
+-    MLOGGER_ERROR(
+-        "Unable to add family to detector due to insufficient memory to allocate the tag-family "
+-        "decoder with the default maximum hamming value of 2. Try choosing an alternative tag "
+-        "family.");
++    MLOGGER_ERROR("Insufficient memory while adding AprilTag family.");
+     return false;
+   }
+   td_ptr_->nthreads = 2;
+-  MLOGGER_INFO("Initialized AprilTag family: {}", current_apriltag_family_name_);
+-  return tf_ptr_ != NULL && td_ptr_ != NULL;
++  return tf_ptr_ != nullptr && td_ptr_ != nullptr;
+ }
++
+ bool AprilTagLocalization::intiNode()
+ {
+-  // 订阅相机信息和图像话题
+   camera_info_sub_ = private_node_ptr_->create_subscription<sensor_msgs::msg::CameraInfo>(
+       camera_info_topic_, 10,
+       std::bind(&AprilTagLocalization::cameraInfoCallback, this, std::placeholders::_1));
+-  MLOGGER_INFO("Subscribed to camera info topic: {}", camera_info_topic_.c_str());
+-
+   image_sub_ = private_node_ptr_->create_subscription<sensor_msgs::msg::Image>(
+       image_topic_, 10,
+       std::bind(&AprilTagLocalization::imageCallback, this, std::placeholders::_1));
+-  MLOGGER_INFO("Subscribed to image topic: {}", image_topic_.c_str());
+-
+   output_result_array_pose_publisher_ =
+-      private_node_ptr_->create_publisher<std_msgs::msg::Float64MultiArray>(detection_result_topic_,
+-                                                                            10);
+-  MLOGGER_INFO("interface_msgs::msg::ApriltagPoseList Publisher topic: {}",
+-               detection_result_topic_.c_str());
+-  main_loop_ = std::thread(std::bind(&AprilTagLocalization::main_loop, this));
+-  //
+-  // std::string test_image_path =
+-  //     "/home/jzw/MyWorkscpae/HIK/ros2_perception/src/yolo-inference/data/bus.jpg";
+-  // cv::Mat mat = cv::imread(test_image_path);
+-  // std_msgs::msg::Header header;
+-  // std::string encoding = "bgr8";
+-  // sensor_msgs::msg::Image::SharedPtr msg = cv_bridge::CvImage(header, encoding,
+-  // mat).toImageMsg(); cv_bridge_shared_                           = cv_bridge::toCvShare(msg,
+-  // "mono8"); is_image_received_.store(true); detect();
++      private_node_ptr_->create_publisher<std_msgs::msg::Float64MultiArray>(
++          detection_result_topic_, 10);
++  perception_result_publisher_ =
++      private_node_ptr_->create_publisher<std_msgs::msg::Float64MultiArray>(
++          perception_result_topic_, 10);
++  main_loop_ = std::thread(&AprilTagLocalization::main_loop, this);
+   return true;
+ }
++
+ void AprilTagLocalization::run()
+ {
+   rclcpp::spin(private_node_ptr_);
+-  return;
+ }
+ 
+-void AprilTagLocalization::cameraInfoCallback(const sensor_msgs::msg::CameraInfo::SharedPtr msg)
++void AprilTagLocalization::cameraInfoCallback(
++    const sensor_msgs::msg::CameraInfo::SharedPtr msg)
+ {
+-  if (msg == nullptr)
++  if (msg == nullptr || is_camera_info_received_.load())
+   {
+-    MLOGGER_ERROR("Received null CameraInfo message!");
+     return;
+   }
+-  if (is_camera_info_received_)
+-  {
+-    return;
+-  }
+-
+   std::lock_guard<std::mutex> lock(camera_info_mutex_);
+-  current_camera_intrinsics_.fx               = msg->k[0];
+-  current_camera_intrinsics_.fy               = msg->k[4];
+-  current_camera_intrinsics_.cx               = msg->k[2];
+-  current_camera_intrinsics_.cy               = msg->k[5];
++  current_camera_intrinsics_.fx = msg->k[0];
++  current_camera_intrinsics_.fy = msg->k[4];
++  current_camera_intrinsics_.cx = msg->k[2];
++  current_camera_intrinsics_.cy = msg->k[5];
+   current_camera_intrinsics_.distortion_model = msg->distortion_model;
+   current_camera_intrinsics_.distortion_coefficients.assign(msg->d.begin(), msg->d.end());
+-  MLOGGER_INFO(
+-      "CameraInfo received: fx={}, fy={}, cx={}, cy={}, distortion_model={}, "
+-      "distortion_coefficients=[{}]",
+-      current_camera_intrinsics_.fx, current_camera_intrinsics_.fy, current_camera_intrinsics_.cx,
+-      current_camera_intrinsics_.cy, current_camera_intrinsics_.distortion_model.c_str(),
+-      fmt::join(current_camera_intrinsics_.distortion_coefficients, ","));
+-  is_camera_info_received_ = true;
++  is_camera_info_received_.store(true);
++  MLOGGER_INFO("Camera intrinsics: fx={}, fy={}, cx={}, cy={}",
++               current_camera_intrinsics_.fx, current_camera_intrinsics_.fy,
++               current_camera_intrinsics_.cx, current_camera_intrinsics_.cy);
+ }
+ 
+ void AprilTagLocalization::imageCallback(const sensor_msgs::msg::Image::SharedPtr msg)
+ {
+-  if (msg == nullptr)
++  if (msg == nullptr || !is_camera_info_received_.load())
+   {
+-    MLOGGER_ERROR("Received null Image message!");
+     return;
+   }
+-  if (!is_camera_info_received_)
+-  {
+-    return;
+-  }
+-  // MLOGGER_INFO("imageCallback.....");
++  try
+   {
+     std::lock_guard<std::mutex> lock(image_mutex_);
+     cv_bridge_shared_ = cv_bridge::toCvShare(msg, "bgr8");
+     is_image_received_.store(true);
+-    cond_var_.notify_one();
++  } catch (const cv_bridge::Exception &e)
++  {
++    MLOGGER_ERROR("cv_bridge conversion failed: {}", e.what());
++    return;
+   }
++  cond_var_.notify_one();
+ }
+ 
+ void AprilTagLocalization::drawResult(cv::Mat &out_image, apriltag_detection_t *det)
+ {
+-  // cv::Mat result_mat;
+-  // cv::line(out_image, cv::Point(det->p[0][0], det->p[0][1]), cv::Point(det->p[1][0],
+-  // det->p[1][1]),
+-  //          cv::Scalar(0, 0xff, 0), 2);
+-  // cv::line(out_image, cv::Point(det->p[0][0], det->p[0][1]), cv::Point(det->p[3][0],
+-  // det->p[3][1]),
+-  //          cv::Scalar(0, 0, 0xff), 2);
+-  // cv::line(out_image, cv::Point(det->p[1][0], det->p[1][1]), cv::Point(det->p[2][0],
+-  // det->p[2][1]),
+-  //          cv::Scalar(0xff, 0, 0), 2);
+-  // cv::line(out_image, cv::Point(det->p[2][0], det->p[2][1]), cv::Point(det->p[3][0],
+-  // det->p[3][1]),
+-  //          cv::Scalar(0xff, 0, 0), 2);
+-  std::vector<cv::Scalar> color_list = {cv::Scalar(0, 0xff, 0), cv::Scalar(0, 0, 0xff),
+-                                        cv::Scalar(0xff, 0, 0), cv::Scalar(0xff, 0xff, 0)};
+-  for (int i = 0; i < 4; i++)
+-  {
+-    cv::circle(out_image, cv::Point(det->p[i][0], det->p[i][1]), 5, color_list[i], -1);
+-  }
+-  std::stringstream ss;
+-  ss << det->id;
+-  cv::String text      = ss.str();
+-  int        fontface  = cv::FONT_HERSHEY_SCRIPT_SIMPLEX;
+-  double     fontscale = 1.0;
+-  int        baseline;
+-  cv::Size   textsize = cv::getTextSize(text, fontface, fontscale, 2, &baseline);
+-  cv::putText(out_image, text,
+-              cv::Point(det->c[0] - textsize.width / 2, det->c[1] + textsize.height / 2), fontface,
+-              fontscale, cv::Scalar(0xff, 0x99, 0), 2);
+-  return;
++  const std::vector<cv::Scalar> colors = {
++      cv::Scalar(0, 255, 0), cv::Scalar(0, 0, 255),
++      cv::Scalar(255, 0, 0), cv::Scalar(255, 255, 0)};
++  for (int i = 0; i < 4; ++i)
++  {
++    cv::circle(out_image, cv::Point(det->p[i][0], det->p[i][1]), 5, colors[i], -1);
++  }
++  cv::putText(out_image, std::to_string(det->id), cv::Point(det->c[0], det->c[1]),
++              cv::FONT_HERSHEY_SIMPLEX, 1.0, cv::Scalar(255, 153, 0), 2);
+ }
+ 
+-bool AprilTagLocalization::detect()
++const AprilTagLocalization::TagObservation *AprilTagLocalization::findObservation(
++    const std::vector<TagObservation> &observations, int id) const
+ {
+-  std_msgs::msg::Header header;
+-  // image_u8_t           *img = nullptr;
+-  cv::Mat image_mat, image_gray;
+-  /**
++  for (const auto &observation : observations)
++  {
++    if (observation.id == id)
++    {
++      return &observation;
++    }
++  }
++  return nullptr;
++}
+ 
++tf2::Transform AprilTagLocalization::makeSingleTagResult(
++    const TagObservation &observation, int &yaw_source) const
++{
++  tf2::Transform result = observation.dock_center_camera_link;
++  if (hold_baseline_yaw_on_single_ && has_baseline_yaw_)
+   {
+-    std::lock_guard<std::mutex> lock(image_mutex_);
+-    header       = current_image_->header;
+-    uint8_t *buf = new uint8_t[current_image_->data.size()];
+-    std::memcpy(buf, current_image_->data.data(), current_image_->data.size());
+-    image_u8_t im = image_u8{static_cast<int32_t>(current_image_->width),
+-                             static_cast<int32_t>(current_image_->height),
+-                             static_cast<int32_t>(current_image_->step), buf};
+-    img           = &im;
+-  }  */
++    double roll, pitch, ignored_yaw;
++    tf2::Matrix3x3(result.getRotation()).getRPY(roll, pitch, ignored_yaw);
++    tf2::Quaternion q;
++    q.setRPY(roll, pitch, last_baseline_yaw_);
++    result.setRotation(q);
++    yaw_source = 2;
++  } else
++  {
++    yaw_source = 0;
++  }
++  return result;
++}
++
++tf2::Transform AprilTagLocalization::makeEntryPose(const tf2::Transform &dock_center) const
++{
++  return dock_center * dock_center_to_entry_;
++}
++
++AprilTagLocalization::DockPerception AprilTagLocalization::fuseEnhanced(
++    const std::vector<TagObservation> &observations)
++{
++  DockPerception perception;
++  perception.tag_count = static_cast<int>(observations.size());
++  if (observations.empty())
++  {
++    return perception;
++  }
+ 
++  const auto nearest_it = std::min_element(
++      observations.begin(), observations.end(),
++      [](const TagObservation &a, const TagObservation &b) { return a.distance < b.distance; });
++  const TagObservation &nearest = *nearest_it;
++  const TagObservation *tag_a = findObservation(observations, baseline_tag_id_a_);
++  const TagObservation *tag_b = findObservation(observations, baseline_tag_id_b_);
++
++  if (tag_a != nullptr && tag_b != nullptr)
++  {
++    const tf2::Vector3 center_a = tag_a->dock_center_camera_link.getOrigin();
++    const tf2::Vector3 center_b = tag_b->dock_center_camera_link.getOrigin();
++    perception.center_diff = (center_a - center_b).length();
++
++    double ra, pa, ya, rb, pb, yb;
++    tf2::Matrix3x3(tag_a->dock_center_camera_link.getRotation()).getRPY(ra, pa, ya);
++    tf2::Matrix3x3(tag_b->dock_center_camera_link.getRotation()).getRPY(rb, pb, yb);
++    const double yaw_diff_deg =
++        std::abs(normalizeAngle(ya - yb)) / DEG_TO_RAD;
++
++    // T_tag_dock is configured. Its inverse is T_dock_tag, which is the correct
++    // representation for the known baseline in dock coordinates.
++    const tf2::Vector3 tag_a_in_dock =
++        dock_pose_ext_map_.at(baseline_tag_id_a_).inverse().getOrigin();
++    const tf2::Vector3 tag_b_in_dock =
++        dock_pose_ext_map_.at(baseline_tag_id_b_).inverse().getOrigin();
++    const tf2::Vector3 baseline_dock = tag_b_in_dock - tag_a_in_dock;
++    const tf2::Vector3 baseline_camera =
++        tag_b->tag_pose_camera_link.getOrigin() - tag_a->tag_pose_camera_link.getOrigin();
++
++    const double baseline_dock_xy = std::hypot(baseline_dock.x(), baseline_dock.y());
++    const double baseline_camera_xy =
++        std::hypot(baseline_camera.x(), baseline_camera.y());
++    const bool baseline_valid = baseline_dock_xy >= min_baseline_length_m_ &&
++                                baseline_camera_xy >= min_baseline_length_m_;
++    perception.dual_consistent =
++        perception.center_diff <= dual_tag_consistency_threshold_m_ &&
++        yaw_diff_deg <= dual_tag_yaw_consistency_deg_ && baseline_valid;
++
++    if (perception.dual_consistent)
++    {
++      tf2::Vector3 fused_position;
++      if (distance_weighted_position_)
++      {
++        const double wa = 1.0 / std::max(tag_a->distance, 1.0e-6);
++        const double wb = 1.0 / std::max(tag_b->distance, 1.0e-6);
++        fused_position = (center_a * wa + center_b * wb) / (wa + wb);
++      } else
++      {
++        fused_position = (center_a + center_b) * 0.5;
++      }
++
++      const double yaw_camera = std::atan2(baseline_camera.y(), baseline_camera.x());
++      const double yaw_dock = std::atan2(baseline_dock.y(), baseline_dock.x());
++      const double fused_yaw = normalizeAngle(
++          yaw_camera - yaw_dock + baseline_yaw_offset_deg_ * DEG_TO_RAD);
++
++      // Preserve the average roll/pitch behavior while replacing only yaw.
++      const tf2::Transform averaged = averageTransforms(
++          {tag_a->dock_center_camera_link, tag_b->dock_center_camera_link});
++      double roll, pitch, ignored_yaw;
++      tf2::Matrix3x3(averaged.getRotation()).getRPY(roll, pitch, ignored_yaw);
++      tf2::Quaternion q;
++      q.setRPY(roll, pitch, fused_yaw);
++      perception.center = tf2::Transform(q, fused_position);
++      perception.yaw_source = 1;
++      perception.valid = true;
++      last_baseline_yaw_ = fused_yaw;
++      has_baseline_yaw_ = true;
++    } else
++    {
++      perception.center = makeSingleTagResult(nearest, perception.yaw_source);
++      perception.valid = true;
++      MLOGGER_WARN("Dual-tag rejected: center_diff={}m, yaw_diff={}deg, baseline_valid={}",
++                   perception.center_diff, yaw_diff_deg, baseline_valid);
++    }
++  } else
++  {
++    perception.center = makeSingleTagResult(nearest, perception.yaw_source);
++    perception.valid = true;
++  }
++
++  perception.entry = makeEntryPose(perception.center);
++  return perception;
++}
++
++void AprilTagLocalization::publishLegacyPose(const tf2::Transform &pose)
++{
++  result_array_pose_msg_.data.resize(6);
++  transformToXYZRPY(pose,
++                    result_array_pose_msg_.data[0], result_array_pose_msg_.data[1],
++                    result_array_pose_msg_.data[2], result_array_pose_msg_.data[3],
++                    result_array_pose_msg_.data[4], result_array_pose_msg_.data[5]);
++  output_result_array_pose_publisher_->publish(result_array_pose_msg_);
++}
++
++void AprilTagLocalization::publishPerception(const DockPerception &perception)
++{
++  std_msgs::msg::Float64MultiArray msg;
++  if (!perception.valid)
++  {
++    perception_result_publisher_->publish(msg);
++    return;
++  }
++  msg.data.resize(17);
++  transformToXYZRPY(perception.center,
++                    msg.data[0], msg.data[1], msg.data[2],
++                    msg.data[3], msg.data[4], msg.data[5]);
++  transformToXYZRPY(perception.entry,
++                    msg.data[6], msg.data[7], msg.data[8],
++                    msg.data[9], msg.data[10], msg.data[11]);
++  msg.data[12] = static_cast<double>(perception.tag_count);
++  msg.data[13] = static_cast<double>(perception.yaw_source);
++  msg.data[14] = perception.dual_consistent ? 1.0 : 0.0;
++  msg.data[15] = perception.valid ? 1.0 : 0.0;
++  msg.data[16] = perception.center_diff;
++  perception_result_publisher_->publish(msg);
++}
++
++bool AprilTagLocalization::detect()
++{
++  cv::Mat image_mat;
+   {
+     std::lock_guard<std::mutex> lock(image_mutex_);
+-    header = cv_bridge_shared_->header;
+-    cv_bridge_shared_->toImageMsg();
++    if (!cv_bridge_shared_)
++    {
++      is_image_received_.store(false);
++      return false;
++    }
+     image_mat = cv_bridge_shared_->image.clone();
+     is_image_received_.store(false);
+   }
++
++  cv::Mat image_gray;
+   cv::cvtColor(image_mat, image_gray, cv::COLOR_BGR2GRAY);
+   image_u8_t img = {image_gray.cols, image_gray.rows, image_gray.cols, image_gray.data};
+-  detections_    = apriltag_detector_detect(td_ptr_, &img);
+-  // if (errno == EAGAIN)
+-  // {
+-  // MLOGGER_ERROR("Unable to create the {} threads requested, exit.\n", td_ptr_->nthreads);
+-  // return false;
+-  // }
+-  // td_ptr_->wp;
++  detections_ = apriltag_detector_detect(td_ptr_, &img);
++
+   result_array_pose_msg_.data.clear();
+-  int                         result_size = zarray_size(detections_);
+-  std::vector<tf2::Transform> result_list;
+-  for (int i = 0; i < result_size; i++)
++  const int result_size = zarray_size(detections_);
++  std::vector<tf2::Transform> original_results;
++  std::vector<TagObservation> observations;
++
++  for (int i = 0; i < result_size; ++i)
+   {
+-    apriltag_detection_t *det;
++    apriltag_detection_t *det = nullptr;
+     zarray_get(detections_, i, &det);
+-
+-    // Do stuff with detections here.
+-    // drawResult(image_mat, det);
+-
+-    // First create an apriltag_detection_info_t struct using your known parameters.
+-    apriltag_detection_info_t info;
+-    info.det     = det;
+-    info.tagsize = tag_size_;
+-    info.fx      = current_camera_intrinsics_.fx;
+-    info.fy      = current_camera_intrinsics_.fy;
+-    info.cx      = current_camera_intrinsics_.cx;
+-    info.cy      = current_camera_intrinsics_.cy;
+-    // Then call estimate_tag_pose.
+-    apriltag_pose_t pose;
+-    double          err = estimate_tag_pose(&info, &pose);
+-    if (err > 1e-3)
++    if (det == nullptr || det->hamming > max_hamming_)
+     {
+-      MLOGGER_INFO("error={}, is too large, skipping..", err);
+       continue;
+     }
+-    if (dock_pose_ext_map_.find(det->id) == dock_pose_ext_map_.end())
++    const auto offset_it = dock_pose_ext_map_.find(det->id);
++    if (offset_it == dock_pose_ext_map_.end())
+     {
+-      // 键不存在g
+-      MLOGGER_EVERY_N_WARN(10, "TAG ID {}, is not exist in config map, skipping.", det->id);
++      MLOGGER_EVERY_N_WARN(10, "TAG ID {} is not configured; skipping.", det->id);
++      continue;
+     }
+-    tf2::Transform tf = apriltagPoseToTf2(pose);
+-    tf                = camera2camera_link * tf * camera_tag2ros_ * dock_pose_ext_map_[det->id];
+-    result_list.emplace_back(tf);
++
++    apriltag_detection_info_t info{};
++    info.det = det;
++    info.tagsize = tag_size_;
++    info.fx = current_camera_intrinsics_.fx;
++    info.fy = current_camera_intrinsics_.fy;
++    info.cx = current_camera_intrinsics_.cx;
++    info.cy = current_camera_intrinsics_.cy;
++
++    apriltag_pose_t pose{};
++    const double err = estimate_tag_pose(&info, &pose);
++    if (!std::isfinite(err) || err > max_pose_error_ || pose.R == nullptr || pose.t == nullptr)
++    {
++      if (pose.R != nullptr) matd_destroy(pose.R);
++      if (pose.t != nullptr) matd_destroy(pose.t);
++      continue;
++    }
++
++    const tf2::Transform tag_pose_raw = apriltagPoseToTf2(pose);
++    matd_destroy(pose.R);
++    matd_destroy(pose.t);
++
++    const tf2::Transform tag_pose_camera_link =
++        camera2camera_link * tag_pose_raw * camera_tag2ros_;
++    const tf2::Transform dock_center = tag_pose_camera_link * offset_it->second;
++
++    original_results.push_back(dock_center);
++    observations.push_back(TagObservation{
++        det->id, tag_pose_camera_link.getOrigin().length(), err,
++        tag_pose_camera_link, dock_center});
+   }
+ 
+-  // if (!image_mat.empty())
+-  // {
+-  //   cv::imshow("result", image_mat);
+-  //   cv::waitKey(1);
+-  // }
+-  if (!result_list.empty())
++  if (use_baseline_yaw_)
+   {
+-    tf2::Transform result_tf = averageTransforms(result_list);
+-    // result_pose_stamp_.header.stamp = header.stamp;
+-    // tf2::toMsg(result_tf, result_pose_stamp_.pose);
+-    // output_result_pose_stamp_publisher_->publish(result_pose_stamp_);
+-
+-    result_array_pose_msg_.data.resize(6);
+-    transformToXYZRPY(result_tf, result_array_pose_msg_.data[0], result_array_pose_msg_.data[1],
+-                      result_array_pose_msg_.data[2], result_array_pose_msg_.data[3],
+-                      result_array_pose_msg_.data[4], result_array_pose_msg_.data[5]);
+-    output_result_array_pose_publisher_->publish(result_array_pose_msg_);
+-    MLOGGER_INFO("Final dock loc: (x, y, z), (roll, pitch, yaw): ({},{},{}),({},{},{})",
+-                 result_array_pose_msg_.data[0], result_array_pose_msg_.data[1],
+-                 result_array_pose_msg_.data[2], result_array_pose_msg_.data[3],
+-                 result_array_pose_msg_.data[4], result_array_pose_msg_.data[5]);
+-
+-    if (result_list.size() >= 2)
+-    {
+-      MLOGGER_INFO(
+-          "================================multi poses========================================");
+-      MLOGGER_INFO("Found {} valid tags:", result_list.size());
+-      for (const tf2::Transform &tf : result_list)
+-      {
+-        double ros_x, ros_y, ros_z, ros_roll, ros_pitch, ros_yaw;
+-        transformToXYZRPY(tf, ros_x, ros_y, ros_z, ros_roll, ros_pitch, ros_yaw);
+-        MLOGGER_INFO("dock loc: (x, y, z), (roll, pitch, yaw): ({},{},{}),({},{},{})", ros_x, ros_y,
+-                     ros_z, ros_roll, ros_pitch, ros_yaw);
+-      }
+-      MLOGGER_INFO(
+-          "===================================================================================");
++    const DockPerception perception = fuseEnhanced(observations);
++    if (perception.valid)
++    {
++      publishLegacyPose(perception.center);
++      publishPerception(perception);
++    } else
++    {
++      output_result_array_pose_publisher_->publish(result_array_pose_msg_);
++      publishPerception(perception);
+     }
+   } else
+   {
+-    output_result_array_pose_publisher_->publish(result_array_pose_msg_);
++    // Exact legacy behavior: average all configured valid dock-center transforms.
++    if (!original_results.empty())
++    {
++      publishLegacyPose(averageTransforms(original_results));
++    } else
++    {
++      output_result_array_pose_publisher_->publish(result_array_pose_msg_);
++    }
++    // New diagnostic topic remains empty while enhanced mode is disabled.
++    perception_result_publisher_->publish(std_msgs::msg::Float64MultiArray());
+   }
+ 
+   apriltag_detections_destroy(detections_);
+-
+-  return result_size > 0;
++  detections_ = nullptr;
++  return !observations.empty();
+ }
++
+ void AprilTagLocalization::main_loop()
+ {
+-  while (true)
++  while (running_.load() && rclcpp::ok())
+   {
+     std::unique_lock<std::mutex> lock(image_mutex_);
+-    if (!cond_var_.wait_for(lock, std::chrono::milliseconds(2000),
+-                            [&] { return is_image_received_.load(); }))
++    cond_var_.wait_for(lock, std::chrono::milliseconds(2000), [this] {
++      return is_image_received_.load() || !running_.load() || !rclcpp::ok();
++    });
++    if (!running_.load() || !rclcpp::ok())
+     {
+-      MLOGGER_WARN("New image not received yet in {}ms.", 2000);
++      break;
++    }
++    if (!is_image_received_.load())
++    {
++      MLOGGER_WARN("New image not received in 2000ms.");
+       continue;
+     }
+     lock.unlock();
+     detect();
+   }
+-  return;
+ }
++
+ int main(int argc, char *argv[])
+ {
+   MLOGGER_MODULE_INIT("logs", "perception", "apriltag_localization");
+-
+   rclcpp::init(argc, argv);
+-  AprilTagLocalization apriltag_localization_node("apriltag_node");
+-
+-  apriltag_localization_node.run();
++  {
++    AprilTagLocalization node("apriltag_node");
++    node.run();
++  }
+   rclcpp::shutdown();
+   return 0;
+-}
+\ No newline at end of file
++}

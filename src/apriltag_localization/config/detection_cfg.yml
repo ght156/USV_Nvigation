@@ -9,6 +9,7 @@ apriltag_node:
     image_topic: "/zed/zed_node/rgb/color/rect/image"
     detection_result_topic: "/apriltag_node/dock_pose"
     frame_id: camera_left_link                             # 实船相机系
+    dock_frame_id: dock_frame                              # TF 广播的 dock 坐标系名称
 
     apriltag_family_name: tag36h11
     tag_size: 2.0                   # 实船 Tag 实际打印边长(m)

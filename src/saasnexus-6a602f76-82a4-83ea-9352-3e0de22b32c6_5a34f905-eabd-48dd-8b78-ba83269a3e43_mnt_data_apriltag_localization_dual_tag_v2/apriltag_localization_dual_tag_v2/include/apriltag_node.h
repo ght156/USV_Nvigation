@@ -52,15 +52,20 @@
 #include <Eigen/Eigenvalues>
 #include <vector>
 #include <cmath>
+#include <atomic>
+#include <condition_variable>
+#include <functional>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <unordered_map>
 
 #include <geometry_msgs/msg/pose.hpp>
-#include <geometry_msgs/msg/transform_stamped.hpp>
 #include <tf2/LinearMath/Vector3.h>                // tf2::Vector3
 #include <tf2/LinearMath/Quaternion.h>             // tf2::Quaternion
 #include <tf2/LinearMath/Transform.h>              // tf2::Transform
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp> // tf2::fromMsg, tf2::toMsg
 #include <tf2/LinearMath/Transform.h>
-#include <tf2_ros/transform_broadcaster.h>
 namespace perception {
 
 struct CameraIntrinsics {
@@ -270,6 +275,24 @@ public:
   void run();
 
 private:
+  struct TagObservation {
+    int id{-1};
+    double distance{0.0};
+    double pose_error{0.0};
+    tf2::Transform tag_pose_camera_link;
+    tf2::Transform dock_center_camera_link;
+  };
+
+  struct DockPerception {
+    tf2::Transform center;
+    tf2::Transform entry;
+    int tag_count{0};
+    int yaw_source{0};       // 0=current single-tag, 1=current baseline, 2=held baseline
+    bool dual_consistent{false};
+    bool valid{false};
+    double center_diff{0.0};
+  };
+
   bool initConfig();
   bool initModel();
   bool intiNode();
@@ -279,47 +302,73 @@ private:
   void drawResult(cv::Mat &out_image, apriltag_detection_t *det);
   void main_loop();
 
+  const TagObservation *findObservation(const std::vector<TagObservation> &observations,
+                                        int id) const;
+  DockPerception fuseEnhanced(const std::vector<TagObservation> &observations);
+  tf2::Transform makeSingleTagResult(const TagObservation &observation, int &yaw_source) const;
+  tf2::Transform makeEntryPose(const tf2::Transform &dock_center) const;
+  void publishLegacyPose(const tf2::Transform &pose);
+  void publishPerception(const DockPerception &perception);
+
 private:
   rclcpp::Node::SharedPtr private_node_ptr_;
-  rclcpp::Logger          logger_;
-  const std::string       WORKSPACE_DIR;
-  std::thread             main_loop_;
-  std::mutex              camera_info_mutex_, image_mutex_;
+  rclcpp::Logger logger_;
+  const std::string WORKSPACE_DIR;
+  std::thread main_loop_;
+  std::mutex camera_info_mutex_, image_mutex_;
 
   std::string camera_info_topic_, image_topic_, detection_result_topic_;
-  double      tag_size_ = 0.5; // AprilTag的实际尺寸，单位为米
-  // sensor_msgs::msg::CameraInfo current_camera_info_;
-  std::string      current_apriltag_family_name_;
+  std::string perception_result_topic_{"/dock/perception"};
+  double tag_size_{0.5};
+  std::string current_apriltag_family_name_;
   CameraIntrinsics current_camera_intrinsics_;
-  // std::shared_ptr<sensor_msgs::msg::Image>                      current_image_;
-  cv_bridge::CvImageConstPtr                                    cv_bridge_shared_;
+  cv_bridge::CvImageConstPtr cv_bridge_shared_;
   rclcpp::Subscription<sensor_msgs::msg::CameraInfo>::SharedPtr camera_info_sub_;
-  rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr      image_sub_;
-  std::atomic<bool>                                             is_camera_info_received_ = false;
-  std::atomic<bool>                                             is_image_received_       = false;
-  apriltag_family_t                                            *tf_ptr_                  = nullptr;
-  apriltag_detector_t                                          *td_ptr_                  = nullptr;
-  zarray_t                                                     *detections_              = nullptr;
+  rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr image_sub_;
+  std::atomic<bool> is_camera_info_received_{false};
+  std::atomic<bool> is_image_received_{false};
+  std::atomic<bool> running_{true};
+  apriltag_family_t *tf_ptr_{nullptr};
+  apriltag_detector_t *td_ptr_{nullptr};
+  zarray_t *detections_{nullptr};
 
   std::function<void(apriltag_family_t *)> destory_apriltag_family_t_;
-  std::condition_variable                  cond_var_;
+  std::condition_variable cond_var_;
 
-private:
-  std::vector<int>                        tag_ids_;
+  std::vector<int> tag_ids_;
+  // Configuration semantics are preserved: T_tag_dock_center.
   std::unordered_map<int, tf2::Transform> dock_pose_ext_map_;
 
+  // Original transform chain, preserved for backward compatibility.
   const tf2::Transform camera2camera_link =
-      tf2::Transform(tf2::Matrix3x3(0, 0, 1, -1, 0, 0, 0, -1, 0), tf2::Vector3(0, 0, 0));
-
+      tf2::Transform(tf2::Matrix3x3(0, 0, 1, -1, 0, 0, 0, -1, 0),
+                     tf2::Vector3(0, 0, 0));
   const tf2::Transform camera_tag2ros_ = tf2::Transform(
-      rotation_tfmatrix_y(-M_PI_2) * rotation_tfmatrix_x(M_PI_2), tf2::Vector3(0, 0, 0));
+      rotation_tfmatrix_y(-M_PI_2) * rotation_tfmatrix_x(M_PI_2),
+      tf2::Vector3(0, 0, 0));
+
+  // Enhanced dual-tag mode. false keeps the original output algorithm.
+  bool use_baseline_yaw_{false};
+  bool hold_baseline_yaw_on_single_{true};
+  bool distance_weighted_position_{true};
+  int baseline_tag_id_a_{0};
+  int baseline_tag_id_b_{43};
+  int max_hamming_{2};
+  double max_pose_error_{1.0e-3};
+  double dual_tag_consistency_threshold_m_{0.30};
+  double dual_tag_yaw_consistency_deg_{180.0};
+  double min_baseline_length_m_{0.05};
+  double baseline_yaw_offset_deg_{0.0};
+  tf2::Transform dock_center_to_entry_{tf2::Transform::getIdentity()};
+
+  bool has_baseline_yaw_{false};
+  double last_baseline_yaw_{0.0};
 
   geometry_msgs::msg::PoseStamped result_pose_stamp_;
-  rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr output_result_array_pose_publisher_;
-
-  std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
-  std::string                                    dock_frame_id_;
-
+  rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr
+      output_result_array_pose_publisher_;
+  rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr
+      perception_result_publisher_;
   std_msgs::msg::Float64MultiArray result_array_pose_msg_;
 };
 

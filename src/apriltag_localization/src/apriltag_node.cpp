@@ -271,6 +271,11 @@ bool AprilTagLocalization::initConfig()
   {
     result_pose_stamp_.header.frame_id = private_node_ptr_->get_parameter("frame_id").as_string();
   }
+  dock_frame_id_ = "dock_frame";
+  if (private_node_ptr_->has_parameter("dock_frame_id"))
+  {
+    dock_frame_id_ = private_node_ptr_->get_parameter("dock_frame_id").as_string();
+  }
   return true;
 }
 
@@ -356,6 +361,11 @@ bool AprilTagLocalization::intiNode()
                                                                             10);
   MLOGGER_INFO("interface_msgs::msg::ApriltagPoseList Publisher topic: {}",
                detection_result_topic_.c_str());
+
+  tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(private_node_ptr_);
+  MLOGGER_INFO("TF broadcaster: {} -> {}", result_pose_stamp_.header.frame_id.c_str(),
+               dock_frame_id_.c_str());
+
   main_loop_ = std::thread(std::bind(&AprilTagLocalization::main_loop, this));
   //
   // std::string test_image_path =
@@ -548,6 +558,24 @@ bool AprilTagLocalization::detect()
                  result_array_pose_msg_.data[0], result_array_pose_msg_.data[1],
                  result_array_pose_msg_.data[2], result_array_pose_msg_.data[3],
                  result_array_pose_msg_.data[4], result_array_pose_msg_.data[5]);
+
+    // 广播 TF: camera_link -> dock_frame
+    geometry_msgs::msg::TransformStamped tf_msg;
+    tf_msg.header.stamp    = header.stamp;
+    tf_msg.header.frame_id = result_pose_stamp_.header.frame_id;
+    tf_msg.child_frame_id  = dock_frame_id_;
+
+    tf_msg.transform.translation.x = result_tf.getOrigin().x();
+    tf_msg.transform.translation.y = result_tf.getOrigin().y();
+    tf_msg.transform.translation.z = result_tf.getOrigin().z();
+
+    const tf2::Quaternion &q = result_tf.getRotation();
+    tf_msg.transform.rotation.x = q.x();
+    tf_msg.transform.rotation.y = q.y();
+    tf_msg.transform.rotation.z = q.z();
+    tf_msg.transform.rotation.w = q.w();
+
+    tf_broadcaster_->sendTransform(tf_msg);
 
     if (result_list.size() >= 2)
     {
