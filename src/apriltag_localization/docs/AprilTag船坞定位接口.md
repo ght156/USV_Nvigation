@@ -1,222 +1,66 @@
-# AprilTag 船坞定位接口
+# AprilTag船坞定位接口
 
-## 配置文件
+## tag码配置文件
 
-| profile | 路径 |
-|---------|------|
-| `sim`（launch 默认） | `config/detection_cfg_sim.yml` |
-| `real` | `config/detection_cfg.yml` |
+1. 模块配置文件路径:
+   - 实机默认: `{安装前缀}/config/detection_cfg.yml`
+   - 仿真: `{安装前缀}/config/detection_cfg_sim.yml`
 
-安装后：`install/apriltag_localization/config/`。
-
----
-
-## 坐标系说明（必读）
-
-仿真里会同时看到 **三套坐标**，参数只认其中一套：
-
-| 坐标系 | 谁在用 | 典型数值示例 |
-|--------|--------|--------------|
-| **dock 模型系** | SDF、`dock_offset`、PerformerDetector | 浮块 y=**6 / 12**，bay 中心 P 的 y=**9** |
-| **world / odom / map** | Nav2、RViz、浮标、船位显示 | 船在 bay 中心时 y≈**0**（因 `world.sdf` 里码头 `<pose y=9 yaw=π>`） |
-| **camera_link / camera_rear_link / base_link** | `/apriltag_node/dock_pose`、`usv_docking` | 由节点 + TF 自动计算（仿真归港用 **`camera_rear_link`**） |
-
-**`detection_cfg_sim.yml` 里所有 `dock_offset_*` 只按 dock 模型系标定，不要填 odom 里的 y=0。**
-
-码头 `<static>true</static>` 只表示不随 physics 移动，**不会**导致坐标系不一致。
-
-### world 与 model 的换算（当前定稿）
-
-`world.sdf` 中：
-
-```xml
-<include>
-  <uri>model://dock_2022</uri>
-  <pose>-4.0 9.0 0 0 0 3.141592653589793</pose>
-</include>
-```
-
-模型点 `(x_m, y_m)` → world：
-
-```text
-world_x = -x_m - 4
-world_y = -y_m + 9
-```
-
-| dock 模型系 | world 系（约） |
-|-------------|----------------|
-| 左浮块 y=6 | y = +3 |
-| **bay 中心 P (1.5, 9, 0.25)** | **(-5.5, 0, 0.25)** |
-| 右浮块 y=12 | y = -3 |
-
-船 spawn 在 world `(0,0)`，开到通道正中时 **odom y≈0 是正确的**，与 SDF 里 y=6/12 **不矛盾**。
-
----
-
-## 单 bay 双码布局（当前仿真）
-
-```text
-dock 模型系（俯视图，+x 为通道深度方向）
-
-  y=12  ████  placard2 / tag43
-           |
-           |  Δy = 3 m
-  y=9   ······ P  bay 中心 (1.5, 9, 0.25)
-           |
-           |  Δy = 3 m
-  y=6   ████  placard1 / tag0
-```
-
-- **一个 bay**，左右各 **一个** tag36h11（id **0** 与 **43**）。
-- 两个 `dock_offset` 均指向 **同一个 P**。
-- `tag_ids: [0, 43]`：两码同时可见时对位姿 **取平均**（降噪）；仅见一码时也能输出。
-
----
-
-## dock_offset 含义
-
-检测得到 Tag 位姿后，在 **Tag 坐标系**下再乘 `dock_offset`，得到 **bay 中心 P** 在 **`frame_id` 相机系**（仿真为 `camera_rear_link`）下的位姿。
-
-```text
-Tag 检测 → × dock_offset（Tag 系）→ bay 中心 P → 发布 /apriltag_node/dock_pose
-```
-
-| 字段 | 单位 | 含义 |
-|------|------|------|
-| `dock_offset_x/y/z` | m | Tag 中心 → P 的平移（**Tag 系**表达） |
-| `dock_offset_roll/pitch/yaw` | deg | 同上旋转（节点内部转 rad） |
-
-左右 tag 的 `dock_offset_x` **符号相反**（±3.0），`y/z` 与姿态角相同——这是 Tag 安装镜像导致的，**不是**写错。
-
-### 当前定稿数值（经 SDF + 节点坐标链重算）
-
-节点内变换：`T = camera2camera_link × T_det × camera_tag2ros_ × dock_offset`。  
-**`dock_offset` 写在 `camera_tag2ros_` 之后**，不能直接把 dock 模型系里的 Δx/Δy 填进 yaml（旧值 ±3 / -1.52 / -4.52 / roll±90° 会导致 tag0 与 tag43 算出不同 bay 中心，单码 x≈13 vs 6、双码平均≈9）。
-
-bay 中心 **P = (1.5, 9, 0.25)**，placard1/2 链式 pose 见 `dock_2022/model.sdf`：
-
-| Tag | `dock_offset_x` | `dock_offset_y` | `dock_offset_z` | roll | pitch | yaw |
-|-----|---------------|-----------------|-----------------|------|-------|-----|
-| id **0**（y=6） | **-4.52** | **-3.0** | **2.52** | **-180°** | 0° | 0° |
-| id **43**（y=12） | **-4.52** | **+3.0** | **2.52** | **-180°** | 0° | 0° |
-
-左右 tag 仅 **`dock_offset_y` 符号相反**；改 SDF 后须用 [`scripts/compute_dock_offset_sim.py`](../scripts/compute_dock_offset_sim.py) 重算。
-
-改 SDF 里 placard / tag pose 或 P 后，须 **整链重算**（见下文「重算步骤」）。
-
----
-
-## 参数样例（`detection_cfg_sim.yml`）
-
+配置文件参数及解释如下：
 ```yaml
+# config/detection_cfg.yml
 apriltag_node:
   ros__parameters:
-    camera_info_topic: "/roboboat/sensors/camera_rear/camera_info"
-    image_topic: "/roboboat/sensors/camera_rear/image"
-    detection_result_topic: "/apriltag_node/dock_pose"
-    frame_id: camera_rear_link
-    dock_frame_id: dock_frame        # TF 广播的 dock 坐标系名称（默认 dock_frame）
-    apriltag_family_name: tag36h11
-    tag_size: 0.5                    # 与 model.sdf plane 边长一致
-    tag_ids: [0, 43]
-
-    tag_0:
-      dock_offset_x: -4.52
-      dock_offset_y: -3.0
-      dock_offset_z: 2.52
-      dock_offset_roll: -180.0
-      dock_offset_pitch: 0.0
-      dock_offset_yaw: 0.0
-
-    tag_43:
-      dock_offset_x: -4.52
-      dock_offset_y: 3.0
-      dock_offset_z: 2.52
-      dock_offset_roll: -180.0
-      dock_offset_pitch: 0.0
-      dock_offset_yaw: 0.0
+    camera_info_topic: "/zed/zed_node/rgb/color/rect/camera_info" # RGB图对应的相机内参topic
+    image_topic: "/zed/zed_node/rgb/color/rect/image" # RGB图像topic
+    detection_objects_topic: "/apriltag_node/detections"  # DetectionObjList（逐 tag + 融合船坞）
+    frame_id: camera_left_link                             # TF parent / DetectionObjList.header.frame_id
+    dock_frame_id: dock_frame                              # 融合船坞 TF child
+    apriltag_family_name: tag36h11 # AprilTag的类型，tag36h11、tag25h9、tagCircle21h7、tagCircle49h12、tagStandard41h12、tagStandard52h13、tagCustom48h12
+    tag_size: 0.1 # AprilTag码的实际物理尺寸，单位为m
+    tag_ids: [0, 1] # tag码的唯一ID号，int类型，可自定义配置 tag_ids，支持多个，最少配置一个码
+    #参数命名必须包含 tag_{tag_id}码配置船坞至二维码的距离/角度参数
+    tag_0: # tag id为0的二维码中心至船坞中心的距离/角度参数
+      dock_offset_x: 1.0 #单位m
+      dock_offset_y: -2.0 #单位m
+      dock_offset_z: 0.0 #单位m
+      dock_offset_roll: 0.0 #单位:度
+      dock_offset_pitch: 0.0 #单位:度
+      dock_offset_yaw: 0.0 #单位:度
+    tag_1: # tag id为1的的二维码中心至船坞中心的距离/角度参数
+      dock_offset_x: 0.0 #单位m
+      dock_offset_y: 0.0 #单位m
+      dock_offset_z: 0.0 #单位m
+      dock_offset_roll: 0.0 #单位:度
+      dock_offset_pitch: 0.0 #单位:度
+      dock_offset_yaw: 0.0 #单位角:度
 ```
 
----
+2. Apriltag船坞定义配置文件使用样例
+    >a. 假设船坞设置2个Apriltag码, 在[Aruco & AprilTag Generator](https://tagsgen.top/)中 选择确定个码的`family`和`tag_id`，例如选择 `tag36h11`，2个码ID分别选择`0`和`1`，码大小`0.5m`。
+    b. 修改文件中的码信息：
+    `apriltag_family_name: tag36h11`
+    `tag_size: 0.5`
+    `tag_ids:[0,1]`
+    c. 每个码至船坞中心距离/角度参数配置，根据实际安装填写:
+    `dock_offset_x`、`dock_offset_y`、`dock_offset_z`、`dock_offset_roll`、`dock_offset_pitch`、`dock_offset_yaw`配置
+    d. 启动相机驱动节点，发出相机内参和相机RGB图像话题
+    e. 启动二维码定位节点：
+       - 实机: `ros2 launch apriltag_localization apriltag_localization.launch.py`
+       - 仿真: `ros2 launch apriltag_localization apriltag_localization.launch.py params_file:=<install_prefix>/config/detection_cfg_sim.yml`
+       - 可视化: 追加 `rviz:=true`（Fixed Frame 需与 yaml 中 `frame_id` 一致；仿真请改为 `camera_rear_link`，Image topic 改为后向相机）
 
-## 使用流程
+3. 输出 TF（主接口 + 可视化）
+   - parent: `frame_id`（如 `camera_left_link`）
+   - Tag 系 child: `apriltag_{id}`（码中心，经 `camera_tag2ros_`，**不含** dock_offset）
+   - 融合船坞 child: `dock_frame_id`（默认 `dock_frame`）
+   - 逐码船坞 child: `{dock_frame_id}_tag_{id}`（如 `dock_frame_tag_0`，含该码 dock_offset）
+   - 关系：`T(frame→dock_from_tag) = T(frame→apriltag_id) * dock_offset`
+   - 仅在有有效检测时广播；丢检不发 TF
+   - 实现：`publishDetectionObjListAndTf()` 同时发 Tag TF 与 DetectionObjList 中的 dock TF
 
-1. 贴图须为 **tag36h11**（[tagsgen.top](https://tagsgen.top/)），与 `tag_size`、SDF plane 边长一致。
-2. 改 SDF 后按「重算步骤」更新 `tag_size` 与各 `dock_offset_*`。
-3. Gazebo + bridge 发布相机话题。
-4. 启动节点：
-
-```bash
-ros2 launch apriltag_localization apriltag_localization.launch.py profile:=sim use_sim_time:=true
-```
-
----
-
-## 输出
-
-### 话题输出
-
-| 项 | 值 |
-|----|-----|
-| 话题 | `/apriltag_node/dock_pose` |
-| 类型 | `std_msgs/msg/Float64MultiArray` |
-| 内容 | **bay 中心 P** 在 **`frame_id`**（仿真 **`camera_rear_link`**）下 `(x, y, z, roll, pitch, yaw)` |
-| 单位 | xyz：**m**；rpy：**rad** |
-
-无 tag 时发布 `data: []`（节点在跑，只是未检测到）。
-
-### TF 广播
-
-节点在每次有效检测后同时广播一条 TF 变换：
-
-| 项 | 值 |
-|----|-----|
-| parent frame | `frame_id` 配置值（仿真 `camera_rear_link`，实船 `camera_left_link`） |
-| child frame | `dock_frame_id` 配置值（默认 `dock_frame`） |
-| 内容 | bay 中心在相机系下的位姿（与 Float64MultiArray 相同，不求逆） |
-| 时间戳 | 与图像帧一致 |
-
-**用途：** 下游节点（如 `usv_docking`）可通过 TF 直接查询 `dock_frame → base_link`，获得船体在船坞坐标系下的位姿，无需手动变换：
-
-```bash
-# 查看船在 dock 坐标系下的位姿
-ros2 run tf2_ros tf2_echo dock_frame base_link
-```
-
-TF2 自动利用 `base_link → camera_rear_link`（固定外参）+ `camera_rear_link → dock_frame`（本节点广播）完成反算。
-
-> **注意：** 无检测时不广播 TF，`dock_frame` 在 TF 树中会超时消失。下游节点需处理 TF 查询失败的情况。
-
----
-
-## 标定验证
-
-1. 在 Gazebo 将船开到 **通道几何中心**（world 约 **x=-5.5, y=0**）。
-2. 启动 `usv_docking` 后看 `/dock/status`：`x_base`, `y_base`, `yaw_base` 应接近 **0**。
-3. 若系统性偏差 → 微调 `dock_offset` 或检查 `tag_size` / SDF pose，**不要**用 odom 坐标直接填 yaml。
-
----
-
-## 重算 dock_offset 步骤
-
-1. 在 **dock 模型系** 定 bay 中心 **P**（当前 bay2：**(1.5, 9, 0.25)**）。
-2. 由 SDF 链式 pose 得各 Tag 在 dock 系下的 `T_dock_tag`。
-3. **不要**直接把 dock 系 `P−Tag` 填 yaml；须按节点乘法顺序求  
-   `dock_offset = inv(camera_tag2ros_) × inv(T_det) × inv(camera2camera_link) × T_cam_P`  
-   （理想检测下 `T_det = inv(camera2camera_link) × T_cam_tag`）。  
-4. 或运行：`python3 src/apriltag_localization/scripts/compute_dock_offset_sim.py`
-5. `colcon build --packages-select apriltag_localization` 并重启节点。
-
----
-
-## 下游：归港入泊（usv_docking）
-
-| 文档 | 说明 |
-|------|------|
-| [`../usv_docking/README.md`](../../usv_docking/README.md) | 编译、话题、联调 |
-| [`../../docs/usv_docking任务规划.md`](../../docs/usv_docking任务规划.md) | 状态机 |
-| [`../../docs/仿真码头与AprilTag配置.md`](../../docs/仿真码头与AprilTag配置.md) | world 布局与联调终端 |
-
-`/apriltag_node/dock_pose` 经 TF（仿真 **`camera_rear_link` → `base_link`**）后由 `usv_docking` 控制；仿真 `frame_id` 须与 URDF 中**归港相机**帧一致（当前 **`camera_rear_link`**）。
-
-节点同时广播 `camera_rear_link → dock_frame` TF，下游也可直接查询 `dock_frame → base_link` 获得船在船坞系下的位姿（x/y/yaw），用于中轴线对准判断。详见 [实船Tag安装与船坞坐标系标定](实船Tag安装与船坞坐标系标定.md)。
+4. 输出逐 tag + 融合检测结果
+话题：`/apriltag_node/detections`（可通过配置文件 `detection_objects_topic` 修改）
+类型 `m_common::msg::DetectionObjList`
+`header.frame_id` 与 `frame_id` 参数一致；`objects[]` 中每个有效 tag 一条，另追加融合项 `apriltag:dock_fused`（`class_id=-1`）。未在 `tag_ids`/dock_offset 中配置的 id 会被跳过。
+旧接口 `/apriltag_node/dock_pose`（`Float64MultiArray`）已移除，请改用 TF。

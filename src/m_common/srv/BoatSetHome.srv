@@ -1,0 +1,7 @@
+# decision → boat_control: 设置 Home 点
+float64 lat
+float64 lon
+float32 alt
+---
+int32 result
+string msg

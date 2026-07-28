@@ -73,6 +73,18 @@ public:
   std::optional<std::size_t> find_channel(const std::string & key) const;
   std::uint64_t pushed_frames(std::size_t stream_idx) const;
 
+  /// 该路 rtspclientsink 管线是否仍在 PLAYING 且未 pause、未 broken
+  bool stream_push_healthy(const std::string & mount_path) const;
+
+  /// pipeline 仍存在且未 broken（含 pause 状态，用于判断能否直接恢复）
+  bool stream_push_session_exists(const std::string & mount_path) const;
+
+  /// 该路是否处于 pause（仅丢弃帧，pipeline 可能仍在）
+  bool stream_push_paused(const std::string & mount_path) const;
+
+  /// 销毁该路 pipeline（会话 broken 或需强制重建时）
+  bool stop_stream_push(const std::string & mount_path);
+
 private:
   class Impl;
   std::unique_ptr<Impl> impl_;

@@ -1,0 +1,76 @@
+<?xml version="1.0"?>
+<!--
+  USV 整车模型（工作空间级共享 URDF，归属顶层公共包 m_common）。
+
+  设计目标：
+    - 作为全工作空间唯一的机器人描述来源，供 robot_state_publisher 加载，
+      发布 base_link → 各传感器 link 的静态 TF（取代手写的 static_transform_*.yaml）。
+    - 任意包均可经 get_package_share_directory('m_common')/urdf/usv.xacro 引用。
+
+  外参默认值复制自 USV_NAV/workspace_ros/config/static_transform_real_boat.yaml，
+  真机请按外参标定结果通过下方 xacro:arg / property 覆盖，勿散落到各处重复维护。
+-->
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="usv">
+
+  <!-- ======================= 可覆盖参数（外参，单位 m / rad） ======================= -->
+  <!-- base_link → livox_frame -->
+  <xacro:property name="livox_xyz"  value="0.5 0.0 0.3"/>
+  <xacro:property name="livox_rpy"  value="0.0 0.0 0.0"/>
+  <!-- base_link → imu_link -->
+  <xacro:property name="imu_xyz"    value="0.325 0.0 0.25"/>
+  <xacro:property name="imu_rpy"    value="0.0 0.0 0.0"/>
+  <!-- base_link → gps_link -->
+  <xacro:property name="gps_xyz"    value="0.325 0.0 0.25"/>
+  <xacro:property name="gps_rpy"    value="0.0 0.0 0.0"/>
+  <!-- base_link → camera_link -->
+  <xacro:property name="camera_xyz" value="0.25 0.0 0.35"/>
+  <xacro:property name="camera_rpy" value="0.0 0.0 0.0"/>
+
+  <!-- 船体外形（仅用于 RViz 可视化，可按实际尺寸修改；不影响 TF/导航） -->
+  <xacro:property name="hull_length" value="1.6"/>
+  <xacro:property name="hull_width"  value="0.9"/>
+  <xacro:property name="hull_height" value="0.3"/>
+
+  <material name="usv_hull_gray">
+    <color rgba="0.4 0.45 0.5 1.0"/>
+  </material>
+  <material name="usv_sensor_orange">
+    <color rgba="0.9 0.5 0.1 1.0"/>
+  </material>
+
+  <!-- ============================== 复用宏：传感器 link ============================== -->
+  <!-- 生成一个传感器 link 及其相对 base_link 的 fixed joint -->
+  <xacro:macro name="sensor_frame" params="name xyz rpy">
+    <link name="${name}">
+      <visual>
+        <geometry>
+          <box size="0.06 0.06 0.06"/>
+        </geometry>
+        <material name="usv_sensor_orange"/>
+      </visual>
+    </link>
+    <joint name="base_link_to_${name}" type="fixed">
+      <parent link="base_link"/>
+      <child link="${name}"/>
+      <origin xyz="${xyz}" rpy="${rpy}"/>
+    </joint>
+  </xacro:macro>
+
+  <!-- ================================= base_link ================================= -->
+  <link name="base_link">
+    <visual>
+      <origin xyz="0 0 ${hull_height/2}" rpy="0 0 0"/>
+      <geometry>
+        <box size="${hull_length} ${hull_width} ${hull_height}"/>
+      </geometry>
+      <material name="usv_hull_gray"/>
+    </visual>
+  </link>
+
+  <!-- ================================ 传感器坐标系 ================================ -->
+  <xacro:sensor_frame name="livox_frame" xyz="${livox_xyz}"  rpy="${livox_rpy}"/>
+  <xacro:sensor_frame name="imu_link"    xyz="${imu_xyz}"    rpy="${imu_rpy}"/>
+  <xacro:sensor_frame name="gps_link"    xyz="${gps_xyz}"    rpy="${gps_rpy}"/>
+  <xacro:sensor_frame name="camera_link" xyz="${camera_xyz}" rpy="${camera_rpy}"/>
+
+</robot>

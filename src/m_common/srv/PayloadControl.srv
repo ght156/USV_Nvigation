@@ -1,0 +1,27 @@
+# 载荷控制（控制-15 payload_control，摄像头 payload_type=1）
+# 由 mqtt_bridgev2 解析云端 payload_control 后调用 /decision/payload_control。
+# 协议见「无人船上云接口文档」§4.2.8。
+
+# 摄像头标识
+string camera_id
+
+# 云台三轴点动速率，取值 -1 / 0 / 1（协议：roll_rate 恒 0，上下→pitch，左右→yaw）
+int8 roll_rate
+int8 pitch_rate
+int8 yaw_rate
+
+# 变倍意图：has_zoom=false 表示本帧不含 zoom
+bool  has_zoom
+float32 zoom
+
+# 雨刷意图：has_wiper=false 表示本帧不含 wiper；wiper=true 开、false 关
+bool has_wiper
+bool wiper
+
+# 回中：true 表示本帧为「回中」帧（应独占，不与其它键混用）
+bool reset
+---
+# 结果码：0 成功；1001 参数错误；1006 不支持；1007 状态不允许；其它见协议附录 C
+# 点动/变焦回「受理结果」（即时）；雨刷/回中回「真实硬件结果」（延迟应答）
+int32 result
+string msg

@@ -1,33 +1,26 @@
-# =============================================================================
-# 实船专用 — apriltag_localization（ZED 相机）
-# dock_offset 几何与 dock_2022 一致；tag_size 须为实船打印边长
-# =============================================================================
+# config/my_node_params.yaml
 apriltag_node:
   ros__parameters:
-    # 订阅（ZED RGB  rect 话题）
-    camera_info_topic: "/zed/zed_node/rgb/color/rect/camera_info"
-    image_topic: "/zed/zed_node/rgb/color/rect/image"
-    detection_result_topic: "/apriltag_node/dock_pose"
-    frame_id: camera_left_link                             # 实船相机系
-    dock_frame_id: dock_frame                              # TF 广播的 dock 坐标系名称
-
-    apriltag_family_name: tag36h11
-    tag_size: 2.0                   # 实船 Tag 实际打印边长(m)
-
-    tag_ids: [0, 43]
-
-    tag_0:
-      dock_offset_x: -4.52
-      dock_offset_y: -3.0
-      dock_offset_z: 2.52
-      dock_offset_roll: -180.0
-      dock_offset_pitch: 0.0
-      dock_offset_yaw: 0.0
-
-    tag_43:
-      dock_offset_x: -4.52
-      dock_offset_y: 3.0
-      dock_offset_z: 2.52
-      dock_offset_roll: -180.0
-      dock_offset_pitch: 0.0
-      dock_offset_yaw: 0.0
+    camera_info_topic: "/zed/zed_node/rgb/color/rect/camera_info" # RGB图对应的相机内参topic
+    image_topic: "/zed/zed_node/rgb/color/rect/image" # RGB图像topic
+    detection_objects_topic: "/apriltag_node/detections"  # 输出topic，类型 m_common::msg::DetectionObjList
+    frame_id: camera_left_link                             # TF parent / DetectionObjList.header.frame_id
+    dock_frame_id: dock_frame                              # 融合船坞 TF child；逐 tag 为 {dock_frame_id}_tag_{id}
+    apriltag_family_name: tag36h11 # AprilTag的类型，tag36h11、tag25h9、tagCircle21h7、tagCircle49h12、tagStandard41h12、tagStandard52h13、tagCustom48h12
+    tag_size: 0.3 # AprilTag码的实际物理尺寸，单位为m
+    tag_ids: [0, 1] # tag码的唯一ID号，int类型，可自定义配置 tag_ids，支持多个，最少配置一个码
+    #参数命名必须包含 tag_{tag_id}码配置船坞至二维码的距离/角度参数
+    tag_0: # tag id为0的二维码中心至船坞中心的距离/角度参数
+      dock_offset_x: 0.0 #单位m
+      dock_offset_y: 1.0 #单位m
+      dock_offset_z: 0.0 #单位m
+      dock_offset_roll: 0.0 #单位:度
+      dock_offset_pitch: 0.0 #单位:度
+      dock_offset_yaw: 0.0 #单位:度
+    tag_1: # tag id为1的的二维码中心至船坞中心的距离/角度参数
+      dock_offset_x: 0.0 #单位m
+      dock_offset_y: -1.0 #单位m
+      dock_offset_z: 0.0 #单位m
+      dock_offset_roll: 0.0 #单位:度
+      dock_offset_pitch: 0.0 #单位:度
+      dock_offset_yaw: 0.0 #单位角:度

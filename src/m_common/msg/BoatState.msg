@@ -1,0 +1,6 @@
+# boat_control → decision: 船核心状态(周期发布)
+# decision 用它判 armed / mode / GPS 定位质量,并据 stamp 做掉线检测。
+builtin_interfaces/Time stamp
+bool   armed
+string mode               # AUTO / MANUAL / HOLD / RTL ...
+uint8  gps_fix_type       # MAVLink GPS_FIX_TYPE 语义:0=no fix,2=2D,3=3D,...

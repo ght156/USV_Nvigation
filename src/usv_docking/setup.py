@@ -49,7 +49,6 @@ setup(
     entry_points={
         "console_scripts": [
             "docking_controller = usv_docking.docking_controller:main",
-            "tf_docking_node = usv_docking.tf_docking_node:main",
         ],
     },
 )

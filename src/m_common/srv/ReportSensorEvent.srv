@@ -1,0 +1,10 @@
+# 传感器监测节点在确认故障发生/恢复后调用。
+# enabled=true: status 必须为 3，fault_code 必须为非 0。
+# enabled=false: status 必须为 1 或 2，fault_code 必须是本次真正恢复的原故障码。
+bool enabled
+string type
+uint8 status
+int32 fault_code
+---
+int32 result
+string msg

@@ -68,16 +68,24 @@ public:
     if (!cap_.isOpened() && !reopen_locked()) {
       return false;
     }
-    if (cap_.read(frame)) {
+    if (cap_.read(frame) && !frame.empty()) {
       last_frame_time_ms_ = now_ms();
       return true;
     }
     const int attempts = cfg_.max_reconnect_attempts < 0 ? 0 : cfg_.max_reconnect_attempts;
+    const int min_interval_ms = std::max(0, cfg_.reconnect_interval_ms);
     for (int i = 0; i < attempts; ++i) {
+      if (min_interval_ms > 0 && last_reconnect_attempt_ms_ != 0U) {
+        const std::uint64_t elapsed = now_ms() - last_reconnect_attempt_ms_;
+        if (elapsed < static_cast<std::uint64_t>(min_interval_ms)) {
+          break;
+        }
+      }
+      last_reconnect_attempt_ms_ = now_ms();
       if (!reopen_locked()) {
         continue;
       }
-      if (cap_.read(frame)) {
+      if (cap_.read(frame) && !frame.empty()) {
         last_frame_time_ms_ = now_ms();
         return true;
       }
@@ -132,6 +140,7 @@ private:
   cv::VideoCapture cap_;
   std::string opened_url_;
   std::uint64_t last_frame_time_ms_ = 0;
+  std::uint64_t last_reconnect_attempt_ms_ = 0;
 };
 
 RtspClient::RtspClient() : impl_(std::make_unique<Impl>()) {}

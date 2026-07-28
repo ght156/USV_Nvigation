@@ -43,8 +43,6 @@
 
 #include "apriltag/apriltag_pose.h"
 
-#include <std_msgs/msg/float64_multi_array.h>
-#include <std_msgs/msg/float64_multi_array.hpp>
 #define HAMM_HIST_MAX 10
 
 #include <Eigen/Core>
@@ -52,14 +50,15 @@
 #include <Eigen/Eigenvalues>
 #include <vector>
 #include <cmath>
+#include <memory>
 
 #include <geometry_msgs/msg/pose.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
+#include <m_common/msg/detection_obj_list.hpp>
 #include <tf2/LinearMath/Vector3.h>                // tf2::Vector3
 #include <tf2/LinearMath/Quaternion.h>             // tf2::Quaternion
 #include <tf2/LinearMath/Transform.h>              // tf2::Transform
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp> // tf2::fromMsg, tf2::toMsg
-#include <tf2/LinearMath/Transform.h>
 #include <tf2_ros/transform_broadcaster.h>
 namespace perception {
 
@@ -277,6 +276,9 @@ private:
   void imageCallback(const sensor_msgs::msg::Image::SharedPtr msg);
   bool detect();
   void drawResult(cv::Mat &out_image, apriltag_detection_t *det);
+  void publishDetectionObjListAndTf(
+      const m_common::msg::DetectionObjList                     &detection_obj_list,
+      const std::vector<geometry_msgs::msg::TransformStamped> &tag_transforms);
   void main_loop();
 
 private:
@@ -286,7 +288,9 @@ private:
   std::thread             main_loop_;
   std::mutex              camera_info_mutex_, image_mutex_;
 
-  std::string camera_info_topic_, image_topic_, detection_result_topic_;
+  std::string camera_info_topic_, image_topic_, detection_objects_topic_;
+  std::string frame_id_{"camera_link"};
+  std::string dock_frame_id_{"dock_frame"};
   double      tag_size_ = 0.5; // AprilTag的实际尺寸，单位为米
   // sensor_msgs::msg::CameraInfo current_camera_info_;
   std::string      current_apriltag_family_name_;
@@ -314,13 +318,8 @@ private:
   const tf2::Transform camera_tag2ros_ = tf2::Transform(
       rotation_tfmatrix_y(-M_PI_2) * rotation_tfmatrix_x(M_PI_2), tf2::Vector3(0, 0, 0));
 
-  geometry_msgs::msg::PoseStamped result_pose_stamp_;
-  rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr output_result_array_pose_publisher_;
-
-  std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
-  std::string                                    dock_frame_id_;
-
-  std_msgs::msg::Float64MultiArray result_array_pose_msg_;
+  rclcpp::Publisher<m_common::msg::DetectionObjList>::SharedPtr output_detection_objects_publisher_;
+  std::unique_ptr<tf2_ros::TransformBroadcaster>                tf_broadcaster_;
 };
 
 } // namespace perception

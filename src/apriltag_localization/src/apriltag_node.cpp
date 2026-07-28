@@ -1,7 +1,9 @@
 #include "apriltag_node.h"
 #include "ament_index_cpp/get_package_prefix.hpp"
 #include "ament_index_cpp/get_package_share_directory.hpp"
+#include <algorithm>
 #include <filesystem>
+#include <fmt/format.h>
 #include <opencv2/opencv.hpp>
 // 1. 引入占位符 `_1`
 #if X86_DEBUG_VIEW
@@ -97,6 +99,82 @@ void transformToXYZRPY(const tf2::Transform &transform,
   tf2::Quaternion q = transform.getRotation();
   tf2::Matrix3x3(q).getRPY(roll, pitch, yaw);
 }
+
+m_common::msg::DetectionObj makeAprilTagDetectionObj(const apriltag_detection_t *det,
+                                                      double                      pose_error,
+                                                      const tf2::Transform       &dock_tf,
+                                                      const std::string            &family,
+                                                      float                         tag_size)
+{
+  m_common::msg::DetectionObj obj;
+  obj.source     = m_common::msg::DetectionObj::SOURCE_APRILTAG;
+  obj.class_id   = det->id;
+  obj.label_name = fmt::format("apriltag:{}:{}", family, det->id);
+  obj.confidence = std::min(1.0f, static_cast<float>(det->decision_margin) / 100.0f);
+  obj.track_id   = -1;
+
+  obj.has_bbox = true;
+  float min_x  = static_cast<float>(det->p[0][0]);
+  float max_x  = min_x;
+  float min_y  = static_cast<float>(det->p[0][1]);
+  float max_y  = min_y;
+  for (int j = 0; j < 4; ++j)
+  {
+    min_x = std::min(min_x, static_cast<float>(det->p[j][0]));
+    max_x = std::max(max_x, static_cast<float>(det->p[j][0]));
+    min_y = std::min(min_y, static_cast<float>(det->p[j][1]));
+    max_y = std::max(max_y, static_cast<float>(det->p[j][1]));
+  }
+  obj.bbox_x      = min_x;
+  obj.bbox_y      = min_y;
+  obj.bbox_width  = max_x - min_x;
+  obj.bbox_height = max_y - min_y;
+
+  obj.has_pose = true;
+  tf2::toMsg(dock_tf, obj.pose.pose);
+  std::fill(obj.pose.covariance.begin(), obj.pose.covariance.end(), 0.0);
+  obj.size.x = tag_size;
+  obj.size.y = tag_size;
+  obj.size.z = 0.0;
+
+  obj.has_velocity = false;
+
+  obj.apriltag.family          = family;
+  obj.apriltag.id              = det->id;
+  obj.apriltag.hamming         = det->hamming;
+  obj.apriltag.decision_margin = static_cast<float>(det->decision_margin);
+  obj.apriltag.pose_error      = pose_error;
+  obj.apriltag.tag_size        = tag_size;
+  obj.apriltag.center.x        = det->c[0];
+  obj.apriltag.center.y        = det->c[1];
+  obj.apriltag.center.z         = 0.0;
+  obj.apriltag.corners.resize(4);
+  for (int j = 0; j < 4; ++j)
+  {
+    obj.apriltag.corners[j].x = det->p[j][0];
+    obj.apriltag.corners[j].y = det->p[j][1];
+    obj.apriltag.corners[j].z = 0.0;
+  }
+
+  return obj;
+}
+
+m_common::msg::DetectionObj makeFusedDockDetectionObj(const tf2::Transform &dock_tf)
+{
+  m_common::msg::DetectionObj obj;
+  obj.source     = m_common::msg::DetectionObj::SOURCE_APRILTAG;
+  obj.class_id   = -1;
+  obj.label_name = "apriltag:dock_fused";
+  obj.confidence = 1.0f;
+  obj.track_id   = -1;
+  obj.has_bbox   = false;
+  obj.has_pose   = true;
+  tf2::toMsg(dock_tf, obj.pose.pose);
+  std::fill(obj.pose.covariance.begin(), obj.pose.covariance.end(), 0.0);
+  obj.has_velocity = false;
+  return obj;
+}
+
 /**
  * 将 apriltag_pose_t 转换为 tf2::Transform
  * @param pose AprilTag 检测得到的位姿（包含旋转矩阵 R 和平移向量 t）
@@ -191,21 +269,19 @@ AprilTagLocalization::~AprilTagLocalization()
 
 bool AprilTagLocalization::initConfig()
 {
-  // private_node_ptr_->declare_parameter<std::string>("camera_info_topic", "");
-  // private_node_ptr_->declare_parameter<std::string>("image_topic", "");
-  // private_node_ptr_->declare_parameter<std::string>("apriltag_family_name", "tag25h9");
-  // private_node_ptr_->declare_parameter<std::string>("detection_result_topic", "");
-  // private_node_ptr_->declare_parameter<double>("tag_size", 500.0);
-  // private_node_ptr_->declare_parameter<std::vector<int64_t>>("tag_ids", {});
-
-  camera_info_topic_      = private_node_ptr_->get_parameter("camera_info_topic").as_string();
-  image_topic_            = private_node_ptr_->get_parameter("image_topic").as_string();
-  detection_result_topic_ = private_node_ptr_->get_parameter("detection_result_topic").as_string();
-  tag_size_               = private_node_ptr_->get_parameter("tag_size").as_double();
+  camera_info_topic_ = private_node_ptr_->get_parameter("camera_info_topic").as_string();
+  image_topic_       = private_node_ptr_->get_parameter("image_topic").as_string();
+  detection_objects_topic_ = "/apriltag_node/detections";
+  if (private_node_ptr_->has_parameter("detection_objects_topic"))
+  {
+    detection_objects_topic_ =
+        private_node_ptr_->get_parameter("detection_objects_topic").as_string();
+  }
+  tag_size_ = private_node_ptr_->get_parameter("tag_size").as_double();
   current_apriltag_family_name_ =
       private_node_ptr_->get_parameter("apriltag_family_name").as_string();
 
-  if (camera_info_topic_.empty() || image_topic_.empty() || detection_result_topic_.empty())
+  if (camera_info_topic_.empty() || image_topic_.empty())
   {
     MLOGGER_ERROR("One or more parameters are empty! Please check the configuration.");
     return false;
@@ -266,16 +342,17 @@ bool AprilTagLocalization::initConfig()
         rpyToTransform(dock_offset_x_val, dock_offset_y_val, dock_offset_z_val,
                        dock_offset_roll_val, dock_offset_pitch_val, dock_offset_yaw_val);
   }
-  result_pose_stamp_.header.frame_id = "camera_link";
+  frame_id_ = "camera_link";
   if (private_node_ptr_->has_parameter("frame_id"))
   {
-    result_pose_stamp_.header.frame_id = private_node_ptr_->get_parameter("frame_id").as_string();
+    frame_id_ = private_node_ptr_->get_parameter("frame_id").as_string();
   }
   dock_frame_id_ = "dock_frame";
   if (private_node_ptr_->has_parameter("dock_frame_id"))
   {
     dock_frame_id_ = private_node_ptr_->get_parameter("dock_frame_id").as_string();
   }
+  MLOGGER_INFO("frame_id: {}, dock_frame_id: {}", frame_id_.c_str(), dock_frame_id_.c_str());
   return true;
 }
 
@@ -356,26 +433,17 @@ bool AprilTagLocalization::intiNode()
       std::bind(&AprilTagLocalization::imageCallback, this, std::placeholders::_1));
   MLOGGER_INFO("Subscribed to image topic: {}", image_topic_.c_str());
 
-  output_result_array_pose_publisher_ =
-      private_node_ptr_->create_publisher<std_msgs::msg::Float64MultiArray>(detection_result_topic_,
-                                                                            10);
-  MLOGGER_INFO("interface_msgs::msg::ApriltagPoseList Publisher topic: {}",
-               detection_result_topic_.c_str());
+  output_detection_objects_publisher_ =
+      private_node_ptr_->create_publisher<m_common::msg::DetectionObjList>(detection_objects_topic_,
+                                                                           10);
+  MLOGGER_INFO("m_common::msg::DetectionObjList publisher topic: {}",
+               detection_objects_topic_.c_str());
 
   tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(private_node_ptr_);
-  MLOGGER_INFO("TF broadcaster: {} -> {}", result_pose_stamp_.header.frame_id.c_str(),
+  MLOGGER_INFO("TF broadcaster ready: parent={}, fused child={}", frame_id_.c_str(),
                dock_frame_id_.c_str());
 
   main_loop_ = std::thread(std::bind(&AprilTagLocalization::main_loop, this));
-  //
-  // std::string test_image_path =
-  //     "/home/jzw/MyWorkscpae/HIK/ros2_perception/src/yolo-inference/data/bus.jpg";
-  // cv::Mat mat = cv::imread(test_image_path);
-  // std_msgs::msg::Header header;
-  // std::string encoding = "bgr8";
-  // sensor_msgs::msg::Image::SharedPtr msg = cv_bridge::CvImage(header, encoding,
-  // mat).toImageMsg(); cv_bridge_shared_                           = cv_bridge::toCvShare(msg,
-  // "mono8"); is_image_received_.store(true); detect();
   return true;
 }
 void AprilTagLocalization::run()
@@ -466,23 +534,54 @@ void AprilTagLocalization::drawResult(cv::Mat &out_image, apriltag_detection_t *
   return;
 }
 
+void AprilTagLocalization::publishDetectionObjListAndTf(
+    const m_common::msg::DetectionObjList                     &detection_obj_list,
+    const std::vector<geometry_msgs::msg::TransformStamped> &tag_transforms)
+{
+  output_detection_objects_publisher_->publish(detection_obj_list);
+
+  if (tf_broadcaster_ == nullptr)
+  {
+    return;
+  }
+
+  std::vector<geometry_msgs::msg::TransformStamped> transforms;
+  transforms.reserve(detection_obj_list.objects.size() + tag_transforms.size());
+  transforms.insert(transforms.end(), tag_transforms.begin(), tag_transforms.end());
+
+  for (const auto &obj : detection_obj_list.objects)
+  {
+    if (!obj.has_pose)
+    {
+      continue;
+    }
+
+    geometry_msgs::msg::TransformStamped tf_msg;
+    tf_msg.header = detection_obj_list.header;
+    if (obj.class_id < 0)
+    {
+      tf_msg.child_frame_id = dock_frame_id_;
+    } else
+    {
+      tf_msg.child_frame_id = dock_frame_id_ + "_tag_" + std::to_string(obj.class_id);
+    }
+    tf_msg.transform.translation.x = obj.pose.pose.position.x;
+    tf_msg.transform.translation.y = obj.pose.pose.position.y;
+    tf_msg.transform.translation.z = obj.pose.pose.position.z;
+    tf_msg.transform.rotation      = obj.pose.pose.orientation;
+    transforms.push_back(tf_msg);
+  }
+
+  if (!transforms.empty())
+  {
+    tf_broadcaster_->sendTransform(transforms);
+  }
+}
+
 bool AprilTagLocalization::detect()
 {
   std_msgs::msg::Header header;
-  // image_u8_t           *img = nullptr;
   cv::Mat image_mat, image_gray;
-  /**
-
-  {
-    std::lock_guard<std::mutex> lock(image_mutex_);
-    header       = current_image_->header;
-    uint8_t *buf = new uint8_t[current_image_->data.size()];
-    std::memcpy(buf, current_image_->data.data(), current_image_->data.size());
-    image_u8_t im = image_u8{static_cast<int32_t>(current_image_->width),
-                             static_cast<int32_t>(current_image_->height),
-                             static_cast<int32_t>(current_image_->step), buf};
-    img           = &im;
-  }  */
 
   {
     std::lock_guard<std::mutex> lock(image_mutex_);
@@ -494,24 +593,19 @@ bool AprilTagLocalization::detect()
   cv::cvtColor(image_mat, image_gray, cv::COLOR_BGR2GRAY);
   image_u8_t img = {image_gray.cols, image_gray.rows, image_gray.cols, image_gray.data};
   detections_    = apriltag_detector_detect(td_ptr_, &img);
-  // if (errno == EAGAIN)
-  // {
-  // MLOGGER_ERROR("Unable to create the {} threads requested, exit.\n", td_ptr_->nthreads);
-  // return false;
-  // }
-  // td_ptr_->wp;
-  result_array_pose_msg_.data.clear();
+
   int                         result_size = zarray_size(detections_);
   std::vector<tf2::Transform> result_list;
+  std::vector<geometry_msgs::msg::TransformStamped> tag_transforms;
+  m_common::msg::DetectionObjList detection_obj_list_msg;
+  detection_obj_list_msg.header.stamp    = header.stamp;
+  detection_obj_list_msg.header.frame_id = frame_id_;
+  const float tag_size = static_cast<float>(tag_size_);
   for (int i = 0; i < result_size; i++)
   {
     apriltag_detection_t *det;
     zarray_get(detections_, i, &det);
 
-    // Do stuff with detections here.
-    // drawResult(image_mat, det);
-
-    // First create an apriltag_detection_info_t struct using your known parameters.
     apriltag_detection_info_t info;
     info.det     = det;
     info.tagsize = tag_size_;
@@ -519,7 +613,6 @@ bool AprilTagLocalization::detect()
     info.fy      = current_camera_intrinsics_.fy;
     info.cx      = current_camera_intrinsics_.cx;
     info.cy      = current_camera_intrinsics_.cy;
-    // Then call estimate_tag_pose.
     apriltag_pose_t pose;
     double          err = estimate_tag_pose(&info, &pose);
     if (err > 1e-3)
@@ -529,53 +622,43 @@ bool AprilTagLocalization::detect()
     }
     if (dock_pose_ext_map_.find(det->id) == dock_pose_ext_map_.end())
     {
-      // 键不存在g
       MLOGGER_EVERY_N_WARN(10, "TAG ID {}, is not exist in config map, skipping.", det->id);
+      continue;
     }
-    tf2::Transform tf = apriltagPoseToTf2(pose);
-    tf                = camera2camera_link * tf * camera_tag2ros_ * dock_pose_ext_map_[det->id];
-    result_list.emplace_back(tf);
+
+    // Tag 系（与 dock 同 ROS 轴约定，不含 dock_offset）
+    tf2::Transform tag_tf =
+        camera2camera_link * apriltagPoseToTf2(pose) * camera_tag2ros_;
+    // Dock 系 = Tag 系 * dock_offset
+    tf2::Transform dock_tf = tag_tf * dock_pose_ext_map_[det->id];
+    result_list.emplace_back(dock_tf);
+    detection_obj_list_msg.objects.push_back(makeAprilTagDetectionObj(
+        det, err, dock_tf, current_apriltag_family_name_, tag_size));
+
+    geometry_msgs::msg::TransformStamped tag_tf_msg;
+    tag_tf_msg.header.stamp    = header.stamp;
+    tag_tf_msg.header.frame_id = frame_id_;
+    tag_tf_msg.child_frame_id  = "apriltag_" + std::to_string(det->id);
+    tag_tf_msg.transform.translation.x = tag_tf.getOrigin().x();
+    tag_tf_msg.transform.translation.y = tag_tf.getOrigin().y();
+    tag_tf_msg.transform.translation.z = tag_tf.getOrigin().z();
+    const tf2::Quaternion &tag_q = tag_tf.getRotation();
+    tag_tf_msg.transform.rotation.x = tag_q.x();
+    tag_tf_msg.transform.rotation.y = tag_q.y();
+    tag_tf_msg.transform.rotation.z = tag_q.z();
+    tag_tf_msg.transform.rotation.w = tag_q.w();
+    tag_transforms.push_back(tag_tf_msg);
   }
 
-  // if (!image_mat.empty())
-  // {
-  //   cv::imshow("result", image_mat);
-  //   cv::waitKey(1);
-  // }
   if (!result_list.empty())
   {
     tf2::Transform result_tf = averageTransforms(result_list);
-    // result_pose_stamp_.header.stamp = header.stamp;
-    // tf2::toMsg(result_tf, result_pose_stamp_.pose);
-    // output_result_pose_stamp_publisher_->publish(result_pose_stamp_);
+    detection_obj_list_msg.objects.push_back(makeFusedDockDetectionObj(result_tf));
 
-    result_array_pose_msg_.data.resize(6);
-    transformToXYZRPY(result_tf, result_array_pose_msg_.data[0], result_array_pose_msg_.data[1],
-                      result_array_pose_msg_.data[2], result_array_pose_msg_.data[3],
-                      result_array_pose_msg_.data[4], result_array_pose_msg_.data[5]);
-    output_result_array_pose_publisher_->publish(result_array_pose_msg_);
-    MLOGGER_INFO("Final dock loc: (x, y, z), (roll, pitch, yaw): ({},{},{}),({},{},{})",
-                 result_array_pose_msg_.data[0], result_array_pose_msg_.data[1],
-                 result_array_pose_msg_.data[2], result_array_pose_msg_.data[3],
-                 result_array_pose_msg_.data[4], result_array_pose_msg_.data[5]);
-
-    // 广播 TF: camera_link -> dock_frame
-    geometry_msgs::msg::TransformStamped tf_msg;
-    tf_msg.header.stamp    = header.stamp;
-    tf_msg.header.frame_id = result_pose_stamp_.header.frame_id;
-    tf_msg.child_frame_id  = dock_frame_id_;
-
-    tf_msg.transform.translation.x = result_tf.getOrigin().x();
-    tf_msg.transform.translation.y = result_tf.getOrigin().y();
-    tf_msg.transform.translation.z = result_tf.getOrigin().z();
-
-    const tf2::Quaternion &q = result_tf.getRotation();
-    tf_msg.transform.rotation.x = q.x();
-    tf_msg.transform.rotation.y = q.y();
-    tf_msg.transform.rotation.z = q.z();
-    tf_msg.transform.rotation.w = q.w();
-
-    tf_broadcaster_->sendTransform(tf_msg);
+    double ros_x, ros_y, ros_z, ros_roll, ros_pitch, ros_yaw;
+    transformToXYZRPY(result_tf, ros_x, ros_y, ros_z, ros_roll, ros_pitch, ros_yaw);
+    MLOGGER_INFO("Final dock loc: (x, y, z), (roll, pitch, yaw): ({},{},{}),({},{},{})", ros_x,
+                 ros_y, ros_z, ros_roll, ros_pitch, ros_yaw);
 
     if (result_list.size() >= 2)
     {
@@ -584,7 +667,6 @@ bool AprilTagLocalization::detect()
       MLOGGER_INFO("Found {} valid tags:", result_list.size());
       for (const tf2::Transform &tf : result_list)
       {
-        double ros_x, ros_y, ros_z, ros_roll, ros_pitch, ros_yaw;
         transformToXYZRPY(tf, ros_x, ros_y, ros_z, ros_roll, ros_pitch, ros_yaw);
         MLOGGER_INFO("dock loc: (x, y, z), (roll, pitch, yaw): ({},{},{}),({},{},{})", ros_x, ros_y,
                      ros_z, ros_roll, ros_pitch, ros_yaw);
@@ -592,10 +674,9 @@ bool AprilTagLocalization::detect()
       MLOGGER_INFO(
           "===================================================================================");
     }
-  } else
-  {
-    output_result_array_pose_publisher_->publish(result_array_pose_msg_);
   }
+
+  publishDetectionObjListAndTf(detection_obj_list_msg, tag_transforms);
 
   apriltag_detections_destroy(detections_);
 

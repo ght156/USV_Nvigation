@@ -79,49 +79,29 @@ add_executable(apriltag_localization_cpp
   src/apriltag_node.cpp
 )
 
-target_include_directories(apriltag_localization_cpp PUBLIC
-      include/
-      ${EIGEN3_INCLUDE_DIR}
+target_include_directories(apriltag_localization_cpp PUBLIC 
+      include/ 
+      ${EIGEN3_INCLUDE_DIR} 
       ${PCL_INCLUDE_DIRS}
-      ${tf2_INCLUDE_DIRS}
-      ${tf2_ros_INCLUDE_DIRS}
-      ${tf2_geometry_msgs_INCLUDE_DIRS}
-      ${geometry_msgs_INCLUDE_DIRS}
       )
 set(PCL_LIBS ${PCL_LIBRARIES})
-# ament_target_dependencies(apriltag_localization_cpp
-#   rclcpp
-#   cv_bridge
-#   grap_rgbd # 这里会传递库的依赖信息
-#   OpenCV
-#   Eigen3
-#   trt_infer_lib
-#   # message_filters
-#   yaml-cpp
-#   PCL
-#   # vtk
-#   VTK
-# )
-target_link_libraries(apriltag_localization_cpp PUBLIC
+target_link_libraries(apriltag_localization_cpp
   ${Python3_LIBRARY}
-  rclcpp::rclcpp
-  # GTest::gtest_main
-  cv_bridge::cv_bridge
   ${OpenCV_LIBS}
   m_common::mlogger
-  # deploy_core
-  # trt_core
-  # detection_6d_foundationpose
   yaml-cpp
   ${PCL_LIBRARIES}
   fmt
   apriltag
-  ${tf2_LIBRARIES}
-  ${tf2_ros_LIBRARIES}
-  ${tf2_geometry_msgs_LIBRARIES}
-  ${geometry_msgs_LIBRARIES}
-  # ${ament_cmake_python_LIBRARIES}
-  # yolo
+)
+ament_target_dependencies(apriltag_localization_cpp
+  rclcpp
+  cv_bridge
+  m_common
+  tf2
+  tf2_ros
+  tf2_geometry_msgs
+  geometry_msgs
 )
 # 安装可执行文件（可选）
 install(TARGETS apriltag_localization_cpp
@@ -140,5 +120,10 @@ install(DIRECTORY
 install(DIRECTORY 
   ${CMAKE_CURRENT_SOURCE_DIR}/launch/
   DESTINATION share/${PROJECT_NAME}/launch
+)
+
+install(DIRECTORY 
+  ${CMAKE_CURRENT_SOURCE_DIR}/rviz/
+  DESTINATION share/${PROJECT_NAME}/rviz
 )
 ament_package()

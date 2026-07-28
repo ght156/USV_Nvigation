@@ -1,0 +1,20 @@
+# §4.2.2 mission_execute
+# decision 内部串起 上传→start→逐航点→actions→finish
+# Goal
+string user_id
+string execution_id
+float32 speed
+uint8   finish_action
+m_common/Waypoint[] waypoints
+---
+# Result(最终结果)
+int32  result
+string msg
+string execution_id
+---
+# Feedback(周期反馈,与 MissionState 对齐)
+string phase
+uint32 current_seq
+uint32 reached_seq
+uint32 waypoint_total
+float32 progress

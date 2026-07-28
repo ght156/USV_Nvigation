@@ -1,0 +1,5 @@
+# §4.2.1.3 锁定/解锁
+bool armed
+---
+int32 result
+string msg

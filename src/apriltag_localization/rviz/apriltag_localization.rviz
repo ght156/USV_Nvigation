@@ -1,0 +1,210 @@
+Panels:
+  - Class: rviz_common/Displays
+    Help Height: 100
+    Name: Displays
+    Property Tree Widget:
+      Expanded:
+        - /Global Options1
+        - /Status1
+        - /Grid1
+        - /TF1
+        - /TF1/Status1
+        - /TF1/Frames1
+        - /TF1/Frames1/apriltag_01
+        - /Image1
+        - /Image1/Status1
+      Splitter Ratio: 0.5
+    Tree Height: 406
+  - Class: rviz_common/Views
+    Expanded:
+      - /Current View1
+    Name: Views
+    Splitter Ratio: 0.5
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Alpha: 0.5
+      Cell Size: 1
+      Class: rviz_default_plugins/Grid
+      Color: 160; 160; 164
+      Enabled: true
+      Line Style:
+        Line Width: 0.029999999329447746
+        Value: Lines
+      Name: Grid
+      Normal Cell Count: 0
+      Offset:
+        X: 0
+        Y: 0
+        Z: 0
+      Plane: XY
+      Plane Cell Count: 10
+      Reference Frame: <Fixed Frame>
+      Value: true
+    - Class: rviz_default_plugins/TF
+      Enabled: true
+      Frame Timeout: 1
+      Frames:
+        All Enabled: false
+        apriltag_0:
+          Value: true
+        apriltag_43:
+          Value: true
+        base_link:
+          Value: true
+        base_link_frd:
+          Value: false
+        camera_link:
+          Value: false
+        camera_rear_link:
+          Value: true
+        dock_frame:
+          Value: true
+        dock_frame_tag_0:
+          Value: true
+        dock_frame_tag_43:
+          Value: true
+        gps_link:
+          Value: false
+        imu_link:
+          Value: false
+        left_housing_link:
+          Value: false
+        left_prop_link:
+          Value: false
+        lidar_link:
+          Value: false
+        map:
+          Value: false
+        map_ned:
+          Value: false
+        odom:
+          Value: false
+        odom_ned:
+          Value: false
+        right_housing_link:
+          Value: false
+        right_prop_link:
+          Value: false
+      Marker Scale: 0.5
+      Name: TF
+      Show Arrows: true
+      Show Axes: true
+      Show Names: true
+      Tree:
+        base_link:
+          base_link_frd:
+            {}
+          camera_link:
+            {}
+          camera_rear_link:
+            apriltag_0:
+              {}
+            apriltag_43:
+              {}
+            dock_frame:
+              {}
+            dock_frame_tag_0:
+              {}
+            dock_frame_tag_43:
+              {}
+          gps_link:
+            {}
+          imu_link:
+            {}
+          left_housing_link:
+            left_prop_link:
+              {}
+          lidar_link:
+            {}
+          right_housing_link:
+            right_prop_link:
+              {}
+      Update Interval: 0
+      Value: true
+    - Class: rviz_default_plugins/Image
+      Enabled: true
+      Max Value: 1
+      Median window: 5
+      Min Value: 0
+      Name: Image
+      Normalize Range: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /roboboat/sensors/camera_rear/image
+      Value: true
+  Enabled: true
+  Global Options:
+    Background Color: 48; 48; 48
+    Fixed Frame: dock_frame
+    Frame Rate: 30
+  Name: root
+  Tools:
+    - Class: rviz_default_plugins/Interact
+      Hide Inactive Objects: true
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+    - Class: rviz_default_plugins/FocusCamera
+    - Class: rviz_default_plugins/Measure
+      Line color: 128; 128; 0
+    - Class: rviz_default_plugins/SetInitialPose
+      Covariance x: 0.25
+      Covariance y: 0.25
+      Covariance yaw: 0.06853891909122467
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: initialpose
+    - Class: rviz_default_plugins/SetGoal
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: goal_pose
+  Transformation:
+    Current:
+      Class: rviz_default_plugins/TF
+  Value: true
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Distance: 11.956990242004395
+      Enable Stereo Rendering:
+        Stereo Eye Separation: 0.05999999865889549
+        Stereo Focal Distance: 1
+        Swap Stereo Eyes: false
+        Value: false
+      Focal Point:
+        X: 0.6094167232513428
+        Y: 1.8476608991622925
+        Z: 5.050230979919434
+      Focal Shape Fixed Size: true
+      Focal Shape Size: 0.05000000074505806
+      Invert Z Axis: false
+      Name: Current View
+      Near Clip Distance: 0.009999999776482582
+      Pitch: 1.2047966718673706
+      Target Frame: <Fixed Frame>
+      Value: Orbit (rviz_default_plugins)
+      Yaw: 1.5149989128112793
+    Saved: ~
+Window Geometry:
+  Displays:
+    collapsed: false
+  Height: 1518
+  Hide Left Dock: false
+  Hide Right Dock: false
+  Image:
+    collapsed: false
+  QMainWindow State: 000000ff00000000fd00000001000000000000026b00000577fc0200000003fb0000000a0049006d0061006700650100000051000001400000003800fffffffb000000100044006900730070006c00610079007301000001990000024d0000011b00fffffffb0000000a0056006900650077007301000003ee000001da000000e400ffffff000007470000057700000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
+  Views:
+    collapsed: false
+  Width: 2490
+  X: 70
+  Y: 40
