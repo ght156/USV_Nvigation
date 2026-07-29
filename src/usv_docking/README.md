@@ -2,8 +2,113 @@
 
 差速 / 双推进器 USV 的 **GNSS 虚拟入口 + Tag 闭环** 精靠泊，以及 **odom 出泊**（v5.0）。
 
+> **V2 重构版已并联上线（2026-07）**：四节点管线架构，全程倒船（船尾入坞，无线充电对接）。
+> 旧 `docking_controller` 保留不动；新系统独立节点名/话题名（`_v2`、`/docking_v2/*`），见下方 [V2 架构](#v2-重构四节点管线2026-07)。
+
+---
+
 > **任务编排（一键归港/出泊、Nav 预泊、Entry 验收）** 见 [`../dock_mission/README.md`](../dock_mission/README.md)。  
 > 本包只管：**预泊点之后 → GNSS 到虚拟入口 → 搜 Tag → 对准 → 倒船 → 停船**；**出泊 → odom 前进离坞**。
+
+---
+
+## V2 重构：四节点管线（2026-07）
+
+**核心改动**：全程倒船（船尾朝坞，无线充电对接）；Tag 经 TF 输出（不再用 Float64MultiArray 话题）；odom 锚定/推算解耦为独立估计器；状态机/控制器/安全监督分离。
+
+```text
+AprilTag TF (camera_rear→dock_frame) + odom→base_link TF
+  → docking_pose_estimator_v2     # TF 锚定 odom→dock_est、EMA+跳变拒绝、丢 Tag odom 推算
+      │ /docking_v2/dock_pose (PoseStamped: base_link 在 dock_est 系)
+      │ /docking_v2/tag_visible | pose_source | measurement_age
+  → docking_fsm_v2                # 状态机 + /dock/status 兼容层
+      │ /docking_v2/state | /docking_v2/target_mode
+  → docking_motion_controller_v2  # 各阶段控制律 -> cmd_vel
+      │ /cmd_vel_nav（test_only:=false）或 /docking_v2/cmd_vel_test
+  → converter → 推进器
+docking_safety_v2                 # 独立监督：6 项检查
+      │ /docking_v2/safety_stop（控制器立即零速）| /docking_v2/abort_request（FSM 裁决）
+```
+
+**状态流**：
+`IDLE → ACQUIRE_TAG → APPROACH_ENTRY → ALIGN_ENTRY → BACK_IN → FINAL_DOCK → DOCKED`
+异常：入口外丢 Tag → `REACQUIRE_TAG`（闭环搜索）；坞内失败 → `ABORT_EXIT`（前进驶出后上报）；出泊：`UNDOCK_EXIT → UNDOCK_SETTLE`。
+
+**关键约定**：
+- `dock_est` 系：原点在坞中心，**+x 从入口指向坞内**（坞外 x<0）；对准 = 船艏向 ±π（`e_yaw = wrap(yaw − π)`，船尾朝坞）。
+- 倒船控制律（差速运动学推导）：`ω = −kyaw·(e_yaw + ky·e_y)`；前进驶出：`ω = kyaw·(ky·e_y − e_yaw)`。APPROACH 也是船尾朝目标倒退，**全程保住后相机 Tag 视线**。
+- `/dock/status` 契约（dock_mission 唯一消费）：`success`（DOCKED）/ `needs_reapproach`（入泊失败，FAILED 时强制 true 防挂死）/ `undock_success` / `state`（FAILED 映射 `"DOCK_ABORT"`，原名在 `v2_state`）/ `abort_reason`。
+- 坞内丢 Tag 分级：0~0.5s 停车 → 0.5~2s 小角度搜索（±8°）→ >2s ABORT_EXIT；FINAL_DOCK 不搜索只等待 2s。
+
+**📖 架构、状态机、上层接口（service/话题触发、/dock/status 契约、紧急状态）详见 [`docs/V2架构与上层接口.md`](docs/V2架构与上层接口.md)。**
+
+全部参数集中在 `config/docking_v2.yaml`（四个节点分节，注释含符号推导与历次实测缺陷记录）。
+
+### V2 分步复现与调试
+
+```bash
+# ── 步骤 0：编译（改了代码/yaml 都要执行；yaml 装在 share 里）──
+cd ~/wuxihik_navigation
+colcon build --packages-select usv_docking && source install/setup.bash
+
+# ── 步骤 1：起仿真环境（二选一）──
+# 1a. GUI 仿真：按 docs/项目运行与联调.md 三终端手动起（Gazebo GUI + 定位 + apriltag + converter）
+# 1b. 无头仿真（推荐自动化调试用）：
+bash scripts/headless_sim_up.sh        # gz server + EKF + apriltag + converter 一键拉起
+
+# ── 步骤 2：起 V2 四节点（先观察模式验证数据链，再真实接管）──
+export ROS_LOG_DIR=~/wuxihik_navigation/log/ros_smoke   # 沙箱环境防日志目录权限问题
+ros2 launch usv_docking docking_v2.launch.py use_sim_time:=true test_only:=true   # 观察：指令发 /docking_v2/cmd_vel_test
+ros2 launch usv_docking docking_v2.launch.py use_sim_time:=true test_only:=false  # 真实：接管 /cmd_vel_nav
+
+# ── 步骤 3：验证数据链（10 秒冒烟，全部应有输出）──
+ros2 topic echo --once /docking_v2/pose_source     # VISION（船尾相机对着坞时）
+ros2 topic echo --once /docking_v2/dock_pose       # x 坞外为负，y 横向偏差
+ros2 run tf2_ros tf2_echo odom dock_est            # 锚点 TF（坞在 odom 系位置）
+
+# ── 步骤 4：触发归港 / 出泊 / 取消（直接发话题，绕过 dock_mission）──
+ros2 topic pub --once /dock/start  std_msgs/msg/Bool  '{data: true}'    # 开始靠泊（注意是 Bool！）
+ros2 topic pub --once /dock/cancel std_msgs/msg/Empty '{}'              # 取消 → IDLE 零速
+ros2 topic pub --once /dock/undock std_msgs/msg/Bool  '{data: true}'    # 出泊（DOCKED 后）
+# 经 dock_mission（GCS 接口）则是 service：
+# ros2 service call /dock_task/command m_common/srv/DockTaskCommand "{command: 1, mission_id: '', command_id: '', require_camera: false}"
+
+# ── 步骤 5：运行监控（各开一个 watch 终端）──
+ros2 topic echo /docking_v2/state                  # FSM 状态流
+ros2 topic echo /docking_v2/target_mode            # 控制器模式
+ros2 topic echo /dock/status                       # 上层契约 JSON（成功看 success:true）
+ros2 topic echo /docking_v2/pose_source            # VISION/ODOM_PREDICTION/INVALID 切换
+ros2 topic echo /docking_v2/abort_request          # 安全撤离请求（正常为空串）
+
+# ── 步骤 6：结束清理（pkill 模式用 [v] 字符类防自杀）──
+pkill -9 -f "docking_pose_estimator_[v]2"; pkill -9 -f "docking_fs[m]_v2"
+pkill -9 -f "docking_motion_controller_[v]2"; pkill -9 -f "docking_safet[y]_v2"
+pkill -9 -f "docking_[v]2.launch"
+pgrep -c -f "docking_pose_estimator_[v]2"          # 确认 0 才算清干净
+```
+
+**调试速查**：
+- 船不动/速度不对 → 先查有无 **teleop_twist_keyboard** 残留（它会抢 cmd_vel_nav）：`pgrep -af teleop`；
+  再查是否多套 V2 并存：`ros2 node list | grep v2` 每个节点应只有一个。
+- 一直 REACQUIRE 打转 → 看 `/docking_v2/pose_source` 是否频繁 INVALID；RViz 里 `odom→dock_est` 锚点是否还在。
+- 想看船在坞系实时位置：`ros2 topic echo /docking_v2/dock_pose`（x 向 0 收敛=倒入中，y=横偏）。
+- 单元测试（30 项，无需仿真）：
+
+```bash
+source install/setup.bash
+python3 -m pytest src/usv_docking/test/ -q
+```
+
+**仿真验证记录**（Gazebo）：
+- 2026-07-28：出生点 −5.5m 全自动闭环归港至坞心（全链路状态转移 ✓）；倒船/横偏/驶出三组控制符号 ✓；自主出泊控制 ✓。
+- 2026-07-29：BACK_IN 冻 tag → 分级停车/搜索 → ABORT_EXIT **纯 odom 推算自主驶出** −2.2→−4.4 → IDLE + `needs_reapproach` ✓；APPROACH 冻 tag → REACQUIRE 搜索 → 解冻恢复路由 ✓；第二次全链路至 DOCKED ✓。
+- 2026-07-29（偏轴线入场，出生 x≈−9.5m、艏向背坞）：ACQUIRE 旋转搜索捕获 ✓ → APPROACH 倒退入场 ✓；FINAL_DOCK 卡死（见缺陷④⑤）→ 自触发 CORRIDOR_VIOLATION → ABORT_EXIT 驶出 ✓；撤离中 `/dock/cancel` 正确接管 → IDLE ✓。
+- 2026-07-29（无头仿真自建，脚本 `scripts/headless_sim_up.sh`）：①偏轴线全链路（传送至坞系 −9.5m/横偏 1.5m/艏向背坞）：ACQUIRE 旋转搜索捕获 → 倒退 8.7m 收横偏 → ALIGN → BACK_IN → FINAL_DOCK 全程零抖动零中止 ✓；②预备点外短回路（−2.8m/横偏 0.3m）：**全链路至 DOCKED**，终点 x≈0.03、y≈−0.05、success=true ✓。
+- 2026-07-29（GUI 仿真，含越点重启动场景）：船越过预备点卡在坞边（x=−2.06>staging_x=−2.5）→ 双向 APPROACH **前进倒出**修 y → ALIGN → BACK_IN → FINAL_DOCK → **DOCKED，终点 y≈0.015、success=true** ✓。当日修复三缺陷：⑥APPROACH 单一倒船律在"船在预备点内侧"时要求船尾调头 180°，stern_bearing 落 ±π 回绕奇点致 ±0.35 转向 bang-bang 震荡 → 双向化（内侧前进倒出，船尾相机始终朝坞）；⑦前进/弧线段纯 P 横向律无阻尼，大 e_y 蟹行角达 10° 全速横移、y 冲过 0 荡秋千（0.49→−0.20）→ `approach_crab_deg=8°` 限幅后单调平缓收敛；⑧y 容差治理：真船坞宽≈船宽，**y 必须在坞外修到位**（`align_y_tol` 收回 0.15=approach_y_tol，不达标回 APPROACH"向前挪动→弧线修 y"），BACK_IN 门控仅兜漂移（真船须按单侧间隙−余量收紧 gate1/gate2_y）。
+- 2026-07-29 晚（GUI 仿真，用户重置环境后大偏轴 (−6.75, −2.98) 入场）：共识播种滑窗拒绝 0.64m 单双码离散 → 8 帧共识锚定 → APPROACH → ALIGN 锚点 EMA 精化逼出真 y=0.28 → **y 卡死逃逸**（6.1s）→ APPROACH **锥形降速**修 y（0.29→−0.10 单调无过冲）→ BACK_IN → **DOCKED (x=0.098, y=−0.042)，success=true 真成功** ✓。当日再修四缺陷：⑨估计器首帧即锚点 + 跳变拒绝自我强化偏差（单码远距播种偏 0.7m、真值被持续拒绝，旧码曾在坞外 2.66m 处假 DOCKED）→ 共识播种（8 帧中位数 + 离散度滑窗）+ 拒绝簇 EMA 吸附解锁；⑩集帧零容忍清零（视野边缘闪烁致捕获 6 分钟、HOLD↔SEARCH 角速度忽高忽低）→ acquire/reacquire_miss_tolerance=3；⑪APPROACH 全速修 y 过冲 → 锥形降速（slow_y=0.5 起降，min_speed=0.08 蠕行）；⑫ALIGN 卡死带 (y_tol 0.15, y_abort 0.35] 干等到 45s 超时 → align_y_stuck_sec=6.0 确定性回 APPROACH 修 y。另注意：仿真重启（时钟归零）后所有 use_sim_time 节点必须重启，否则定时器冻结成僵尸。
+- 实测修复的设计缺陷：①估计器推算硬上限 3s→70s（否则撤离 3 秒即瘫）；②安全误差检查仅限坞内走廊 BACK_IN/FINAL_DOCK（APPROACH 远距离噪声、ALIGN 初始大艏偏都会误中止）；③搜索状态豁免安全 odom 时长检查（否则 REACQUIRE 活不过 3s）；④APPROACH→ALIGN 交接死区（approach_y_tol 0.5 > align_y_abort 0.35 → 两态高频抖动，approach_y_tol 收紧至 0.15 < align_y_tol 0.20）；⑤BACK_IN 横向收敛太慢（ky_back 0.2→0.8：收敛长度 5m→1.25m，否则 y 残差 >docked_y_tol 在 x 到点后形成 v=0 死锁）；⑥ALIGN 丢 Tag 零容忍与 REACQUIRE 看到 Tag 仍旋转导致两态互弹（加 5s 宽限 + 停车集帧 + 集帧 3→5）；⑦倒船律稳态 e_yaw=−ky·e_y 随横向残差必超 3° 判据形成终点死锁（新增终局消艏偏：x/y 达标后原地消 e_yaw）。
+- 联调注意事项：①`/dock/start`/`/dock/undock` 是 **Bool** 不是 String；②同一话题多套节点并存会互相打架（kill 时 pkill 模式须用 `[v]` 类字符类避免匹配自身 shell）；③teleop_twist_keyboard（cmd_vel 重映射到 cmd_vel_nav）会与控制器抢速度，联调前确认已关。
+- 备注：仿真机 gz 偶发崩溃（WaveVisual 析构段错误已用注释补丁规避；其余为外部退出，疑似 OOM），与算法无关。
 
 ---
 
@@ -352,6 +457,7 @@ DOCK_IDLE → PRECHECK → WAIT_TAG ──(无 Tag)──► SEARCH_SPIN
 
 | 文档 | 内容 |
 |------|------|
+| [`docs/V2架构与上层接口.md`](docs/V2架构与上层接口.md) | ★ V2 架构、状态机、上层触发/反馈契约、紧急状态、真船参数治理 |
 | [`../dock_mission/README.md`](../dock_mission/README.md) | 一键归港、预泊点、Entry、Nav GoalChecker |
 | [`../../docs/usv_docking任务规划.md`](../../docs/usv_docking任务规划.md) | 全栈架构 |
 | [`../../docs/项目运行与联调.md`](../../docs/项目运行与联调.md) | 7 终端联调 |
