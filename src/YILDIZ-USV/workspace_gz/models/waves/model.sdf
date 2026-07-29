@@ -9,6 +9,8 @@
             <uri>meshes/waterlow.dae</uri>
           </mesh>
         </geometry>
+        <!-- 2026-07-29 禁用：WaveVisual 析构在软件 EGL 渲染下段错误导致 gz 崩溃，
+             算法联调不需要波浪外观。恢复时去掉注释即可。-->
         <plugin filename="libWaveVisual.so" name="vrx::WaveVisual">
           <shader>
             <vertex>materials/programs/GerstnerWaves_vs_330.glsl</vertex>
@@ -27,6 +29,7 @@
             <topic>/vrx/wavefield/parameters</topic>
           </wavefield>
         </plugin>
+  <!--      -->
         <visibility_flags>8</visibility_flags>
       </visual>
     </link>

@@ -49,6 +49,8 @@ test.txt
 
 # 测试
 test/
+# ROS 包内单元测试（ament 标准布局）例外
+!src/usv_docking/test/
 
 # 编辑器/IDE 工作缓存
 .claude/

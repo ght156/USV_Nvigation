@@ -8,11 +8,8 @@ Panels:
         - /Status1
         - /Grid1
         - /TF1
-        - /TF1/Status1
         - /TF1/Frames1
-        - /TF1/Frames1/apriltag_01
         - /Image1
-        - /Image1/Status1
       Splitter Ratio: 0.5
     Tree Height: 406
   - Class: rviz_common/Views
@@ -57,13 +54,15 @@ Visualization Manager:
         camera_link:
           Value: false
         camera_rear_link:
+          Value: false
+        dock_est:
           Value: true
         dock_frame:
           Value: true
         dock_frame_tag_0:
-          Value: true
+          Value: false
         dock_frame_tag_43:
-          Value: true
+          Value: false
         gps_link:
           Value: false
         imu_link:
@@ -79,14 +78,24 @@ Visualization Manager:
         map_ned:
           Value: false
         odom:
-          Value: false
+          Value: true
         odom_ned:
           Value: false
         right_housing_link:
           Value: false
         right_prop_link:
           Value: false
-      Marker Scale: 0.5
+        roboboat/base_link/sensor_camera:
+          Value: false
+        roboboat/base_link/sensor_camera_rear:
+          Value: false
+        roboboat/base_link/sensor_gps:
+          Value: false
+        roboboat/base_link/sensor_imu:
+          Value: false
+        roboboat/base_link/sensor_lidar:
+          Value: false
+      Marker Scale: 1
       Name: TF
       Show Arrows: true
       Show Axes: true
@@ -96,7 +105,8 @@ Visualization Manager:
           base_link_frd:
             {}
           camera_link:
-            {}
+            roboboat/base_link/sensor_camera:
+              {}
           camera_rear_link:
             apriltag_0:
               {}
@@ -108,17 +118,30 @@ Visualization Manager:
               {}
             dock_frame_tag_43:
               {}
+            roboboat/base_link/sensor_camera_rear:
+              {}
           gps_link:
-            {}
+            roboboat/base_link/sensor_gps:
+              {}
           imu_link:
-            {}
+            roboboat/base_link/sensor_imu:
+              {}
           left_housing_link:
             left_prop_link:
               {}
           lidar_link:
-            {}
+            roboboat/base_link/sensor_lidar:
+              {}
           right_housing_link:
             right_prop_link:
+              {}
+        map:
+          map_ned:
+            {}
+          odom:
+            dock_est:
+              {}
+            odom_ned:
               {}
       Update Interval: 0
       Value: true
@@ -139,7 +162,7 @@ Visualization Manager:
   Enabled: true
   Global Options:
     Background Color: 48; 48; 48
-    Fixed Frame: dock_frame
+    Fixed Frame: base_link
     Frame Rate: 30
   Name: root
   Tools:
@@ -174,25 +197,25 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/Orbit
-      Distance: 11.956990242004395
+      Distance: 4.346391201019287
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
         Swap Stereo Eyes: false
         Value: false
       Focal Point:
-        X: 0.6094167232513428
-        Y: 1.8476608991622925
-        Z: 5.050230979919434
+        X: 0.6903839111328125
+        Y: 1.889681339263916
+        Z: 5.070074558258057
       Focal Shape Fixed Size: true
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 1.2047966718673706
+      Pitch: 1.0297971963882446
       Target Frame: <Fixed Frame>
       Value: Orbit (rviz_default_plugins)
-      Yaw: 1.5149989128112793
+      Yaw: 2.4199986457824707
     Saved: ~
 Window Geometry:
   Displays:
