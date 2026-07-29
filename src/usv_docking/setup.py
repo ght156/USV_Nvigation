@@ -49,6 +49,10 @@ setup(
     entry_points={
         "console_scripts": [
             "docking_controller = usv_docking.docking_controller:main",
+            "docking_pose_estimator_v2 = usv_docking.docking_pose_estimator_v2:main",
+            "docking_fsm_v2 = usv_docking.docking_fsm_v2:main",
+            "docking_motion_controller_v2 = usv_docking.docking_motion_controller_v2:main",
+            "docking_safety_v2 = usv_docking.docking_safety_v2:main",
         ],
     },
 )

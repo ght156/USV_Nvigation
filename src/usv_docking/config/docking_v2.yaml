@@ -1,0 +1,248 @@
+# usv_docking V2 — 归港重构参数（四节点共享文件）
+# 启动：ros2 launch usv_docking docking_v2.launch.py use_sim_time:=true
+#
+# 架构：estimator(TF锚定/推算) -> fsm(状态机+/dock/status兼容) -> controller(cmd_vel)
+#       safety 只发信号，不直接发 cmd_vel
+# 边界：不含 GNSS 段（dock_mission 负责预泊与入口验收）；倒船为主（无线充电对接）
+#
+# dock_frame 轴向约定（2026-07-28 任务2仿真实测，tf2_echo base_link dock_frame）：
+#   原点：bay2 中心 P（spawn 时 odom 系约 (-5.5, 0)），z 忽略（平面化）
+#   +x  ：从入口指向坞内（深入方向）=> 船在坞外时 x < 0，到 P 点 x ≈ 0
+#   -x  ：指向入口外/海面 => 入口预备点定义为 (x=-2.5, y=0)
+#   对准：船在 dock 系 yaw = ±pi 表示船尾朝坞（e_yaw = wrap(yaw - pi)，
+#        与旧系统 heading_offset_rad: pi 等价）
+#   BACK_IN 控制目标：x 从负值趋向 final_x（base v < 0 倒船）
+# 实船 profile 若 placard 安装不同，须重新实测并更新本注释。
+
+# ═══════════════════════ 位姿估计器 ═══════════════════════
+docking_pose_estimator_v2:
+  ros__parameters:
+    # ── 坐标系 ──
+    odom_frame: "odom"              # EKF 广播 odom->base_link (30Hz)
+    base_frame: "base_link"
+    dock_frame: "dock_frame"        # apriltag_localization 融合船坞系
+    dock_est_frame: "dock_est"      # 本节点锁存并广播的 odom 子 frame
+    tf_timeout_sec: 0.1
+    # odom->base_link TF 龄期容忍：EKF 低帧率(~2.7Hz)+sim 抖动下 0.5s 会频繁
+    # 误判 INVALID，锚点被连带废掉导致控制器开环扫描抽风（2026-07-29 实测）。
+    # 锚点推算本就允许数秒陈旧 odom（USV 慢速），3s 远比掉 INVALID 强
+    odom_tf_timeout_sec: 3.0        # odom->base_link TF 龄期容忍（超此才判异常）
+    broadcast_tf: true              # 是否广播 odom->dock_est TF（RViz 调试）
+
+    # ── 话题 ──
+    dock_pose_topic: "/docking_v2/dock_pose"
+    tag_visible_topic: "/docking_v2/tag_visible"
+    pose_source_topic: "/docking_v2/pose_source"
+    measurement_age_topic: "/docking_v2/measurement_age"
+    reset_anchor_topic: "/docking_v2/reset_anchor"
+
+    publish_rate: 20.0
+
+    # ── 滤波（作用于 odom 系的 T_odom_dock 锚点，非相机系相对量）──
+    ema_alpha_position: 0.25        # 位置 EMA
+    ema_alpha_yaw: 0.15             # yaw 环绕 EMA
+    # 首锚共识：单码远距离噪声/单双码系统差可达 0.7m，首帧即锚会把偏差固化
+    # 并被跳变拒绝自我强化（2026-07-29 实测 dp=0.62~0.72m 持续拒绝、y 跳到 -0.7）
+    seed_frames: 8                  # 首锚须集满 N 帧取中位数
+    seed_max_spread_m: 0.40         # 位置离散度门限（超则滑窗继续收）
+    seed_max_yaw_spread_deg: 15.0   # yaw 离散度门限
+    max_position_jump: 0.60         # 单帧位置跳变拒绝 (m)
+    max_yaw_jump_deg: 20.0          # 单帧 yaw 跳变拒绝 (deg)
+    jump_reject_unlock_frames: 5    # 连续 N 帧被拒则接受新值（换泊位/重启解锁）
+
+    # ── 超时 ──
+    tag_timeout: 0.30               # 超过此秒数无视觉观测 = Tag 丢失
+    # odom 推算硬上限：须 >= safety.abort_exit_odom_timeout(60s) + 余量！
+    # ABORT_EXIT/UNDOCK 全靠推算驶出（可达数十秒）；各状态短窗口由 FSM/safety 自行裁决
+    odom_prediction_timeout: 70.0
+
+# ═══════════════════════ 状态机 ═══════════════════════
+docking_fsm_v2:
+  ros__parameters:
+    # ── 输入话题 ──
+    dock_pose_topic: "/docking_v2/dock_pose"
+    tag_visible_topic: "/docking_v2/tag_visible"
+    pose_source_topic: "/docking_v2/pose_source"
+    measurement_age_topic: "/docking_v2/measurement_age"
+    abort_request_topic: "/docking_v2/abort_request"
+    start_topic: "/dock/start"      # dock_mission 契约
+    cancel_topic: "/dock/cancel"    # dock_mission 契约
+    undock_topic: "/dock/undock"    # dock_mission 契约
+
+    # ── 输出话题 ──
+    state_topic: "/docking_v2/state"
+    target_mode_topic: "/docking_v2/target_mode"
+    reset_anchor_topic: "/docking_v2/reset_anchor"
+    status_topic: "/dock/status"    # dock_mission 兼容 JSON
+
+    state_rate: 10.0
+    reset_anchor_on_start: false    # true 时 /dock/start 触发估计器锚点重置
+
+    # ── ACQUIRE_TAG ──
+    tag_acquire_frames: 5           # 累计 N 帧 VISION -> APPROACH_ENTRY
+    # 集帧闪烁容忍（帧数@10Hz）：视野边缘逐帧丢检属常态，零容忍会反复清零
+    # 并伴随 HOLD<->SEARCH 角速度忽高忽低（2026-07-29 实测捕获耗时 6 分钟）
+    acquire_miss_tolerance: 3
+    acquire_timeout_sec: 60.0
+
+    # ── APPROACH_ENTRY：入口外预备点（dock 系，x<0 为坞外）──
+    staging_x: -2.5                 # 预备点纵向位置（入口外 2.5m）
+    approach_x_tol: 0.4
+    # y 容差必须 <= align_y_tol(0.15)：保证进 ALIGN 时 |y| 已达标，
+    # 否则 (align_y_abort, approach_y_tol) 区间成为死区致 APPROACH<->ALIGN 抖动
+    approach_y_tol: 0.15
+    approach_timeout_sec: 120.0     # 锥形降速后留余量（原 90s 实测不够）
+
+    # ── ALIGN_ENTRY ──
+    # 真船坞宽≈船宽：y 必须在坞外修到位，BACK_IN 内不允许大幅横向修正！
+    # ALIGN 是原地旋转修不了 y，故此处卡严（=approach_y_tol）：不达标就回
+    # APPROACH 走"向前挪动→弧线修 y"，达标才放行 BACK_IN（其横向门控仅兜漂移）
+    align_y_tol: 0.15               # |e_y| 门槛 (m)，进 BACK_IN 前 y 必须修到此内
+    align_yaw_tol_deg: 5.0          # |e_yaw| 门槛 (deg)
+    align_hold_sec: 1.0             # 持续满足才进 BACK_IN
+    align_y_abort: 0.35             # ALIGN 中 |e_y| 超此值退回 APPROACH_ENTRY
+    # y 卡死带 (align_y_tol, align_y_abort] 逃逸：艏向已准但 y 超差滞留此秒数
+    # 即回 APPROACH 修 y（ALIGN v=0 修不了横向，原设计干等到 45s 超时）
+    align_y_stuck_sec: 6.0
+    # 丢 Tag 宽限：视野边缘逐帧闪烁属常态，宽限内靠推算继续对准；
+    # 零容忍会与 REACQUIRE 高频互弹（2026-07-29 实测 40s 弹 6 次）
+    align_tag_loss_grace_sec: 5.0
+    align_timeout_sec: 45.0
+    entry_window_min_x: -3.5        # 允许进 BACK_IN 的纵向窗口（坞外）
+    entry_window_max_x: -1.0
+
+    # ── BACK_IN ──
+    final_target_x: 0.0             # 最终充电对接位（bay 中心 P，dock 系）
+    final_dock_entry_dist: 0.8      # 距目标此值 -> FINAL_DOCK
+    back_in_timeout_sec: 90.0
+    back_in_tag_loss_hold_sec: 0.5  # 0~hold: 停车等待
+    back_in_tag_loss_search_sec: 2.0  # hold~search: 小角度搜索；>search: ABORT_EXIT
+    back_in_gate2_y: 0.35           # 走廊违规判据（连续 violation_cycles 周期）
+    back_in_gate2_yaw_deg: 10.0
+    violation_cycles: 10
+
+    # ── FINAL_DOCK ──
+    docked_x_tol: 0.15
+    docked_y_tol: 0.10
+    docked_yaw_tol_deg: 3.0
+    docked_hold_sec: 1.0
+    final_dock_timeout_sec: 60.0
+    final_dock_tag_loss_timeout_sec: 2.0  # 最后阶段不搜索，超时 ABORT_EXIT
+
+    # ── REACQUIRE_TAG ──
+    # 连续 5 帧稳定 VISION 才路由回去（3 帧在视野边缘闪烁下太短，会带着
+    # 未收敛的锚点回 ALIGN，对准目标算歪又把 Tag 甩丢 -> 互弹）
+    reacquire_frames: 5
+    reacquire_miss_tolerance: 3     # 同 acquire_miss_tolerance
+    reacquire_timeout_sec: 30.0
+
+    # ── ABORT_EXIT ──
+    exit_complete_x: -4.0           # 驶出到此 x 即完成（位姿无效时超时兜底）
+    abort_exit_timeout_sec: 45.0
+
+    # ── UNDOCK ──
+    undock_complete_x: -4.0
+    undock_timeout_sec: 60.0
+    undock_settle_sec: 1.0
+
+    # ── 全局 ──
+    max_docking_duration_sec: 150.0 # 全局总超时
+
+# ═══════════════════════ 运动控制器 ═══════════════════════
+docking_motion_controller_v2:
+  ros__parameters:
+    # ── 输入话题 ──
+    state_topic: "/docking_v2/state"
+    target_mode_topic: "/docking_v2/target_mode"
+    dock_pose_topic: "/docking_v2/dock_pose"
+    pose_source_topic: "/docking_v2/pose_source"
+    safety_stop_topic: "/docking_v2/safety_stop"
+
+    # ── 输出（test_only=true 只发测试话题；真船前改 false）──
+    test_only: true
+    cmd_vel_topic: "/cmd_vel_nav"   # converter 订阅的真实话题
+    cmd_vel_test_topic: "/docking_v2/cmd_vel_test"
+
+    control_rate: 20.0              # 常发频率（converter 无看门狗，必须常发）
+
+    # ── 目标点（须与 FSM 保持一致）──
+    staging_x: -2.5                 # APPROACH 预备点（dock 系，y=0）
+    final_target_x: 0.0             # 最终充电位（dock 系）
+
+    # ── 全局限幅 / 斜坡（沿用旧系统实战值）──
+    # 注：倒船横向增益符号由控制律按差速运动学显式推导（ω=-kyaw·(e_yaw+ky·e_y)），
+    #     无需旧系统的 flip 开关
+    max_reverse_speed: 0.8
+    max_yaw_rate: 0.35
+    max_linear_accel: 0.50
+    max_angular_accel: 0.90
+
+    # ── 搜索（闭环优先：绕 odom 预测方位；无锚点开环扇形扫描）──
+    # 0.35 rad/s：最坏转一圈 18s < acquire_timeout 60s；RTF≈0.1 下观感 2°/s(墙钟)
+    # 仍偏慢但可接受；ACQUIRE/REACQUIRE 看到 Tag 即停车集帧，不怕扫过冲
+    search_angular_speed: 0.35
+    search_initial_half_angle_deg: 15.0   # 开环扫描初始半角
+    search_angle_increment_deg: 15.0      # 每来回扩大的半角
+    search_max_half_angle_deg: 60.0
+    backin_max_search_angle_deg: 8.0      # 坞内 SEARCH_LIMITED 累计艏向限角
+
+    # ── 分阶段速度 ──
+    approach_speed: 0.45            # APPROACH_ENTRY 倒退速度上限（仿真 RTF≈0.1 取偏大值）
+    approach_turn_deg: 25.0         # APPROACH 中 |方位差| 超此值原地转
+    # 前进倒出蟹行角限幅：纯P横向律无阻尼必过冲（2026-07-29 实测 y 荡秋千 0.49→-0.20）；
+    # 限幅后 y 单调平缓收敛（真船"坞外修 y"质量的关键）
+    approach_crab_deg: 8.0
+    # 接近轴线锥形降速：|e_y|<slow_y 时 v 按比例降（下限 min_speed 蠕行不停），
+    # 防全速过冲反复调整（2026-07-29 用户现场反馈）
+    approach_slow_y: 0.50
+    approach_min_speed: 0.08
+    back_in_speed_normal: 0.40      # BACK_IN 门控1：误差小
+    back_in_speed_slow: 0.20        # BACK_IN 门控2：误差中
+    # 真船坞宽≈船宽：BACK_IN 内不允许大幅修 y！y 由 APPROACH/ALIGN 在坞外修到
+    # align_y_tol(0.15) 内才放行，此处门控仅兜漂移/噪声。真船按坞宽余量收紧：
+    # gate1/gate2_y 应 <= 单侧间隙 - 安全余量
+    back_in_gate1_y: 0.20           # 门控1：|e_y| 且 |e_yaw|
+    back_in_gate1_yaw_deg: 5.0
+    back_in_gate2_y: 0.35           # 门控2：|e_y| 且 |e_yaw|；超出门控2 v=0
+    back_in_gate2_yaw_deg: 10.0
+    final_dock_speed: 0.15          # FINAL_DOCK 低速倒入
+    abort_exit_speed: 0.30          # ABORT_EXIT 前进驶出
+    exit_turn_deg: 30.0             # 驶出中 |e_yaw| 超此值先原地转正
+    undock_speed: 0.45              # UNDOCK 前进
+
+    # ── 控制增益 ──
+    ky_approach: 0.40               # 前进几何横向增益（APPROACH 弧线/驶出共用）
+    kyaw_approach: 0.85             # 前进几何艏向增益（APPROACH/驶出/搜索共用）
+    kyaw_align: 0.90
+    # ky_back 决定横向收敛速率：dy/ds ≈ -ky·y（s=倒入行程），收敛长度=1/ky。
+    # 0.2 -> 5m 收敛长度，2.2m 行程只收敛 36%（2026-07-29 实测 y=0.165 残留卡死 FINAL_DOCK）；
+    # 0.8 -> 1.25m 收敛长度，同行程收敛 83%；且 e_yaw_des=-0.8·y 在 gate2(10°) 内不触发转艏门控
+    ky_back: 0.80                   # 倒船横向增益（进入 e_yaw_des = -ky·e_y）
+    kyaw_back: 0.60                 # 倒船艏向增益（跟踪 e_yaw_des 的带宽）
+    kx_final: 0.25                  # 倒船纵向距离->速度增益（BACK_IN/FINAL_DOCK 共用）
+    back_in_max_yaw_rate: 0.18
+
+# ═══════════════════════ 安全监督 ═══════════════════════
+docking_safety_v2:
+  ros__parameters:
+    # ── 输入话题 ──
+    dock_pose_topic: "/docking_v2/dock_pose"
+    tag_visible_topic: "/docking_v2/tag_visible"
+    pose_source_topic: "/docking_v2/pose_source"
+    measurement_age_topic: "/docking_v2/measurement_age"
+    state_topic: "/docking_v2/state"
+
+    # ── 输出话题（只发信号，不发 cmd_vel）──
+    safety_stop_topic: "/docking_v2/safety_stop"
+    abort_request_topic: "/docking_v2/abort_request"
+
+    check_rate: 20.0
+
+    max_lateral_error: 0.50         # |e_y| 安全限 (m)
+    max_yaw_error_deg: 15.0         # |e_yaw| 安全限 (deg)
+    odom_prediction_timeout: 3.00   # 正常控制允许的推算时长
+    abort_exit_odom_timeout: 60.0   # ABORT_EXIT 期间独立信任窗口（退出耗时数十秒）
+    pose_topic_timeout_sec: 1.0     # estimator 话题断流阈值
+    state_topic_timeout_sec: 1.0    # fsm 话题断流阈值
+    max_docking_duration_sec: 150.0
+    violation_cycles: 10            # 连续 N 周期超限才触发（防抖）
