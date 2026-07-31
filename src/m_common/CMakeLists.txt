@@ -36,6 +36,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/VideoWarningCode.msg"
   "msg/NavStatus.msg"
   "msg/NavTaskEvent.msg"
+  "msg/MissionWaypoint.msg"
   "srv/RTSPStreamSwitch.srv"
   "srv/ReportVideoWarning.srv"
   "srv/SendWaypoints.srv"

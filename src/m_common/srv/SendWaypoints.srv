@@ -1,5 +1,7 @@
 # 上层 → 导航：下发航线
-geometry_msgs/PoseStamped[] waypoints
+# 航点为 WGS84 经纬度 + 航向；导航内部转换为 map 后执行
+# 1 个点=单点导航，≥2 个点=多点航线
+m_common/MissionWaypoint[] waypoints
 string mission_id
 string command_id
 ---
