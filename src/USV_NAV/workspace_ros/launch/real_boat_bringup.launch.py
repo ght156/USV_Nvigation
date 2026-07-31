@@ -1,41 +1,31 @@
 #!/usr/bin/env python3
 
 # ----------------------------------------------------------------------------------------------- #
-# Real-boat stack starter（MAVROS 需另开终端先行启动）。
+# Real-boat stack starter（MAVROS 由嵌软负责启动）。
 #
-# localization_backend：
-#   - robot_localization：引用 localization.launch.py（本仓未提供，勿用）
-#   - mavros_odom（默认）：MAVROS 融合位姿 + gnss_odom_map_tf + static_transform_real_boat.yaml
+# 启动内容：
+#   - robot_state_publisher（从 m_common/urdf/usv_cf.xacro 发布传感器 TF）
+#   - gnss_odom_map_tf（map→odom 动态 TF）
+#   - 可选：nav2_cmd_vel_to_mavros 速度桥
 # ----------------------------------------------------------------------------------------------- #
 
-from pathlib import Path
-
-from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, GroupAction, IncludeLaunchDescription
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import EqualsSubstitution, LaunchConfiguration, PathJoinSubstitution
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.substitutions import FindPackageShare
 
 
 def generate_launch_description():
-    loc_launch = PathJoinSubstitution(
-        [FindPackageShare('workspace_ros'), 'launch', 'localization.launch.py'])
     mavros_tf_launch = PathJoinSubstitution(
         [FindPackageShare('workspace_ros'), 'launch', 'real_boat_mavros_tf.launch.py'])
     nav2_cmd_vel_mavros_launch = PathJoinSubstitution(
         [FindPackageShare('workspace_ros'), 'launch', 'nav2_cmd_vel_mavros.launch.py'])
 
-    ws_share = Path(get_package_share_directory('workspace_ros'))
-    default_static_real_boat = str(ws_share / 'config' / 'static_transform_real_boat.yaml')
-
     use_sim_time = LaunchConfiguration('use_sim_time')
     enable_nav2_cmd_vel_to_mavros = LaunchConfiguration('enable_nav2_cmd_vel_to_mavros')
-    localization_backend = LaunchConfiguration('localization_backend')
-    static_transform_file = LaunchConfiguration('static_transform_file')
-    imu_src = LaunchConfiguration('imu_src')
-    gps_src = LaunchConfiguration('gps_src')
+    urdf_file = LaunchConfiguration('urdf_file')
     use_gnss_map_odom_tf = LaunchConfiguration('use_gnss_map_odom_tf')
     map_config_yaml = LaunchConfiguration('map_config_yaml')
     map_origin_ref_key = LaunchConfiguration('map_origin_ref_key')
@@ -43,9 +33,6 @@ def generate_launch_description():
     republish_hz = LaunchConfiguration('republish_hz')
     max_data_age_sec = LaunchConfiguration('max_data_age_sec')
     map_odom_yaw_deg = LaunchConfiguration('map_odom_yaw_deg')
-
-    use_mavros_odom = EqualsSubstitution(localization_backend, 'mavros_odom')
-    use_robot_loc = EqualsSubstitution(localization_backend, 'robot_localization')
 
     default_map_yaml = PathJoinSubstitution(
         [FindPackageShare('workspace_nav'), 'config', 'map.yaml'])
@@ -62,24 +49,10 @@ def generate_launch_description():
             description='Nav2 cmd_vel bridge (default /cmd_vel_nav, bypass smoother) → MAVROS setpoint_raw/local',
         ),
         DeclareLaunchArgument(
-            'localization_backend',
-            default_value='mavros_odom',
-            description='robot_localization | mavros_odom',
-        ),
-        DeclareLaunchArgument(
-            'static_transform_file',
-            default_value=default_static_real_boat,
-            description='仅 mavros_odom：传给 real_boat_mavros_tf 的 YAML（默认 static_transform_real_boat.yaml）',
-        ),
-        DeclareLaunchArgument(
-            'imu_src',
-            default_value='/mavros/imu/data',
-            description='模式 A (robot_localization) 的 IMU 源话题',
-        ),
-        DeclareLaunchArgument(
-            'gps_src',
-            default_value='/mavros/global_position/raw/fix',
-            description='模式 A (robot_localization) 的 GPS NavSatFix 源话题',
+            'urdf_file',
+            default_value=PathJoinSubstitution(
+                [FindPackageShare('m_common'), 'urdf', 'usv_cf.xacro']),
+            description='xacro/URDF 路径（默认 m_common 的实船 usv_cf.xacro）',
         ),
         DeclareLaunchArgument(
             'use_gnss_map_odom_tf',
@@ -127,37 +100,18 @@ def generate_launch_description():
             condition=IfCondition(enable_nav2_cmd_vel_to_mavros),
         ),
 
-        GroupAction(
-            actions=[
-                IncludeLaunchDescription(
-                    PythonLaunchDescriptionSource(loc_launch),
-                    launch_arguments={
-                        'use_sim_time': use_sim_time,
-                        'imu_src': imu_src,
-                        'gps_src': gps_src,
-                    }.items(),
-                ),
-            ],
-            condition=IfCondition(use_robot_loc),
-        ),
-
-        GroupAction(
-            actions=[
-                IncludeLaunchDescription(
-                    PythonLaunchDescriptionSource(mavros_tf_launch),
-                    launch_arguments={
-                        'use_sim_time': use_sim_time,
-                        'static_transform_file': static_transform_file,
-                        'use_gnss_map_odom_tf': use_gnss_map_odom_tf,
-                        'map_config_yaml': map_config_yaml,
-                        'map_origin_ref_key': map_origin_ref_key,
-                        'initialize_once': initialize_once,
-                        'republish_hz': republish_hz,
-                        'max_data_age_sec': max_data_age_sec,
-                        'map_odom_yaw_deg': map_odom_yaw_deg,
-                    }.items(),
-                ),
-            ],
-            condition=IfCondition(use_mavros_odom),
+        IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(mavros_tf_launch),
+            launch_arguments={
+                'use_sim_time': use_sim_time,
+                'urdf_file': urdf_file,
+                'use_gnss_map_odom_tf': use_gnss_map_odom_tf,
+                'map_config_yaml': map_config_yaml,
+                'map_origin_ref_key': map_origin_ref_key,
+                'initialize_once': initialize_once,
+                'republish_hz': republish_hz,
+                'max_data_age_sec': max_data_age_sec,
+                'map_odom_yaw_deg': map_odom_yaw_deg,
+            }.items(),
         ),
     ])

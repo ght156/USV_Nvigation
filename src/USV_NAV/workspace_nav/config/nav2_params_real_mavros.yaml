@@ -144,7 +144,7 @@ local_costmap:
       height: 15
       resolution: 0.1
       # —— 船体 footprint (米)：1.6 m 长 × 0.8 m 宽。base_link 在船尾往前 0.2 m，故前向 1.4 m / 后向 0.2 m ——
-      footprint: "[[1.15, 0.4], [1.15, -0.4], [-0.3, -0.4], [-0.3, 0.4]]"
+      footprint: "[[1.72, 0.65], [1.72, -0.65], [-0.4, -0.65], [-0.4, 0.65]]"
       plugins: ["voxel_layer", "inflation_layer"]
       # —— 膨胀层：在障碍物周围生成渐变代价。半径过大会让船绕行过远 ——
       inflation_layer:
@@ -161,9 +161,9 @@ local_costmap:
         # —— 发布体素网格 (RViz 可订阅 /local_costmap/voxel_grid 查看) ——调试时true,实船false
         publish_voxel_map: false
         # —— 体素 z 轴范围：origin_z=-0.5, z_res=0.2, z_voxels=12 → 覆盖 -0.5~1.9 m (相对 base_link) ——
-        origin_z: -3.0      # 相对base_link开始建立体素，这三个参数只定义VoxelLayer 能处理的 z 范围：
-        z_resolution: 0.4    # z 轴分辨率 (米/层)
-        z_voxels: 30         # z 轴层数
+        origin_z: -1.0      # 相对开始建立体素，这三个参数只定义VoxelLayer 能处理的 z 范围：
+        z_resolution: 0.2   # z 轴分辨率 (米/层)
+        z_voxels: 16         # z 轴层数
         max_obstacle_height: 2.0
         # —— 标记阈值：一个体素列中至少 mark_threshold 个点被占据才标为障碍。0=首次点击即标记 (水面杂波多时可增大到 1~2) ——
         mark_threshold: 0
@@ -178,7 +178,7 @@ local_costmap:
           obstacle_min_range: 0.5    # 盲区 (米)，小于此距离的点忽略
           obstacle_max_range: 10.0   # 最大检测距离 (米)
           raytrace_min_range: 0.5
-          raytrace_max_range: 10.0   # 射线清除最大距离 (一般比 obstacle_max_range 大一点)
+          raytrace_max_range: 11.0   # 射线清除最大距离 (一般比 obstacle_max_range 大一点)
           # —— 障碍高度筛选：低于 min / 高于 max 的点不参与标记。min 设负值可滤除水面波纹 (相对 base_link) ——
           min_obstacle_height: 0.0  # 以上面设置   global_frame: odom为准
           max_obstacle_height: 2.0   # 高于 2 m 的点忽略 (滤桥梁/树冠)
@@ -194,7 +194,7 @@ global_costmap:
       use_sim_time: false
       rolling_window: false
       # —— 船体 footprint: 1.6 m × 0.8 m。base_link 在船尾往前 0.2 m，前向 1.4 m / 后向 0.2 m，同 local ——
-      footprint: "[[1.15, 0.4], [1.15, -0.4], [-0.3, -0.4], [-0.3, 0.4]]"
+      footprint: "[[1.72, 0.65], [1.72, -0.65], [-0.4, -0.65], [-0.4, 0.65]]"
       # —— 全局代价地图分辨率 (m/格)。原则：全局代价地图分辨率 = 地图分辨率 ——
       resolution: 0.5
       track_unknown_space: True

@@ -11,15 +11,15 @@
 
 | 包 | 职责 |
 |----|------|
-| **`workspace_ros`** | MAVROS 启动与 TF 覆盖、`gnss_odom_map_tf`、`static_transform_real_boat`、`nav2_cmd_vel_to_mavros`、感知/任务脚本 |
+| **`workspace_ros`** | `robot_state_publisher`（URDF TF）、`gnss_odom_map_tf`、`nav2_cmd_vel_to_mavros`、感知/任务脚本 |
 | **`workspace_nav`** | `nav2_real_mavros.launch.py`、`nav2_params_real_mavros.yaml`、地图 yaml、**`mission_bridge` / `nav_status_aggregator`**、legacy `waypoint_transform` |
 
 ---
 
 ## 2. 实船启动顺序
 
-1. `mavros_px4_usv.launch.py` — 飞控桥，`odom→base_link` TF  
-2. `real_boat_bringup.launch.py` — `gnss_odom_map_tf` + 传感器静态 TF +（可选）速度桥  
+1. MAVROS（嵌软启动）— `odom→base_link` TF  
+2. `real_boat_bringup.launch.py` — `robot_state_publisher`（URDF 传感器 TF）+ `gnss_odom_map_tf` +（可选）速度桥  
 3. `nav2_real_mavros.launch.py` — Nav2 + RViz +（默认）**mission_bridge + nav_status_aggregator**  
 
 ---
@@ -55,8 +55,8 @@
 | 变换 | 发布者 |
 |------|--------|
 | `map` → `odom` | `gnss_odom_map_tf`（读 `map_config_yaml` + `map_origin_ref_key`） |
-| `odom` → `base_link` | MAVROS `local_position`（`mavros_px4_overrides_usv.yaml`） |
-| `base_link` → 传感器 | `static_transform_real_boat.yaml` |
+| `odom` → `base_link` | MAVROS `local_position`（嵌软维护） |
+| `base_link` → 传感器 | `robot_state_publisher` 读 `m_common/urdf/usv_cf.xacro` |
 
 仅起 MAVROS、不起 bringup：**无 `map→odom`**。
 
@@ -130,6 +130,6 @@ nav_status_aggregator ──► /nav_status、/task_event
 | 控制/到点容差 | 同上 `controller_server` |
 | 速度桥限幅 | `nav2_cmd_vel_to_mavros.py` / launch |
 | 地图锚点 | map yaml、`real_boat_bringup` 的 `map_config_yaml` |
-| MAVROS TF | `mavros_px4_overrides_usv.yaml` |
+| MAVROS TF | 嵌软维护（历史覆盖层见 tag `archive/pre-mavros-cleanup`） |
 
 完整表：[`实船配置修改清单.md`](./实船配置修改清单.md)。

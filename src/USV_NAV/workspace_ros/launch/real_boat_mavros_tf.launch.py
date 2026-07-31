@@ -1,32 +1,25 @@
 #!/usr/bin/env python3
 
 # ----------------------------------------------------------------------------------------------- #
-#  实船 MAVROS 相关 TF：静态 base_link→传感器，以及可选动态 map→odom（gnss_odom_map_tf）。
-#  独立使用方式与旧名 real_boat_tf_static.launch.py 相同（该文件现为指向本文件的薄封装）。
-#  - 默认加载 static_transform_real_boat.yaml（base_link→传感器 link）
+#  实船 MAVROS 相关 TF：robot_state_publisher 从 URDF/xacro 发布 base_link→传感器 静态 TF，
+#  以及可选动态 map→odom（gnss_odom_map_tf）。
+#  - 默认从 m_common 包加载 usv_cf.xacro（实船外参）
 #  - map→odom（二选一，勿同时开）：
 #      * use_gnss_map_odom_tf:=true（默认）：gnss_odom_map_tf（可 initialize_once / republish_hz）
 #      * use_gnss_map_odom_tf:=false：恒等静态 map→odom（旧行为）
 # ----------------------------------------------------------------------------------------------- #
 import math
-from pathlib import Path
-
-from ament_index_python.packages import get_package_share_directory
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.conditions import IfCondition, UnlessCondition
-from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
+from launch.substitutions import Command, LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 
-PKG = 'workspace_ros'
-
 
 def generate_launch_description():
-    share = Path(get_package_share_directory(PKG))
-    static_yaml = LaunchConfiguration('static_transform_file')
     use_sim_time = LaunchConfiguration('use_sim_time')
     use_gnss_tf = LaunchConfiguration('use_gnss_map_odom_tf')
     map_config_yaml = LaunchConfiguration('map_config_yaml')
@@ -35,14 +28,16 @@ def generate_launch_description():
     republish_hz = LaunchConfiguration('republish_hz')
     max_data_age_sec = LaunchConfiguration('max_data_age_sec')
     map_odom_yaw_deg = LaunchConfiguration('map_odom_yaw_deg')
+    urdf_file = LaunchConfiguration('urdf_file')
 
     default_map_yaml = PathJoinSubstitution(
         [FindPackageShare('workspace_nav'), 'config', 'map_real_boat_hk.yaml'])
 
-    declare_static = DeclareLaunchArgument(
-        'static_transform_file',
-        default_value=str(share / 'config' / 'static_transform_real_boat.yaml'),
-        description='实船传感器静态 TF（base_link→*_link）；仿真请用 localization.launch 的 static_transform.yaml',
+    declare_urdf = DeclareLaunchArgument(
+        'urdf_file',
+        default_value=PathJoinSubstitution(
+            [FindPackageShare('m_common'), 'urdf', 'usv_cf.xacro']),
+        description='xacro/URDF 路径（默认 m_common 的实船 usv_cf.xacro）',
     )
     declare_time = DeclareLaunchArgument(
         'use_sim_time',
@@ -85,6 +80,11 @@ def generate_launch_description():
         description='map→odom：ENU 平移/姿态相对 Nav2 map 的固定绕 z 偏角（度）；常见 ±90。与 gnss_odom_map_tf 同源',
     )
 
+    robot_description = ParameterValue(
+        Command(['xacro ', urdf_file]),
+        value_type=str,
+    )
+
     def map_odom_static_identity(context, *args, **kwargs):
         ydeg = float(context.perform_substitution(LaunchConfiguration('map_odom_yaw_deg')))
         yrad = str(math.radians(ydeg))
@@ -110,7 +110,7 @@ def generate_launch_description():
         ]
 
     return LaunchDescription([
-        declare_static,
+        declare_urdf,
         declare_time,
         declare_gnss_tf,
         declare_map_yaml,
@@ -121,18 +121,18 @@ def generate_launch_description():
         declare_map_yaw,
 
         Node(
-            package=PKG,
-            executable='static_transform_publisher',
-            name='static_transforms_publisher',
+            package='robot_state_publisher',
+            executable='robot_state_publisher',
+            name='robot_state_publisher',
             parameters=[
-                {'static_transform_file': static_yaml},
+                {'robot_description': robot_description},
                 {'use_sim_time': use_sim_time},
             ],
             output='screen',
         ),
 
         Node(
-            package=PKG,
+            package='workspace_ros',
             executable='gnss_odom_map_tf',
             name='gnss_odom_map_tf',
             parameters=[

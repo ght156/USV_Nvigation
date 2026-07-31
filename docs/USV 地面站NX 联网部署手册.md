@@ -659,16 +659,9 @@ ros2 pkg list | grep -E "nav2|mavros|tf2"
 
 ## 10.6 启动流程（NX + 笔记本）
 
-### NX 终端 1：MAVROS
+### NX 终端 1：bringup（TF + map→odom + 速度桥）
 
-```bash
-source /opt/ros/humble/setup.bash
-source ~/USV_NAV/install/setup.bash
-ros2 launch workspace_ros mavros_px4_usv.launch.py \
-  fcu_url:=serial:///dev/ttyACM0:57600
-```
-
-### NX 终端 2：bringup
+> MAVROS 由嵌软在飞控侧启动，NX 端无需启动。
 
 ```bash
 source /opt/ros/humble/setup.bash
@@ -679,7 +672,7 @@ ros2 launch workspace_ros real_boat_bringup.launch.py \
   enable_nav2_cmd_vel_to_mavros:=true
 ```
 
-### NX 终端 3：Nav2
+### NX 终端 2：Nav2
 
 ```bash
 source /opt/ros/humble/setup.bash

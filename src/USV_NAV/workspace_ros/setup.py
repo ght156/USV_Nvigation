@@ -50,7 +50,6 @@ setup(
             'gnss_odom_map_tf = scripts.gnss_odom_map_tf:main',
             'kamikaze = scripts.kamikaze:main',
             'nav2_cmd_vel_to_mavros = scripts.nav2_cmd_vel_to_mavros:main',
-            'static_transform_publisher = scripts.static_transform_publisher:main',
             'target_buoy = scripts.target_buoy:main',
         ],
     },

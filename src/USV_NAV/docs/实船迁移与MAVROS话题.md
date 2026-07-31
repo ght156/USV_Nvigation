@@ -38,7 +38,7 @@ Nav2 →（可选平滑）geometry_msgs/Twist 或自建轨迹/LOS 输出
 
 - **`local_position/odom`** 的原点通常是 **PX4 HOME / 局域 origin**，**不会自动**等于 **`map` 栅格 (0,0) 对应的真实角点**。  
 - **`map`→`odom` 恒等** 隐含：**飞控局域坐标与 `map` 平面坐标在真实世界已对齐**，否则 RViz 里船在 **`map` 上会偏**。  
-- **对策**：**QGC** 设 **HOME** 与地图 **`ref_gnss*`** 角点一致，或 ROS 2 调 **`/mavros/cmd/set_home`**（**`CommandHome`**，指定经纬须 **`current_gps: false`**，见 **`实船调试.md`**「用 ROS 2 服务设置 PX4 HOME」）；或 **非恒等 `map`→`odom`**（AMCL、标定、`navsat_transform` 仅偏置等），或 **回到 EKF+navsat 模式 A**。步骤表见 **`实船调试.md`**「`map` / `odom` / PX4 HOME」专节。**TF 各段谁来发、`static_transform*.yaml` 对照**见同文档 **「TF 坐标系总览与复盘调试」**与本节 **§1.2**。
+- **对策**：**QGC** 设 **HOME** 与地图 **`ref_gnss*`** 角点一致，或 ROS 2 调 **`/mavros/cmd/set_home`**（**`CommandHome`**，指定经纬须 **`current_gps: false`**，见 **`实船调试.md`**「用 ROS 2 服务设置 PX4 HOME」）；或 **非恒等 `map`→`odom`**（AMCL、标定、`navsat_transform` 仅偏置等），或 **回到 EKF+navsat 模式 A**。步骤表见 **`实船调试.md`**「`map` / `odom` / PX4 HOME」专节。**TF 各段谁来发**见同文档 **「TF 坐标系总览与复盘调试」**与本节 **§1.2**。
 
 ---
 
@@ -46,8 +46,8 @@ Nav2 →（可选平滑）geometry_msgs/Twist 或自建轨迹/LOS 输出
 
 Nav2 需要 **`global_frame`**（通常为 **`map`**）到 **`robot_base_frame`（本仓库即 `base_link`）**，以及 **`odom`** 链路完整。
 
-- **模式 B（`/mavros/local_position/odom`）**：**`map`→`odom`** 由 **`real_boat_mavros_tf.launch.py`**（默认 **`gnss_odom_map_tf`**，从 **`map_config_yaml` / `map_origin_ref_key`** 读锚点；关 **`use_gnss_map_odom_tf`** 时静态 **`tf2`**；旧入口名 **`real_boat_tf_static.launch.py`**）；**`odom`→`base_link`** 由 **MAVROS** + **`mavros_px4_overrides_usv.yaml`**；**`base_link`→激光/IMU 等** 由 **`static_transform_real_boat.yaml`**（不要用仿真用的 **`static_transform.yaml`** 拓扑接到 **`base_link` 链**）。  
-- **仿真 / 模式 A**：**`map`→`odom`** 仍为恒等 **`localization`**；**`odom`→`base_link`** 为 **`ekf_node`**；传感器由 **URDF** + **`static_transform.yaml`**。  
+- **模式 B（`/mavros/local_position/odom`）**：**`map`→`odom`** 由 **`real_boat_mavros_tf.launch.py`**（默认 **`gnss_odom_map_tf`**，从 **`map_config_yaml` / `map_origin_ref_key`** 读锚点；关 **`use_gnss_map_odom_tf`** 时静态 **`tf2`**）；**`odom`→`base_link`** 由 **MAVROS**（嵌软维护）；**`base_link`→传感器** 由 **`robot_state_publisher`** 读取 **`m_common/urdf/usv_cf.xacro`** 的 fixed joint 发布。  
+- **仿真 / 模式 A**：**`map`→`odom`** 仍为恒等 **`localization`**；**`odom`→`base_link`** 为 **`ekf_node`**；传感器由 **URDF** + **`robot_state_publisher`**。  
 
 表格、命令 **`view_frames` / `tf2_echo`**、常见问题：**[`实船调试.md`](./实船调试.md)**「TF 坐标系总览与复盘调试」。架构缩表：**[`PROJECT_ARCHITECTURE_AND_NAV2.md`](./PROJECT_ARCHITECTURE_AND_NAV2.md)** §4.0。
 
@@ -62,7 +62,7 @@ Nav2 需要 **`global_frame`**（通常为 **`map`**）到 **`robot_base_frame`�
 | **执行层** | 真船无 **`/usv/thrusters/...`**。需 **停用或替换 `converter.py`**：常见通路为 MAVROS **`/mavros/setpoint_raw/local`**（Offboard，PositionTarget）、**`/mavros/rc/override`**、**`/mavros/actuator_control`** 等，与队里 PX4 **机架/混控**一致。**本仓库实船默认**：**`nav2_cmd_vel_to_mavros`**（**`/cmd_vel_nav`→`/mavros/setpoint_raw/local`**）。仿真与真机 **不可混用同一套增益**。 |
 | **里程计话题** | Nav2 的 **`bt_navigator` / `velocity_smoother`** 的 **`odom_topic`** 必须指向真实可用源：本仓库可走 **`robot_localization`→`/odometry/filtered`** 或 **`/mavros/local_position/odom`**（见 **`nav2_mavros_odom_overlay.yaml`**）。**严禁**在未弄清 TF 的情况下 **EKF + MAVROS local_pose 同时向同一子帧发 `odom`→车体**。 |
 | **激光 / 避障** | **仿真**：**`nav2_params.yaml`** → **`ObstacleLayer`** + **`LaserScan`**，约定 **`/usv/sensors/lidar/scan`**。**实船（模式 B）**：**`nav2_params_real_mavros.yaml`** → **`VoxelLayer`** + **`PointCloud2`**，默认 **`/livox/lidar`**；须核对 **点云 `frame_id`→`base_link` TF**、**时间戳**、**`use_sim_time=false`**，并按现场标定 **高度/体素/距离** 参数。若坚持用二维激光，需改回 **`ObstacleLayer`** 配置或 **`pointcloud_to_laserscan`** + 原激光话题链（见 **`实船调试.md`**）。 |
-| **TF 树** | **`map`→`odom`→`base_link`→传感器**须连贯：**模式 B** 用 **`mavros_px4_overrides_usv.yaml`** + **`static_transform_real_boat.yaml`**；**仿真 / 模式 A** 用 **EKF** + **`static_transform.yaml`** + **URDF `robot_state_publisher`**。**`map`→`odom` 恒等**与海图/Home 对齐见 [`实船调试.md`](./实船调试.md)。复盘：**[`实船调试.md`](./实船调试.md)**「TF 坐标系总览」、 **`PROJECT_ARCHITECTURE_AND_NAV2.md`** §4.0。 |
+| **TF 树** | **`map`→`odom`→`base_link`→传感器**须连贯：**模式 B** 用 **MAVROS（嵌软）** + **`robot_state_publisher`（`usv_cf.xacro`）**；**仿真 / 模式 A** 用 **EKF** + **URDF `robot_state_publisher`**。**`map`→`odom` 恒等**与海图/Home 对齐见 [`实船调试.md`](./实船调试.md)。复盘：**[`实船调试.md`](./实船调试.md)**「TF 坐标系总览」、 **`PROJECT_ARCHITECTURE_AND_NAV2.md`** §4.0。 |
 | **`use_sim_time`** | Gazebo **`/clock` 关停**后，整条栈（Nav2、`robot_localization`、桥接节点）必须为 **系统时间**。 |
 
 ### 2.2 建议改（稳定性与可调性明显提升）
@@ -101,7 +101,7 @@ PX4 对 **水面船架** 的支持与陆地 **Rover** 不同队可能差异很�
 |------|----------|
 | Nav2「抽搐」、路径反复重规划 | **GPS 跳变**、里程计与 **map** 时间/坐标不一致；检查 EKF/飞控 **定位健康** 与 **TF**。 |
 | Costmap 整体旋转 | **罗盘/IMU 航向**与 **地图北向** 不一致；核对 **ENU/NED** 与 **datum**。 |
-| **`map`/`odom`/`base_link` 断开，仅有 `*_ned`** | MAVROS TF 帧名/NED 与本仓库 **`map→odom` 静态链**不匹配；先起 **`mavros_px4_usv.launch.py`** 并启用 **`config/mavros_px4_overrides_usv.yaml`**（见 **`实船调试.md`**）；仍不对再查 MAVROS/PX4 版本与 **`实船调试.md`**「`*_ned` 与 ROS TF」。 |
+| **`map`/`odom`/`base_link` 断开，仅有 `*_ned`** | MAVROS TF 帧名/NED 与 **`map→odom` 静态链**不匹配；确认嵌软侧 MAVROS 配置是否发布 **`odom→base_link`**（历史覆盖层见 tag `archive/pre-mavros-cleanup`）；仍不对再查 MAVROS/PX4 版本与 **`实船调试.md`**「`*_ned` 与 ROS TF」。 |
 | 有规划无动作 | 未起 **MAVROS 侧控制链**、模式非 **OFFBOARD**、或与 **`converter`** 两套指令冲突。 |
 | 障碍层满屏 | **水面反射**、**雨雾**、**安装角** 导致误检；调 **range**、**滤波**、**传感器高度**。 |
 
@@ -111,7 +111,7 @@ PX4 对 **水面船架** 的支持与陆地 **Rover** 不同队可能差异很�
 
 下列基于 **MAVROS 为 MAVLink↔ROS2 桥** 的常规定义；**具体消息类型**以本机为准：`ros2 topic info <topic>`。
 
-**TF 帧与 Nav2 链衔接**：默认 **`ros2 launch mavros px4.launch`** 往往**不发布**或未对齐 **`odom`→`base_link`**；建议在 **`workspace_ros`** 使用 **`ros2 launch workspace_ros mavros_px4_usv.launch.py`**（安装后参数加载顺序见 **[`实船调试.md`](./实船调试.md)**），仅维护 **`config/mavros_px4_overrides_usv.yaml`** 小覆盖层。
+**TF 帧与 Nav2 链衔接**：MAVROS 由嵌软在飞控侧维护 **`odom→base_link`** TF；历史 NX 端启动方式（`mavros_px4_usv.launch.py` + `mavros_px4_overrides_usv.yaml`）见 tag `archive/pre-mavros-cleanup`。
 
 ### 5.1 链路状态与时间
 
