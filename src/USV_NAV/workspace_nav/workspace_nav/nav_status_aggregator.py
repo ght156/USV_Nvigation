@@ -4,13 +4,13 @@
 # nav_status_aggregator — Pure observer node.
 #
 # Subscribes to mission, localization, and navigation topics, then publishes:
-#   /nav_status  (2Hz snapshot, String/JSON, RELIABLE + TRANSIENT_LOCAL, depth=10)
+#   /nav_status  (2Hz snapshot, m_common/msg/NavStatus, RELIABLE + TRANSIENT_LOCAL, depth=1)
 #   /task_event  (event-triggered, String/JSON, RELIABLE, depth=50)
 #
 # Phase 1: 5 error codes (PLAN_FAILED, CTRL_STUCK, LOC_LOST, LOC_DEGRADED, MISSION_FAILED).
 # No costmap queries. No goal/action sending.
 #
-# /nav_status JSON schema: see docs/nav_gcs_refactor_plan.md §3.2
+# /nav_status 字段：m_common/msg/NavStatus（与 decision 对接说明 §1.3/§9.5 对齐，QoS depth=1）
 # /task_event  JSON schema: see docs/nav_gcs_refactor_plan.md §4.2
 # ----------------------------------------------------------------------------------------------- #
 
@@ -35,6 +35,8 @@ from sensor_msgs.msg import NavSatFix
 from std_msgs.msg import String
 from tf2_ros.buffer import Buffer
 from tf2_ros.transform_listener import TransformListener
+
+from m_common.msg import NavStatus
 
 
 # --------------------------------------------------------------------------- #
@@ -89,10 +91,11 @@ class NavStatusAggregator(Node):
         _planner_status_topic = str(self.get_parameter("planner_status_topic").value)
 
         # ---- QoS profiles ----------------------------------------------- #
+        # 与 decision 对接说明 §9.5 对齐：/nav_status QoS depth=1
         nav_status_qos = QoSProfile(
             reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
-            depth=10,
+            depth=1,
         )
         task_event_qos = QoSProfile(
             reliability=ReliabilityPolicy.RELIABLE,
@@ -101,7 +104,7 @@ class NavStatusAggregator(Node):
 
         # ---- publishers ------------------------------------------------- #
         self._nav_status_pub = self.create_publisher(
-            String, _nav_status_topic, nav_status_qos)
+            NavStatus, _nav_status_topic, nav_status_qos)
         self._task_event_pub = self.create_publisher(
             String, _task_event_topic, task_event_qos)
 
@@ -686,7 +689,7 @@ class NavStatusAggregator(Node):
     # ----------------------------------------------------------------------- #
 
     def _publish_nav_status(self) -> None:
-        """Compose and publish the /nav_status 2Hz snapshot per §3.2 schema."""
+        """Compose and publish the /nav_status 2Hz snapshot (m_common/msg/NavStatus)."""
         now = time.time()
         odom_stale = (now - self._odom_last_stamp) > self._odom_timeout
         gps_stale = (now - self._gps_last_stamp) > self._gps_timeout
@@ -706,68 +709,64 @@ class NavStatusAggregator(Node):
                 (self._waypoint_completed / self._waypoint_total) * 100.0, 1
             )
 
-        payload = {
-            "schema_version": 1,
-            "stamp": {"sec": sec, "nanosec": nsec},
-            "vehicle_id": self._vehicle_id,
-            "task": {
-                "state": self._mission_state,
-                "task_id": self._task_id or None,
-                "command_id": self._command_id or None,
-                "nav_phase": nav_phase,
-                "current_waypoint": self._waypoint_completed,
-                "total_waypoints": self._waypoint_total,
-                "progress_percent": progress,
-                "elapsed_sec": round(self._mission_elapsed_sec, 1),
-                "distance_to_goal_m": 0.0,
-                "eta_sec": None,
-                "last_error": self._last_error,
-            },
-            "planner": {
-                "status": planner_status,
-                "last_plan_time_ms": 0.0,
-                "last_error": self._derive_planner_last_error(),
-            },
-            "controller": {
-                "status": controller_status,
-                "tracking_error_m": 0.0,
-                "last_error": self._last_error
-                if self._last_error == "CTRL_STUCK" else None,
-            },
-            "localization": {
-                "overall": self._loc_health.value,
-                "position_cov_max": round(self._position_cov_max, 4),
-                "orientation_cov_max": round(self._orientation_cov_max, 4),
-                "gps_fix": gps_fix,
-                "tf_ok": self._tf_ok,
-                "odom_hz": round(self._odom_hz, 1),
-            },
-            "pose": {
-                "x": round(self._pose_x, 4),
-                "y": round(self._pose_y, 4),
-                "yaw": round(self._pose_yaw, 4),
-                "v": round(self._linear_v, 4),
-                "w": round(self._angular_w, 4),
-            },
-            "flags": {
-                "manual_override": False,
-                "emergency_stop": self._mission_state == "EMERGENCY",
-                "recovery_active": nav_phase == "RECOVERY",
-            },
-            "alerts": {
-                "odom_stale": odom_stale,
-                "gps_stale": gps_stale,
-                "mission_bridge_alive": mb_alive,
-                "planner_error": planner_status == "FAILED",
-                "controller_error": controller_status in ("FAILED", "STUCK"),
-                "emergency_active": self._mission_state == "EMERGENCY",
-                "mission_paused": self._mission_state == "PAUSED",
-            },
-            "recent_logs": list(self._recent_logs),
-        }
+        msg = NavStatus()
+        msg.header.stamp.sec = sec
+        msg.header.stamp.nanosec = nsec
+        msg.header.frame_id = self._global_frame
+        msg.vehicle_id = self._vehicle_id
 
-        msg = String()
-        msg.data = json.dumps(payload, ensure_ascii=False)
+        # --- 任务状态 ---
+        msg.task_state = str(self._mission_state)
+        msg.task_id = self._task_id or ""
+        msg.command_id = self._command_id or ""
+        msg.nav_phase = nav_phase
+        msg.current_waypoint = int(self._waypoint_completed)
+        msg.total_waypoints = int(self._waypoint_total)
+        msg.progress_percent = float(progress)
+        msg.elapsed_sec = float(round(self._mission_elapsed_sec, 1))
+        msg.distance_to_goal_m = 0.0
+        msg.eta_sec = -1.0  # 未知
+        msg.last_error = self._last_error or ""
+
+        # --- 规划器 / 控制器 ---
+        msg.planner_status = planner_status
+        msg.planner_last_plan_time_ms = 0.0
+        msg.planner_last_error = self._derive_planner_last_error() or ""
+        msg.controller_status = controller_status
+        msg.controller_tracking_error_m = 0.0
+        msg.controller_last_error = (
+            self._last_error if self._last_error == "CTRL_STUCK" else ""
+        )
+
+        # --- 定位 ---
+        msg.localization_overall = self._loc_health.value
+        msg.localization_position_cov_max = float(round(self._position_cov_max, 4))
+        msg.localization_orientation_cov_max = float(round(self._orientation_cov_max, 4))
+        msg.localization_gps_fix = int(gps_fix)
+        msg.localization_tf_ok = bool(self._tf_ok)
+        msg.localization_odom_hz = float(round(self._odom_hz, 1))
+
+        # --- 位姿 (map 系) ---
+        msg.pose_x = float(round(self._pose_x, 4))
+        msg.pose_y = float(round(self._pose_y, 4))
+        msg.pose_yaw = float(round(self._pose_yaw, 4))
+        msg.pose_v = float(round(self._linear_v, 4))
+        msg.pose_w = float(round(self._angular_w, 4))
+
+        # --- 标志位 ---
+        msg.flags_manual_override = False
+        msg.flags_emergency_stop = self._mission_state == "EMERGENCY"
+        msg.flags_recovery_active = nav_phase == "RECOVERY"
+
+        # --- 告警布尔 ---
+        msg.alerts_odom_stale = odom_stale
+        msg.alerts_gps_stale = gps_stale
+        msg.alerts_mission_bridge_alive = mb_alive
+        msg.alerts_planner_error = planner_status == "FAILED"
+        msg.alerts_controller_error = controller_status in ("FAILED", "STUCK")
+        msg.alerts_emergency_active = self._mission_state == "EMERGENCY"
+        msg.alerts_mission_paused = self._mission_state == "PAUSED"
+
         self._nav_status_pub.publish(msg)
 
     # ----------------------------------------------------------------------- #

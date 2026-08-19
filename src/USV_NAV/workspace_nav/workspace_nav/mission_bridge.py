@@ -24,9 +24,10 @@ from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Odometry
 from nav2_msgs.action import FollowWaypoints
-from rclpy.action import ActionClient
-from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
+from rclpy.action import ActionClient, ActionServer, CancelResponse, GoalResponse
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallbackGroup
 from rclpy.duration import Duration as RDuration
+from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.task import Future
@@ -36,6 +37,8 @@ from std_msgs.msg import String
 from tf2_ros.buffer import Buffer
 from tf2_ros.transform_listener import TransformListener
 
+from m_common.action import NavigateTask
+from m_common.msg import NavSafetyEvent
 from m_common.srv import CancelMission, SendWaypoints, SetPause, EmergencyStop
 
 from workspace_nav.gps_map_conversion import (
@@ -49,7 +52,7 @@ from workspace_nav.gps_map_conversion import (
     verify_waypoints_file,
 )
 from workspace_nav.waypoint_with_state import make_waypoint_path
-from workspace_nav.zone_geometry import point_in_polygon
+from workspace_nav.zone_geometry import fence_violation
 
 GREEN = "\x1b[32m"
 RESET = "\x1b[0m"
@@ -62,6 +65,14 @@ HEX_TO_COLOR = {
     "#000000": "black",
 }
 VALID_SEMANTIC = {"green", "red", "black"}
+
+# yaw 哨兵约定：合法航向为 [-2π, 2π] rad；超出该范围（如 Decision 下发的 65536）
+# 一律视为"不指定朝向"，导航取行进方向作为到点朝向。
+YAW_UNSPECIFIED = 65536.0
+
+
+def yaw_is_specified(yaw: float) -> bool:
+    return math.isfinite(yaw) and -2.0 * math.pi <= yaw <= 2.0 * math.pi
 
 
 class MissionState(str, Enum):
@@ -366,8 +377,9 @@ class MissionBridgeNode(Node):
         _cg_in = self.get_parameter("color_topic").value
         self.create_subscription(String, _wp_in, self._cb_waypoint, 10)
         self.create_subscription(String, _cg_in, self._cb_color, 10)
-        # 当前生效导航区域（zone_manager 发布，TRANSIENT_LOCAL），用于航点预校验
-        self._zone_polys: Optional[Dict[str, Any]] = None
+        # 当前生效导航围栏（zone_manager 发布，TRANSIENT_LOCAL），用于航点预校验
+        # 元素为 map 系 fence dict（见 zone_geometry.fence_violation）；空列表 = 不校验
+        self._zone_fences: List[Dict[str, Any]] = []
         _zones_qos = QoSProfile(
             depth=1,
             reliability=ReliabilityPolicy.RELIABLE,
@@ -411,6 +423,44 @@ class MissionBridgeNode(Node):
         self.get_logger().info(
             "Service servers ready: send_waypoints, set_pause, emergency_stop, cancel_mission")
         self._publish_status_detail()
+
+        # ------------------------------------------------------------------ #
+        # NavigateTask action server（Decision 对接契约）
+        # 独立 ReentrantCallbackGroup：execute 阻塞等待终止事件，
+        # 避免与服务组 / FollowWaypoints client 回调相互死锁。
+        # 锁顺序约定：_sm_lock 可嵌套 _nt_lock，反向禁止。
+        # ------------------------------------------------------------------ #
+        self._nt_cb_group = ReentrantCallbackGroup()
+        self._nt_lock = threading.Lock()
+        self._nt_done = threading.Event()
+        self._nt_goal_handle: Optional[Any] = None
+        # (result_code, error_code, message, how, final_current_seq, final_reached_seq)
+        self._nt_result_info: Optional[Tuple[int, str, str, str, int, int]] = None
+        self._nt_seqs: List[int] = []
+        self._nt_phase: int = NavigateTask.Feedback.PHASE_VALIDATING
+        self._nt_nav2_feedback_seen = False
+        self._nt_feedback_timer: Optional[Any] = None
+        # 越界原因挂起：safety_event 与 emergency_stop 竞速时优先报 GEOFENCE
+        self._nt_geofence_pending = False
+        self._nav_action_server = ActionServer(
+            self,
+            NavigateTask,
+            "/mission_bridge/navigate",
+            execute_callback=self._nt_execute,
+            goal_callback=self._nt_goal_cb,
+            cancel_callback=self._nt_cancel_cb,
+            callback_group=self._nt_cb_group,
+        )
+        _safety_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE)
+        self.create_subscription(
+            NavSafetyEvent,
+            "/mission_bridge/safety_event",
+            self._cb_safety_event,
+            _safety_qos,
+            callback_group=self._nt_cb_group,
+        )
+        self.get_logger().info(
+            "NavigateTask action server ready: /mission_bridge/navigate")
 
         self._suppress_passive_waypoints = False
         self._last_passive_waypoint_wall = 0.0
@@ -510,6 +560,12 @@ class MissionBridgeNode(Node):
             if prev in (MissionState.RUNNING, MissionState.PAUSED):
                 self._mission_token += 1
         self._cancel_active_nav2_goal()
+        self._nt_terminate(
+            NavigateTask.Result.RESULT_LOCALIZATION_LOST,
+            "SYSTEM_NOT_READY",
+            "TF or FollowWaypoints unavailable during mission",
+            "abort",
+        )
         with self._sm_lock:
             self._transition_state(MissionState.WAITING_SYSTEM)
         self.get_logger().warning(
@@ -621,6 +677,12 @@ class MissionBridgeNode(Node):
                 self.current_index = 0
                 self._running_mission_hash = None
                 self._transition_state(MissionState.IDLE, transition_reason="cancel")
+            self._nt_terminate(
+                NavigateTask.Result.RESULT_CANCELED,
+                "CANCELED",
+                "mission cleared via cancel_mission",
+                "abort",
+            )
             self.get_logger().info("EMERGENCY cleared via cancel → IDLE")
             return True, "Emergency cleared, state IDLE"
 
@@ -632,6 +694,12 @@ class MissionBridgeNode(Node):
                 self.current_index = 0
                 self._running_mission_hash = None
                 self._transition_state(MissionState.IDLE, transition_reason="cancel")
+            self._nt_terminate(
+                NavigateTask.Result.RESULT_CANCELED,
+                "CANCELED",
+                "paused mission cancelled via cancel_mission",
+                "abort",
+            )
             self.get_logger().info("PAUSED cancelled → IDLE")
             return True, "Paused mission cancelled, state IDLE"
 
@@ -883,6 +951,12 @@ class MissionBridgeNode(Node):
         with self._sm_lock:
             self._running_mission_hash = None
             self._transition_state(MissionState.IDLE, transition_reason=reason)
+        self._nt_terminate(
+            NavigateTask.Result.RESULT_CANCELED,
+            "PREEMPTED",
+            f"mission preempted by legacy channel ({reason})",
+            "abort",
+        )
 
     def _execute_mission_atomic(self, wps: List[Tuple[float, float]], mh: str) -> None:
         try:
@@ -913,7 +987,7 @@ class MissionBridgeNode(Node):
                 (
                     float(e["x"]),
                     float(e["y"]),
-                    0.0,
+                    YAW_UNSPECIFIED,
                 )
                 for e in document["waypoints"]
             ]
@@ -1020,6 +1094,14 @@ class MissionBridgeNode(Node):
             self._finalize_if_done()
             return
 
+        if not yaw_is_specified(yaw):
+            # 不指定朝向：取行进方向（上一航点/当前船位 → 目标点）
+            if self.current_index > 0:
+                px, py = self._nav_xy[self.current_index - 1][:2]
+            else:
+                px, py = rx, ry
+            yaw = math.atan2(y - py, x - px)
+
         goal = FollowWaypoints.Goal()
         goal.poses = [self.create_pose_msg(x, y, 0.0, yaw)]
         with self._sm_lock:
@@ -1035,7 +1117,9 @@ class MissionBridgeNode(Node):
             return
 
         send_token = self._mission_token
-        gh_fut = self._waypoint_client.send_goal_async(goal)
+        gh_fut = self._waypoint_client.send_goal_async(
+            goal, feedback_callback=self._nav2_feedback_cb
+        )
         gh_fut.add_done_callback(
             lambda future, t=send_token: self._goal_response_cb(future, t)
         )
@@ -1137,7 +1221,8 @@ class MissionBridgeNode(Node):
             )
             self._on_nav_fatal(error_code="MISSION_FAILED",
                                nav2_error_code=int(n2_code),
-                               nav2_error_msg=str(n2_msg))
+                               nav2_error_msg=str(n2_msg),
+                               nt_result_code=NavigateTask.Result.RESULT_PLANNING_FAILED)
             return
 
         self._log_green(f"Waypoint {self.current_index + 1} reached successfully.")
@@ -1183,6 +1268,9 @@ class MissionBridgeNode(Node):
             self._running_mission_hash = None
             self._transition_state(MissionState.COMPLETED)
         self.get_logger().info("All waypoints completed.")
+        self._nt_terminate(
+            NavigateTask.Result.RESULT_SUCCESS, "", "all waypoints reached", "succeed"
+        )
 
         try:
             if self._odom_sub is not None:
@@ -1204,7 +1292,8 @@ class MissionBridgeNode(Node):
 
     def _on_nav_fatal(self, error_code: str = "MISSION_FAILED",
                       nav2_error_code: int = 0,
-                      nav2_error_msg: str = "") -> None:
+                      nav2_error_msg: str = "",
+                      nt_result_code: Optional[int] = None) -> None:
         with self._sm_lock:
             self._transition_state(MissionState.FAILED)
             self._running_mission_hash = None
@@ -1234,6 +1323,14 @@ class MissionBridgeNode(Node):
             error_code=error_code,
             nav2_error_code=nav2_error_code,
             nav2_error_msg=nav2_error_msg,
+        )
+        self._nt_terminate(
+            nt_result_code
+            if nt_result_code is not None
+            else self._map_nav2_failure(nav2_error_code, nav2_error_msg),
+            error_code,
+            nav2_error_msg or "FollowWaypoints mission failed",
+            "abort",
         )
         self._state_to_idle_relaxed()
 
@@ -1270,64 +1367,100 @@ class MissionBridgeNode(Node):
     # ----------------------------------------------------------------------- #
 
     def _cb_nav_zones_current(self, msg: String) -> None:
-        """缓存 zone_manager 发布的当前生效区域（经纬度 → map 系多边形）。
+        """缓存 zone_manager 发布的当前生效围栏（经纬度 → map 系 fence dict）。
 
-        仅作业区/禁止区参与航点预校验；硬边界交给 KeepoutFilter + 规划器绕行，
-        无路时由 FollowWaypoints 失败路径上报，不在此预先拒绝。
+        仅 inclusion（作业区）/exclusion（禁止区）围栏参与航点预校验；
+        硬边界交给 KeepoutFilter + 规划器绕行，无路时由 FollowWaypoints
+        失败路径上报，不在此预先拒绝。
         """
         try:
             data = json.loads(msg.data)
         except json.JSONDecodeError:
             self.get_logger().warning("/nav_zones/current JSON 解析失败，忽略")
             return
+        if not isinstance(data, dict):
+            self.get_logger().warning("/nav_zones/current 顶层非 JSON object，忽略")
+            return
 
-        def _conv(pts) -> List[Tuple[float, float]]:
-            out: List[Tuple[float, float]] = []
-            for p in pts or []:
-                try:
-                    lon, lat = float(p[0]), float(p[1])
-                except (TypeError, ValueError, IndexError):
+        def _ll_to_map(lon: float, lat: float) -> Tuple[float, float]:
+            east, north = geodetic_delta_enu_m(
+                self._datum_lat, self._datum_lon, lat, lon
+            )
+            return enu_delta_to_map_xy(
+                east, north, self._map_ox, self._map_oy, self._map_origin_yaw
+            )
+
+        fences: List[Dict[str, Any]] = []
+        for f in data.get("fences") or []:
+            try:
+                fence_id = str(f.get("fence_id", ""))
+                ftype = f.get("type")
+                shape = f.get("shape")
+                if ftype not in ("inclusion", "exclusion"):
                     continue
-                east, north = geodetic_delta_enu_m(
-                    self._datum_lat, self._datum_lon, lat, lon
-                )
-                out.append(
-                    enu_delta_to_map_xy(
-                        east, north, self._map_ox, self._map_oy, self._map_origin_yaw
-                    )
-                )
-            return out
+                if shape == "polygon":
+                    pts: List[Tuple[float, float]] = []
+                    for p in f.get("points") or []:
+                        lon, lat = float(p[0]), float(p[1])
+                        pts.append(_ll_to_map(lon, lat))
+                    if len(pts) < 3:
+                        continue
+                    fences.append({
+                        "fence_id": fence_id,
+                        "type": ftype,
+                        "shape": "polygon",
+                        "points": pts,
+                        "center": None,
+                        "radius_m": 0.0,
+                    })
+                elif shape == "circle":
+                    c = f.get("center")
+                    if not c:
+                        continue
+                    center = _ll_to_map(float(c[0]), float(c[1]))
+                    radius = float(f.get("radius_m") or 0.0)
+                    if radius <= 0.0:
+                        continue
+                    fences.append({
+                        "fence_id": fence_id,
+                        "type": ftype,
+                        "shape": "circle",
+                        "points": [],
+                        "center": center,
+                        "radius_m": radius,
+                    })
+            except (TypeError, ValueError, IndexError, AttributeError):
+                continue
 
-        zones = {
-            "work_area": _conv(data.get("work_area")),
-            "forbidden_zones": [_conv(p) for p in (data.get("forbidden_zones") or [])],
-        }
-        self._zone_polys = zones
-        if zones["work_area"] or zones["forbidden_zones"]:
+        self._zone_fences = fences
+        if fences:
+            n_in = sum(1 for f in fences if f["type"] == "inclusion")
+            n_ex = len(fences) - n_in
             self.get_logger().info(
-                f"导航区域已生效（预校验开启）: 作业区 {len(zones['work_area'])} 点, "
-                f"禁止区 {len(zones['forbidden_zones'])} 个"
+                f"导航围栏已生效（预校验开启）: 作业区 {n_in} 个, 禁止区 {n_ex} 个"
             )
 
     def _nav_zones_violation(self, ll: List[Tuple[float, float]]) -> Optional[str]:
-        """检查航点是否违反作业区/禁止区；返回 None 表示合法，否则为拒绝原因。"""
-        z = self._zone_polys
-        if not z:
-            return None
-        wa = z.get("work_area") or []
-        fb = z.get("forbidden_zones") or []
-        if not wa and not fb:
+        """按围栏模型检查航点；返回 None 表示合法，否则为拒绝原因。
+
+        无围栏数据时不校验（零回归）。
+        """
+        fences = self._zone_fences
+        if not fences:
             return None
         for i, (lat, lon) in enumerate(ll):
             east, north = geodetic_delta_enu_m(self._datum_lat, self._datum_lon, lat, lon)
             x, y = enu_delta_to_map_xy(
                 east, north, self._map_ox, self._map_oy, self._map_origin_yaw
             )
-            if wa and not point_in_polygon(x, y, wa):
-                return f"航点 #{i} ({lat:.7f}, {lon:.7f}) 在作业区外"
-            for j, poly in enumerate(fb):
-                if point_in_polygon(x, y, poly):
-                    return f"航点 #{i} ({lat:.7f}, {lon:.7f}) 落在禁止区 #{j} 内"
+            violation = fence_violation(x, y, fences)
+            if violation is None:
+                continue
+            fence, _transition = violation
+            fence_id = fence.get("fence_id", "")
+            if fence.get("type") == "inclusion":
+                return f"航点 #{i} ({lat:.7f}, {lon:.7f}) 在作业区外（围栏 {fence_id}）"
+            return f"航点 #{i} ({lat:.7f}, {lon:.7f}) 落在禁止区内（围栏 {fence_id}）"
         return None
 
     def _cb_send_waypoints(self, request: SendWaypoints.Request,
@@ -1404,34 +1537,53 @@ class MissionBridgeNode(Node):
                 self._paused_index = 0
 
         try:
-            document = lat_lon_list_to_waypoints_document(
-                ll,
-                self._datum_lat,
-                self._datum_lon,
-                self._datum_easting,
-                self._datum_northing,
-                self._projection,
-                self._datum_source,
-                str(self._map_yaml_path) if self._map_yaml_path else "",
-                self._ref_key,
-                self._map_ox,
-                self._map_oy,
-                self._map_origin_yaw,
-            )
-            for i, e in enumerate(document["waypoints"]):
-                e["yaw"] = float(yaws[i])
-            atomic_write_json(self._waypoints_path.parent, self._waypoints_path, document)
+            self._write_and_start_mission(ll, yaws, mission_id, command_id)
         except Exception as e:
             response.success = False
             response.message = f"Failed to convert/write waypoints: {e}"
             self.get_logger().error(response.message)
             return response
 
+        response.success = True
+        response.message = f"Mission started: {len(ll)} waypoints, hash={mh[:12]}…"
+        self._log_green(response.message)
+        return response
+
+    def _write_and_start_mission(
+        self,
+        ll: List[Tuple[float, float]],
+        yaws: List[float],
+        mission_id: str,
+        command_id: str,
+    ) -> str:
+        """写 waypoints.json、装载航线并启动 FollowWaypoints 执行（不校验、不抢占）。
+
+        send_waypoints 服务与 NavigateTask action 共用。返回 mission hash。
+        """
+        document = lat_lon_list_to_waypoints_document(
+            ll,
+            self._datum_lat,
+            self._datum_lon,
+            self._datum_easting,
+            self._datum_northing,
+            self._projection,
+            self._datum_source,
+            self._map_yaml_resolved,
+            self._ref_key,
+            self._map_ox,
+            self._map_oy,
+            self._map_origin_yaw,
+        )
+        for i, e in enumerate(document["waypoints"]):
+            e["yaw"] = float(yaws[i])
+        atomic_write_json(self._waypoints_path.parent, self._waypoints_path, document)
+
         nav_xy: List[Tuple[float, float, float]] = [
             (float(e["x"]), float(e["y"]), float(yaws[i]))
             for i, e in enumerate(document["waypoints"])
         ]
 
+        mh = waypoint_mission_hash(ll, mission_id)
         self._current_mission_id = mission_id if mission_id else None
         self._current_command_id = command_id if command_id else None
         self._suppress_passive_waypoints = False
@@ -1445,11 +1597,7 @@ class MissionBridgeNode(Node):
             self._transition_state(MissionState.RUNNING)
         self._mission_start_wall = time.time()
         self._start_nav_stack()
-
-        response.success = True
-        response.message = f"Mission started: {len(nav_xy)} waypoints, hash={mh[:12]}…"
-        self._log_green(response.message)
-        return response
+        return mh
 
     def _cb_set_pause(self, request: SetPause.Request,
                       response: SetPause.Response) -> SetPause.Response:
@@ -1592,20 +1740,353 @@ class MissionBridgeNode(Node):
         self._delayed_mission = None
         self._clear_waypoint_file()
 
+        # zone_monitor 越界与急停竞速时优先报 GEOFENCE_VIOLATION
+        with self._nt_lock:
+            geofence_pending = self._nt_geofence_pending
+        if geofence_pending:
+            self._nt_terminate(
+                NavigateTask.Result.RESULT_GEOFENCE_VIOLATION,
+                "GEOFENCE_VIOLATION",
+                "electronic geofence violation",
+                "abort",
+            )
+        else:
+            self._nt_terminate(
+                NavigateTask.Result.RESULT_EMERGENCY_STOP,
+                "EMERGENCY_STOP",
+                "emergency stop during mission",
+                "abort",
+            )
+
         self._publish_status_detail(error_code="EMERGENCY_STOP")
         self.get_logger().error("EMERGENCY STOP — all state cleared")
+
+    # ----------------------------------------------------------------------- #
+    # NavigateTask action server（Decision 对接）
+    # ----------------------------------------------------------------------- #
+
+    def _nt_goal_cb(self, goal_request: NavigateTask.Goal) -> GoalResponse:
+        """Goal 校验：不合格即 REJECT（无 Result），warning 日志说明原因。"""
+        wps = goal_request.waypoints
+        if not wps:
+            self.get_logger().warning("[navigate] reject: waypoints empty")
+            return GoalResponse.REJECT
+
+        for i, wp in enumerate(wps):
+            lat = float(wp.latitude)
+            lon = float(wp.longitude)
+            if not (math.isfinite(lat) and math.isfinite(lon)):
+                self.get_logger().warning(
+                    f"[navigate] reject: waypoint #{i} lat/lon not finite ({lat}, {lon})"
+                )
+                return GoalResponse.REJECT
+            if lat == 0.0 and lon == 0.0:
+                self.get_logger().warning(f"[navigate] reject: waypoint #{i} is (0, 0)")
+                return GoalResponse.REJECT
+            if lat < -90.0 or lat > 90.0 or lon < -180.0 or lon > 180.0:
+                self.get_logger().warning(
+                    f"[navigate] reject: waypoint #{i} lat/lon out of range ({lat}, {lon})"
+                )
+                return GoalResponse.REJECT
+
+        with self._sm_lock:
+            state = self._state
+        if state == MissionState.WAITING_SYSTEM:
+            self.get_logger().warning("[navigate] reject: system not ready (WAITING_SYSTEM)")
+            return GoalResponse.REJECT
+        if state == MissionState.EMERGENCY:
+            self.get_logger().warning("[navigate] reject: EMERGENCY active")
+            return GoalResponse.REJECT
+        if state in (MissionState.RUNNING, MissionState.PAUSED):
+            # 不自动抢占（含 NavigateTask 自身任务与老通道任务），由 Decision 先 Cancel
+            self.get_logger().warning(
+                f"[navigate] reject: mission busy (state={state.value})"
+            )
+            return GoalResponse.REJECT
+        with self._nt_lock:
+            if self._nt_goal_handle is not None:
+                self.get_logger().warning(
+                    "[navigate] reject: another NavigateTask goal active"
+                )
+                return GoalResponse.REJECT
+
+        ll = [(float(wp.latitude), float(wp.longitude)) for wp in wps]
+        violation = self._nav_zones_violation(ll)
+        if violation:
+            self.get_logger().warning(
+                f"[navigate] reject: 航点违反导航区域限制: {violation}"
+            )
+            return GoalResponse.REJECT
+
+        self.get_logger().info(f"[navigate] accept goal: {len(wps)} waypoints")
+        return GoalResponse.ACCEPT
+
+    def _nt_cancel_cb(self, _goal_handle: Any) -> CancelResponse:
+        self.get_logger().info("[navigate] cancel requested")
+        return CancelResponse.ACCEPT
+
+    def _nt_execute(self, goal_handle: Any) -> NavigateTask.Result:
+        """阻塞式执行（依赖 MultiThreadedExecutor + ReentrantCallbackGroup）。
+
+        启动任务后等待终止事件；终止由成功/失败/取消/急停/越界各路径通过
+        _nt_terminate 触发（先发先赢），此处保证被接受的 goal 恰好返回一次 Result。
+        """
+        R = NavigateTask.Result
+        wps = goal_handle.request.waypoints
+        ll = [(float(w.latitude), float(w.longitude)) for w in wps]
+        yaws = [float(w.yaw) for w in wps]
+        seqs = [int(w.seq) for w in wps]
+
+        with self._nt_lock:
+            slot_taken = self._nt_goal_handle is not None
+            if not slot_taken:
+                self._nt_goal_handle = goal_handle
+                self._nt_seqs = seqs
+                self._nt_result_info = None
+                self._nt_phase = NavigateTask.Feedback.PHASE_VALIDATING
+                self._nt_nav2_feedback_seen = False
+                self._nt_geofence_pending = False
+        if slot_taken:
+            # 与另一 goal 的极端竞态：后到者直接终止
+            self.get_logger().warning("[navigate] abort: another goal registered first")
+            result = R()
+            result.result = R.RESULT_BUSY
+            result.error_code = "BUSY"
+            result.message = "another NavigateTask goal active"
+            result.final_current_seq = -1
+            result.final_reached_seq = -1
+            try:
+                goal_handle.abort()
+            except Exception:
+                pass
+            return result
+
+        self._nt_done.clear()
+        self._nt_start_feedback_timer()
+
+        if goal_handle.is_cancel_requested:
+            # 接受后、启动前即收到取消
+            self._nt_terminate(R.RESULT_CANCELED, "CANCELED",
+                               "canceled before start", "canceled")
+        else:
+            with self._sm_lock:
+                state = self._state
+            if state in (MissionState.IDLE, MissionState.COMPLETED, MissionState.FAILED):
+                try:
+                    mh = self._write_and_start_mission(ll, yaws, "", "")
+                except Exception as e:
+                    self._nt_terminate(R.RESULT_INTERNAL_ERROR, "INTERNAL_ERROR",
+                                       f"failed to start mission: {e}", "abort")
+                else:
+                    self._nt_phase = NavigateTask.Feedback.PHASE_PLANNING
+                    self.get_logger().info(
+                        f"[navigate] mission started: {len(ll)} waypoints "
+                        f"hash={mh[:12]}…"
+                    )
+            else:
+                # goal_cb 之后状态发生变化的竞态兜底
+                code = (
+                    R.RESULT_NOT_READY
+                    if state in (MissionState.WAITING_SYSTEM, MissionState.EMERGENCY)
+                    else R.RESULT_BUSY
+                )
+                self._nt_terminate(code, "STATE_" + state.value,
+                                   f"cannot start mission in state {state.value}", "abort")
+
+        while not self._nt_done.wait(timeout=0.1):
+            if goal_handle.is_cancel_requested:
+                # 先标记 CANCELED 结果，再安全停车（停车路径的抢占 hook 不得覆盖它）
+                self._nt_terminate(R.RESULT_CANCELED, "CANCELED",
+                                   "canceled by decision", "canceled")
+                self._apply_mission_cancel()
+
+        with self._nt_lock:
+            info = self._nt_result_info
+            self._nt_goal_handle = None
+            self._nt_seqs = []
+        self._nt_stop_feedback_timer()
+
+        result = R()
+        if info is None:
+            # 兜底：正常不会发生
+            result.result = R.RESULT_INTERNAL_ERROR
+            result.error_code = "INTERNAL_ERROR"
+            result.message = "mission terminated without result info"
+            result.final_current_seq = -1
+            result.final_reached_seq = -1
+            if goal_handle.is_active:
+                try:
+                    goal_handle.abort()
+                except Exception:
+                    pass
+        else:
+            result.result = info[0]
+            result.error_code = info[1]
+            result.message = info[2]
+            result.final_current_seq = info[4]
+            result.final_reached_seq = info[5]
+        self.get_logger().info(
+            f"[navigate] goal finished: result={result.result} "
+            f"error_code={result.error_code!r} message={result.message!r}"
+        )
+        return result
+
+    def _nt_terminate(self, result_code: int, error_code: str,
+                      message: str, how: str) -> None:
+        """终止当前 NavigateTask goal（幂等，先发先赢）。
+
+        由所有任务终止路径（成功/失败/取消/抢占/急停/越界/失联）调用；
+        无活动 goal 时为空操作，不影响老通道行为。
+        """
+        with self._sm_lock:
+            idx = self.current_index
+        with self._nt_lock:
+            gh = self._nt_goal_handle
+            if gh is None or self._nt_result_info is not None:
+                return
+            seqs = self._nt_seqs
+            cur = seqs[idx] if 0 <= idx < len(seqs) else (seqs[-1] if seqs else -1)
+            reached = seqs[idx - 1] if 1 <= idx <= len(seqs) else -1
+            self._nt_result_info = (
+                int(result_code), str(error_code), str(message), str(how),
+                int(cur), int(reached),
+            )
+        try:
+            if how == "succeed":
+                gh.succeed()
+            elif how == "canceled":
+                gh.canceled()
+            else:
+                gh.abort()
+        except Exception as ex:
+            self.get_logger().warning(f"[navigate] terminal transition ({how}): {ex}")
+        self._nt_done.set()
+
+    @staticmethod
+    def _map_nav2_failure(nav2_error_code: int, nav2_error_msg: str) -> int:
+        """把 Nav2 FollowWaypoints 失败尽量映射到 NavigateTask Result 码。
+
+        Humble 的 FollowWaypoints.Result 无 error_code 字段（恒为 0），
+        按错误消息关键词归类；无法判定时归 INTERNAL_ERROR。
+        """
+        R = NavigateTask.Result
+        msg = (nav2_error_msg or "").lower()
+        if any(k in msg for k in ("plan", "path", "route", "missed")):
+            return R.RESULT_PLANNING_FAILED
+        if any(k in msg for k in ("controller", "control", "follow", "stuck", "collision")):
+            return R.RESULT_CONTROLLER_FAILED
+        if 100 <= nav2_error_code < 200:
+            return R.RESULT_PLANNING_FAILED
+        if 200 <= nav2_error_code < 300:
+            return R.RESULT_CONTROLLER_FAILED
+        return R.RESULT_INTERNAL_ERROR
+
+    def _nav2_feedback_cb(self, _feedback_msg: Any) -> None:
+        """收到 FollowWaypoints feedback 即视为进入 TRACKING 阶段。"""
+        self._nt_nav2_feedback_seen = True
+
+    def _nt_start_feedback_timer(self) -> None:
+        self._nt_stop_feedback_timer()
+        self._nt_feedback_timer = self.create_timer(
+            0.5, self._nt_publish_feedback, callback_group=self._nt_cb_group
+        )
+
+    def _nt_stop_feedback_timer(self) -> None:
+        t = self._nt_feedback_timer
+        self._nt_feedback_timer = None
+        if t is not None:
+            try:
+                t.cancel()
+            except Exception:
+                pass
+
+    def _nt_publish_feedback(self) -> None:
+        """2 Hz 发布 NavigateTask feedback（phase/seq/剩余里程）。"""
+        with self._nt_lock:
+            gh = self._nt_goal_handle
+            seqs = self._nt_seqs
+            phase = self._nt_phase
+        if gh is None:
+            return
+        with self._sm_lock:
+            state = self._state
+            idx = self.current_index
+            nav = list(self._nav_xy)
+
+        fb = NavigateTask.Feedback()
+        if state == MissionState.PAUSED:
+            fb.phase = NavigateTask.Feedback.PHASE_PAUSED
+            fb.message = "paused"
+        elif phase == NavigateTask.Feedback.PHASE_VALIDATING:
+            fb.phase = NavigateTask.Feedback.PHASE_VALIDATING
+            fb.message = "validating"
+        elif not self._nt_nav2_feedback_seen:
+            fb.phase = NavigateTask.Feedback.PHASE_PLANNING
+            fb.message = "planning"
+        else:
+            fb.phase = NavigateTask.Feedback.PHASE_TRACKING
+            fb.message = "tracking"
+
+        fb.current_seq = seqs[idx] if 0 <= idx < len(seqs) else (seqs[-1] if seqs else -1)
+        fb.reached_seq = seqs[idx - 1] if 1 <= idx <= len(seqs) else -1
+
+        rx, ry = self._robot_xy()
+        # 口径（与 decision 对接说明 §9.3 一致）：当前船位到当前目标航点的距离
+        dist = 0.0
+        if 0 <= idx < len(nav):
+            dist = math.hypot(nav[idx][0] - rx, nav[idx][1] - ry)
+        fb.distance_remaining_m = float(dist)
+
+        try:
+            gh.publish_feedback(fb)
+        except Exception:
+            pass
+
+    def _cb_safety_event(self, msg: NavSafetyEvent) -> None:
+        """zone_monitor 异步安全事件：越界时终止活动 NavigateTask goal。"""
+        if msg.event_code != "GEOFENCE_VIOLATION":
+            return
+        if msg.enabled:
+            with self._nt_lock:
+                self._nt_geofence_pending = True
+                active = self._nt_goal_handle is not None
+            if active:
+                self.get_logger().error(
+                    f"[navigate] geofence violation: fence={msg.fence_id} "
+                    f"type={msg.fence_type} transition={msg.transition}"
+                )
+                self._nt_terminate(
+                    NavigateTask.Result.RESULT_GEOFENCE_VIOLATION,
+                    "GEOFENCE_VIOLATION",
+                    "electronic geofence violation",
+                    "abort",
+                )
+        else:
+            with self._nt_lock:
+                self._nt_geofence_pending = False
 
 
 def main(args: Optional[list] = None) -> None:
     rclpy.init(args=args)
     node = MissionBridgeNode()
+    # NavigateTask execute 为阻塞式等待，需多线程执行器；
+    # 共享状态由 _sm_lock / _pose_lock / _nt_lock 保护。
+    executor = MultiThreadedExecutor(num_threads=4)
+    executor.add_node(node)
     try:
-        rclpy.spin(node)
+        executor.spin()
     except KeyboardInterrupt:
         node.get_logger().info("interrupt")
     finally:
+        try:
+            executor.shutdown()
+        except Exception:
+            pass
         node.destroy_node()
-        rclpy.shutdown()
+        try:
+            rclpy.shutdown()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

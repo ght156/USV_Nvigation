@@ -35,6 +35,34 @@ def point_in_polygon(px: float, py: float, pts: Sequence[Point]) -> bool:
     return inside
 
 
+def point_in_circle(px: float, py: float, cx: float, cy: float, r: float) -> bool:
+    """点是否在圆内。"""
+    return (px - cx) ** 2 + (py - cy) ** 2 <= r * r
+
+
+def point_in_fence_map(px: float, py: float, fence: dict) -> bool:
+    """点是否在单个围栏内。fence 为 map 系 dict：
+    {"shape": "polygon", "points": [(x, y), ...]} 或
+    {"shape": "circle", "center": (x, y), "radius_m": r}。"""
+    if fence.get("shape") == "circle" and fence.get("center") is not None:
+        return point_in_circle(px, py, fence["center"][0], fence["center"][1], fence["radius_m"])
+    return point_in_polygon(px, py, fence.get("points") or [])
+
+
+def fence_violation(px: float, py: float, fences: Sequence[dict]):
+    """按 GeoFence 语义检查违规；返回 (fence, transition) 或 None。
+    - 存在 inclusion（作业区）时点必须在至少一个内，否则视为驶出第一个 inclusion（EXIT）
+    - 点落入任一 exclusion（禁航区）为闯入（ENTER）
+    """
+    inclusions = [f for f in fences if f.get("type") == "inclusion"]
+    if inclusions and not any(point_in_fence_map(px, py, f) for f in inclusions):
+        return inclusions[0], "EXIT"
+    for f in fences:
+        if f.get("type") == "exclusion" and point_in_fence_map(px, py, f):
+            return f, "ENTER"
+    return None
+
+
 def fill_polygon_grid(
     mask: List[int], width: int, height: int, pts_grid: Sequence[Point], value: int
 ) -> int:
@@ -77,6 +105,36 @@ def _bresenham_cells(x0: int, y0: int, x1: int, y1: int):
         if e2 <= dx:
             err += dx
             y += sy
+
+
+def fill_circle_grid(
+    mask: List[int],
+    width: int,
+    height: int,
+    cx: float,
+    cy: float,
+    radius_cells: float,
+    value: int,
+) -> int:
+    """把圆（栅格坐标圆心 + 半径格数）内部格点置为 value。返回改动格数。"""
+    if radius_cells <= 0:
+        return 0
+    r2 = radius_cells * radius_cells
+    min_x = max(0, int(cx - radius_cells))
+    max_x = min(width - 1, int(cx + radius_cells) + 1)
+    min_y = max(0, int(cy - radius_cells))
+    max_y = min(height - 1, int(cy + radius_cells) + 1)
+    changed = 0
+    for iy in range(min_y, max_y + 1):
+        row = iy * width
+        dy2 = (iy + 0.5 - cy) ** 2
+        for ix in range(min_x, max_x + 1):
+            if (ix + 0.5 - cx) ** 2 + dy2 <= r2:
+                idx = row + ix
+                if mask[idx] != value:
+                    mask[idx] = value
+                    changed += 1
+    return changed
 
 
 def draw_polyline_grid(
@@ -136,6 +194,44 @@ def build_zone_mask(
         mask = [FREE] * (width * height)
     for poly in forbidden_grids:
         fill_polygon_grid(mask, width, height, poly, KEEPOUT)
+    for line in boundary_grids:
+        draw_polyline_grid(mask, width, height, line, KEEPOUT, boundary_dilation_cells)
+    return mask
+
+
+# 围栏填充描述：("polygon", [(gx, gy), ...]) 或 ("circle", cx, cy, radius_cells)
+FenceFill = Tuple
+
+
+def _apply_fill(mask: List[int], width: int, height: int, fill: FenceFill, value: int) -> None:
+    if fill[0] == "polygon":
+        fill_polygon_grid(mask, width, height, fill[1], value)
+    elif fill[0] == "circle":
+        fill_circle_grid(mask, width, height, fill[1], fill[2], fill[3], value)
+
+
+def build_fence_mask(
+    width: int,
+    height: int,
+    inclusion_fills: Sequence[FenceFill],
+    exclusion_fills: Sequence[FenceFill],
+    boundary_grids: Sequence[Sequence[Point]],
+    boundary_dilation_cells: int = 2,
+) -> List[int]:
+    """按 GeoFence 模型生成 keepout 掩码：
+    1. 存在 inclusion（作业区）围栏时：全图禁行，所有 inclusion 的并集放行；
+       不存在时全图自由。
+    2. exclusion（禁航区）内部置禁行（覆盖 inclusion）。
+    3. 硬边界折线膨胀后叠加禁行。
+    """
+    if inclusion_fills:
+        mask = [KEEPOUT] * (width * height)
+        for f in inclusion_fills:
+            _apply_fill(mask, width, height, f, FREE)
+    else:
+        mask = [FREE] * (width * height)
+    for f in exclusion_fills:
+        _apply_fill(mask, width, height, f, KEEPOUT)
     for line in boundary_grids:
         draw_polyline_grid(mask, width, height, line, KEEPOUT, boundary_dilation_cells)
     return mask

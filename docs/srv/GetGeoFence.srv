@@ -1,0 +1,11 @@
+# 上层 → 导航：查询当前保存的电子围栏快照
+#
+# 实现：m_common/srv/GetGeoFence.srv
+# Service：/mission_bridge/get_geofence（zone_manager 节点）
+#
+# 未设置围栏时 success=true 且 fences 为空
+# 详见 docs/作业区与电子围栏.md
+
+---
+bool success
+m_common/GeoFence[] fences

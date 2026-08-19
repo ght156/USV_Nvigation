@@ -39,6 +39,9 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/MissionWaypoint.msg"
   "msg/GeoPolygon.msg"
   "msg/NavZones.msg"
+  "msg/GeoPoint.msg"
+  "msg/GeoFence.msg"
+  "msg/NavSafetyEvent.msg"
   "srv/RTSPStreamSwitch.srv"
   "srv/ReportVideoWarning.srv"
   "srv/SendWaypoints.srv"
@@ -47,6 +50,9 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/CancelMission.srv"
   "srv/SetNavZones.srv"
   "srv/GetNavZones.srv"
+  "srv/SetGeoFence.srv"
+  "srv/GetGeoFence.srv"
+  "action/NavigateTask.action"
   DEPENDENCIES builtin_interfaces geometry_msgs sensor_msgs std_msgs
 )
 ament_export_dependencies(rosidl_default_runtime)

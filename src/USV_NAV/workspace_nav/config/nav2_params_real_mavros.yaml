@@ -86,17 +86,18 @@ controller_server:
     FollowPath:
       plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
       # —— 期望线速度 (m/s)。下水首试偏保守 (0.2)；稳定后可逐步放宽 ——
-      desired_linear_vel: 1.0
+      desired_linear_vel: 0.3
       # —— 最大角加速度 (rad/s²)。水面惯量大，小值抑制摇头 ——
       max_angular_accel: 1.0
       # —— 是否允许倒车。false：目标在船后时只能绕弧前进，无法倒车对准；全局路径会先向前再拐 ——
-      allow_reversing: false
+      allow_reversing: false #与原地旋转不能同时开启
 
       # —— 前瞻 (lookahead / carrot)，L≈clamp(v×lookahead_time, min, max) ——
       # base_link 在船尾、船头前伸约 1.4 m：min 须 >1.4，否则 carrot 落在船体内。
       # 与最小转弯半径 R_min 匹配（宜 min ≥ R_min，与 regulated_linear_scaling_min_radius 同量级）：
       #   min 过小：carrot 在弯内侧，船未转完前瞻点已到近处 → S 线、左右震荡，严重时像反向拧。
       #   max 过大：沿路径直行过久 → 转弯滞后、有效半径大，目标在船后时先冲很远再拐。
+      lookahead_dist: 6.0                    # 静态Fallback距离，use_velocity_scaled_lookahead_dist: true时无效
       lookahead_time: 9.0
       use_velocity_scaled_lookahead_dist: true
       min_lookahead_dist: 6.0
@@ -117,11 +118,12 @@ controller_server:
 
       # —— 接近目标时减速。距离须 ≥ 船头前伸量，否则到达前已全速冲过 ——
       min_approach_linear_velocity: 0.1
-      approach_velocity_scaling_dist: 5.0
+      approach_velocity_scaling_dist: 3.0   #剩余路径长度小于此值，开始线性降速，直到最小线速度min_approach_linear_velocity
 
       # —— 转向控制 ——
-      use_rotate_to_heading: true              # 实船水面不建议原地旋转
+      use_rotate_to_heading: true              # 机器人航向与路径起点航向偏差过大（超过 rotate_to_heading_min_angle），或者在接近终点（在容差内）需要调整终态朝向时（rotate_to_heading_angular_vel调整速度），会停止线速度，进行原地旋转。
       rotate_to_heading_angular_vel: 0.12
+      rotate_to_heading_min_angle: 1.57  #1.57  90度     0.785    45度
       # —— 碰撞检测：在 carrot 前 max_allowed_time_to_collision 秒内有障碍则急停 ——
       use_collision_detection: true
       max_allowed_time_to_collision_up_to_carrot: 2.0

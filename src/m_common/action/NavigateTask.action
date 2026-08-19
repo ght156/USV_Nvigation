@@ -1,0 +1,38 @@
+# 单点导航 / 无动作航线（Decision → 导航）
+# waypoints 长度 1 = 单点导航；>= 2 = 按序执行的无动作航线；0 = Goal 请求阶段拒绝
+# seq 保持 Decision 下发原值，导航不重新编号
+# Goal
+m_common/MissionWaypoint[] waypoints
+---
+# Result
+int32 RESULT_SUCCESS=0
+int32 RESULT_INVALID_GOAL=1
+int32 RESULT_BUSY=2
+int32 RESULT_NOT_READY=3
+int32 RESULT_CANCELED=4
+int32 RESULT_PLANNING_FAILED=5
+int32 RESULT_CONTROLLER_FAILED=6
+int32 RESULT_STUCK=7
+int32 RESULT_LOCALIZATION_LOST=8
+int32 RESULT_GEOFENCE_VIOLATION=9
+int32 RESULT_EMERGENCY_STOP=10
+int32 RESULT_INTERNAL_ERROR=99
+
+int32 result
+string error_code
+string message
+int32 final_current_seq
+int32 final_reached_seq
+---
+# Feedback
+uint8 PHASE_VALIDATING=1
+uint8 PHASE_PLANNING=2
+uint8 PHASE_TRACKING=3
+uint8 PHASE_RECOVERY=4
+uint8 PHASE_PAUSED=5
+
+uint8 phase
+int32 current_seq
+int32 reached_seq
+float32 distance_remaining_m
+string message

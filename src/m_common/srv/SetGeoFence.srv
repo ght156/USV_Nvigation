@@ -1,0 +1,7 @@
+# Decision → 导航：写入完整电子围栏快照（开机一次 + 云平台更新时）
+# 全量替换语义；空数组 = 清除已保存的全部围栏
+# 校验失败返回 success=false，并保留上一次有效围栏
+m_common/GeoFence[] fences
+---
+bool success
+string message

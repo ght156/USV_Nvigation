@@ -1,6 +1,5 @@
-# 导航状态快照字段 schema（对应 /nav_status JSON）
-# 运行时 Topic 类型仍为 std_msgs/String；本 msg 供 find_package(m_common) 对照字段
-# 发布频率 2Hz，QoS: RELIABLE + TRANSIENT_LOCAL
+# 导航状态快照（话题 /nav_status，2Hz，RELIABLE + TRANSIENT_LOCAL，QoS depth=1）
+# 与 decision 对接说明（2026-08-19）§1.3/§9.5 对齐
 
 std_msgs/Header header             # stamp + frame_id
 string vehicle_id                  # 车辆 ID
