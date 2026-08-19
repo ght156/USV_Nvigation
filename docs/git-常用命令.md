@@ -112,4 +112,40 @@ git switch -c <新分支名>
 
 ---
 
+## 七、把 src/USV_NAV 同步到 GitLab usv 仓库（monorepo）
+
+本地仓库（`USV_NX`）与 GitLab 的 `usv` 是两套不相干的历史，`usv` 是 monorepo。
+同步导航包的正确姿势：基于 `usv/main` 建临时分支，把 `src/USV_NAV` 整体替换成本地最新版，提交后快进 `main`。只动 `src/USV_NAV`，不碰其它包。
+
+**一键脚本（推荐）**
+
+```bash
+bash scripts/push-nav-to-usv.sh             # 同步并推送到 usv/main
+bash scripts/push-nav-to-usv.sh --dry-run   # 只检查差异，不推送
+```
+
+脚本会带上：已提交内容 + 未提交的已跟踪修改 + 未跟踪的新文件；被 `.gitignore` 忽略的（`map/*.pgm`、`__pycache__` 等）不会带上。
+
+**手动步骤（等价于脚本做的事）**
+
+```bash
+git fetch usv                                # 1. 拉最新主干
+git switch -c nav-sync usv/main              # 2. 基于最新 main 建临时分支
+git rm -r -q src/USV_NAV                     # 3. 删掉仓库里旧版导航包
+git archive USV_NX src/USV_NAV | tar -x -C . #    放入本地最新版
+git add -Af src/USV_NAV                      # 4. 暂存（-f 必加：仓库根 .gitignore 有 data/ 规则，会忽略 YOLO 权重目录）
+git commit -m "feat(nav): 同步导航包"         # 5. 提交
+git push usv nav-sync:main                   # 6. 推上 main
+git switch USV_NX && git branch -D nav-sync  # 7. 回原分支，删临时分支
+```
+
+**注意**
+
+- 未提交的改动要留在工作区（脚本会自动带上）；手动流程里第 3 步的 `git archive USV_NX` 只包含已提交内容，若用手动流程请先 `git commit` 或 `git stash`。
+- 若别人更新过 `main`，push 会被拒（非快进）：先 `git fetch usv && git rebase usv/main` 再重推。
+- pre-push hook 会拦截 `map/*.pgm`、`*.pgm`、`build/install/log` 等路径，混入这些文件会被拒推。
+- 本地旧的 `push-to-usv`、`push-to-usv2` 属于历史运输分支，已清理；GitLab 上还有早期 `nav_usv-v0.0.1+` 分支，如不再需要可手动删除。
+
+---
+
 *本文件仅作本地备忘，与 Git 版本无关的具体行为以 `git --help` 为准。*
