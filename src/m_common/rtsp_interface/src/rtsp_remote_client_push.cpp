@@ -19,7 +19,11 @@
 
 #if defined(__linux__)
 #include <spawn.h>
+#include <sys/wait.h>
 #include <unistd.h>
+
+#include <chrono>
+#include <thread>
 extern char ** environ;
 #endif
 
@@ -239,6 +243,8 @@ struct RPushChannel
   int pending_w{0}, pending_h{0};
   int locked_w{0}, locked_h{0};
   int fps_num{30}, fps_den{1};
+  RtspCodec codec{RtspCodec::kH264};
+  int bitrate_kbps{2000};
   std::uint64_t frame_index{0};
   std::uint64_t pushed_total{0};
 
@@ -246,7 +252,101 @@ struct RPushChannel
   std::uint64_t paused_drop_counter = 0;
   std::atomic<std::uint64_t> appsrc_push_fail_count{0};
   std::atomic<bool> logged_first_push{false};
+  /// bus ERROR/EOS 或 appsrc push 失败时置位；重建管线成功后清零
+  std::atomic<bool> push_broken{false};
 };
+
+struct HealthPack
+{
+  RPushChannel * ch{nullptr};
+  std::shared_ptr<std::promise<bool>> prom;
+};
+
+struct StopStreamPack
+{
+  RPushChannel * ch{nullptr};
+  std::shared_ptr<std::promise<bool>> prom;
+};
+
+gboolean health_check_idle_cb(gpointer user_data)
+{
+  auto * pack = static_cast<HealthPack *>(user_data);
+  bool ok = false;
+  if (pack->ch != nullptr && !pack->ch->paused.load(std::memory_order_acquire) &&
+      !pack->ch->push_broken.load(std::memory_order_acquire) &&
+      pack->ch->pipeline != nullptr) {
+    GstState state = GST_STATE_VOID_PENDING;
+    GstState pending = GST_STATE_VOID_PENDING;
+    const GstStateChangeReturn ret =
+      gst_element_get_state(pack->ch->pipeline, &state, &pending, 0);
+    ok = (ret != GST_STATE_CHANGE_FAILURE && state == GST_STATE_PLAYING);
+    if (!ok) {
+      pack->ch->push_broken.store(true, std::memory_order_release);
+    }
+  }
+  if (pack->prom) {
+    pack->prom->set_value(ok);
+  }
+  delete pack;
+  return G_SOURCE_REMOVE;
+}
+
+gboolean session_check_idle_cb(gpointer user_data)
+{
+  auto * pack = static_cast<HealthPack *>(user_data);
+  bool ok = false;
+  if (pack->ch != nullptr && !pack->ch->push_broken.load(std::memory_order_acquire) &&
+      pack->ch->pipeline != nullptr) {
+    GstState state = GST_STATE_VOID_PENDING;
+    GstState pending = GST_STATE_VOID_PENDING;
+    const GstStateChangeReturn ret =
+      gst_element_get_state(pack->ch->pipeline, &state, &pending, 0);
+    ok = (ret != GST_STATE_CHANGE_FAILURE &&
+          (state == GST_STATE_PLAYING || state == GST_STATE_PAUSED));
+  }
+  if (pack->prom) {
+    pack->prom->set_value(ok);
+  }
+  delete pack;
+  return G_SOURCE_REMOVE;
+}
+
+gboolean stop_stream_push_idle_cb(gpointer user_data)
+{
+  auto * pack = static_cast<StopStreamPack *>(user_data);
+  bool ok = false;
+  if (pack->ch != nullptr) {
+    RPushChannel * ch = pack->ch;
+    std::lock_guard<std::mutex> serial_lk(ch->stream_serial_mtx);
+    if (ch->pipeline != nullptr) {
+      gst_element_set_state(ch->pipeline, GST_STATE_NULL);
+      GstState st = GST_STATE_VOID_PENDING;
+      GstState pending = GST_STATE_VOID_PENDING;
+      gst_element_get_state(ch->pipeline, &st, &pending, 10 * GST_SECOND);
+      gst_object_unref(ch->pipeline);
+      ch->pipeline = nullptr;
+    }
+    {
+      std::lock_guard<std::mutex> lk(ch->mu);
+      g_weak_ref_clear(&ch->appsrc_weak);
+      g_weak_ref_init(&ch->appsrc_weak, nullptr);
+      ch->frame_index = 0;
+    }
+    ch->paused.store(true, std::memory_order_release);
+    ch->push_broken.store(false, std::memory_order_release);
+    ch->logged_first_push.store(false, std::memory_order_release);
+    ch->appsrc_push_fail_count.store(0, std::memory_order_relaxed);
+    ok = true;
+    std::fprintf(
+      stderr, "[rtsp_remote_push][gst] mount=\"%s\" 已停止并销毁 rtspclientsink 管线\n",
+      ch->mount_path.c_str());
+  }
+  if (pack->prom) {
+    pack->prom->set_value(ok);
+  }
+  delete pack;
+  return G_SOURCE_REMOVE;
+}
 
 gboolean idle_rpush_buffer(gpointer user_data)
 {
@@ -311,6 +411,9 @@ gboolean idle_rpush_buffer(gpointer user_data)
         w->ch->mount_path.c_str());
     }
   } else {
+    if (flow != GST_FLOW_FLUSHING) {
+      w->ch->push_broken.store(true, std::memory_order_release);
+    }
     const std::uint64_t n = w->ch->appsrc_push_fail_count.fetch_add(1, std::memory_order_relaxed) + 1;
     if (n <= 8 || (n % 250 == 0)) {
       std::fprintf(
@@ -329,6 +432,7 @@ gboolean rpush_bus_cb(GstBus *, GstMessage * msg, gpointer user_data)
   auto * ch = static_cast<RPushChannel *>(user_data);
   switch (GST_MESSAGE_TYPE(msg)) {
     case GST_MESSAGE_ERROR: {
+      ch->push_broken.store(true, std::memory_order_release);
       GError * err = nullptr;
       gchar * dbg = nullptr;
       gst_message_parse_error(msg, &err, &dbg);
@@ -337,6 +441,13 @@ gboolean rpush_bus_cb(GstBus *, GstMessage * msg, gpointer user_data)
         ch->mount_path.c_str(), err ? err->message : "?", dbg ? dbg : "");
       if (err) g_error_free(err);
       if (dbg) g_free(dbg);
+      break;
+    }
+    case GST_MESSAGE_EOS: {
+      ch->push_broken.store(true, std::memory_order_release);
+      std::fprintf(
+        stderr, "[rtsp_remote_push][gst] mount=\"%s\" EOS（远端可能已断连）\n",
+        ch->mount_path.c_str());
       break;
     }
     case GST_MESSAGE_WARNING: {
@@ -384,7 +495,6 @@ struct RelocatePack
   std::string new_url;
   std::shared_ptr<std::promise<std::pair<bool, std::string>>> prom;
   RtspRemoteClientPushConfig cfg;
-  std::size_t stream_index{0};
 };
 
 gboolean relocate_stream_idle_cb(gpointer user_data)
@@ -408,21 +518,33 @@ gboolean relocate_stream_idle_cb(gpointer user_data)
   }
 
   const RtspRemoteClientPushConfig & cfg = pack->cfg;
-  const std::size_t si = pack->stream_index;
-  if (si >= cfg.streams.size()) {
-    done(false, "relocate_stream_remote_url: stream_index out of range");
-    return G_SOURCE_REMOVE;
-  }
 
   std::lock_guard<std::mutex> serial_lk(ch->stream_serial_mtx);
 
-  if (ch->remote_url == trimmed) {
-    done(true, {});
-    return G_SOURCE_REMOVE;
+  if (ch->remote_url == trimmed && !ch->push_broken.load(std::memory_order_acquire)) {
+    if (ch->pipeline != nullptr) {
+      GstState state = GST_STATE_VOID_PENDING;
+      GstState pending = GST_STATE_VOID_PENDING;
+      const GstStateChangeReturn gst_ret =
+        gst_element_get_state(ch->pipeline, &state, &pending, 0);
+      if (gst_ret != GST_STATE_CHANGE_FAILURE &&
+          (state == GST_STATE_PLAYING || state == GST_STATE_PAUSED)) {
+        const bool was_paused = ch->paused.load(std::memory_order_acquire);
+        ch->paused.store(false, std::memory_order_release);
+        std::fprintf(
+          stderr,
+          was_paused
+            ? "[rtsp_remote_push][gst] mount=\"%s\" 已从 pause 恢复推流（无需重建）-> %s\n"
+            : "[rtsp_remote_push][gst] mount=\"%s\" 会话仍有效，恢复推流（无需重建）-> %s\n",
+          ch->mount_path.c_str(), trimmed.c_str());
+        done(true, {});
+        return G_SOURCE_REMOVE;
+      }
+    }
+    // URL 未变但管线已断开/非 PLAYING：继续走下方 tear_down + 重建
   }
 
-  const auto & s = cfg.streams[si].spec;
-  if (s.codec == RtspCodec::kMjpeg) {
+  if (ch->codec == RtspCodec::kMjpeg) {
     done(false, "relocate_stream_remote_url: MJPEG 未支持");
     return G_SOURCE_REMOVE;
   }
@@ -446,8 +568,8 @@ gboolean relocate_stream_idle_cb(gpointer user_data)
     ch->logged_first_push.store(false, std::memory_order_relaxed);
   }
 
-  const int kbps = (s.bitrate_kbps >= 200) ? s.bitrate_kbps : 200;
-  std::string launch = (s.codec == RtspCodec::kH265)
+  const int kbps = (ch->bitrate_kbps >= 200) ? ch->bitrate_kbps : 200;
+  std::string launch = (ch->codec == RtspCodec::kH265)
                            ? build_h265_client_launch(resolve_h265_impl(cfg.h265_encoder), kbps)
                            : build_h264_client_launch(resolve_h264_impl(cfg.h264_encoder), kbps);
 
@@ -532,6 +654,9 @@ gboolean relocate_stream_idle_cb(gpointer user_data)
     std::lock_guard<std::mutex> lk(ch->mu);
     ch->remote_url = trimmed;
   }
+  ch->push_broken.store(false, std::memory_order_release);
+  ch->appsrc_push_fail_count.store(0, std::memory_order_relaxed);
+  ch->paused.store(false, std::memory_order_release);
 
   std::fprintf(
     stderr, "[rtsp_remote_push][gst] mount=\"%s\" 已切换远端 ingest（重建管线）-> %s\n", ch->mount_path.c_str(),
@@ -597,8 +722,10 @@ public:
         ch->remote_url = e.remote_rtsp_url;
         ch->fps_num = (s.fps > 0) ? s.fps : 25;
         ch->fps_den = 1;
+        ch->codec = s.codec;
+        ch->bitrate_kbps = (s.bitrate_kbps >= 200) ? s.bitrate_kbps : 200;
 
-        const int kbps = (s.bitrate_kbps >= 200) ? s.bitrate_kbps : 200;
+        const int kbps = ch->bitrate_kbps;
         std::string launch = (s.codec == RtspCodec::kH265)
                                ? build_h265_client_launch(resolve_h265_impl(cfg_.h265_encoder), kbps)
                                : build_h264_client_launch(resolve_h264_impl(cfg_.h264_encoder), kbps);
@@ -679,6 +806,7 @@ public:
           }
           throw std::runtime_error(detail);
         }
+        ch->push_broken.store(false, std::memory_order_release);
       }
     } catch (...) {
       teardown();
@@ -734,8 +862,10 @@ public:
     ch->remote_url = ent.remote_rtsp_url;
     ch->fps_num = (s.fps > 0) ? s.fps : 25;
     ch->fps_den = 1;
+    ch->codec = s.codec;
+    ch->bitrate_kbps = (s.bitrate_kbps >= 200) ? s.bitrate_kbps : 200;
 
-    const int kbps = (s.bitrate_kbps >= 200) ? s.bitrate_kbps : 200;
+    const int kbps = ch->bitrate_kbps;
     std::string launch = (s.codec == RtspCodec::kH265)
                            ? build_h265_client_launch(resolve_h265_impl(cfg_.h265_encoder), kbps)
                            : build_h264_client_launch(resolve_h264_impl(cfg_.h264_encoder), kbps);
@@ -830,6 +960,7 @@ public:
       if (err_msg != nullptr) *err_msg = detail;
       return false;
     }
+    ch_raw->push_broken.store(false, std::memory_order_release);
 
     std::fprintf(
       stderr, "[rtsp_remote_push][gst] append_stream mount=\"%s\" -> %s\n", ch_raw->mount_path.c_str(),
@@ -922,6 +1053,60 @@ public:
     return channels_[idx]->pushed_total;
   }
 
+  bool stream_push_healthy(const std::string & mount_key) const
+  {
+    if (!started_ || main_ctx_ == nullptr) return false;
+    std::string key = mount_key;
+    while (!key.empty() && key.front() == '/') key.erase(key.begin());
+    const auto idx = find_channel(key);
+    if (!idx.has_value() || !channels_[*idx]) return false;
+
+    auto prom = std::make_shared<std::promise<bool>>();
+    std::future<bool> fut = prom->get_future();
+    auto * pack = new HealthPack{channels_[*idx].get(), prom};
+    g_main_context_invoke(main_ctx_, health_check_idle_cb, pack);
+    return fut.get();
+  }
+
+  bool stream_push_session_exists(const std::string & mount_key) const
+  {
+    if (!started_ || main_ctx_ == nullptr) return false;
+    std::string key = mount_key;
+    while (!key.empty() && key.front() == '/') key.erase(key.begin());
+    const auto idx = find_channel(key);
+    if (!idx.has_value() || !channels_[*idx]) return false;
+
+    auto prom = std::make_shared<std::promise<bool>>();
+    std::future<bool> fut = prom->get_future();
+    auto * pack = new HealthPack{channels_[*idx].get(), prom};
+    g_main_context_invoke(main_ctx_, session_check_idle_cb, pack);
+    return fut.get();
+  }
+
+  bool stream_push_paused(const std::string & mount_key) const
+  {
+    std::string key = mount_key;
+    while (!key.empty() && key.front() == '/') key.erase(key.begin());
+    const auto idx = find_channel(key);
+    if (!idx.has_value() || !channels_[*idx]) return false;
+    return channels_[*idx]->paused.load(std::memory_order_acquire);
+  }
+
+  bool stop_stream_push(const std::string & mount_key)
+  {
+    if (!started_ || main_ctx_ == nullptr) return false;
+    std::string key = mount_key;
+    while (!key.empty() && key.front() == '/') key.erase(key.begin());
+    const auto idx = find_channel(key);
+    if (!idx.has_value() || !channels_[*idx]) return false;
+
+    auto prom = std::make_shared<std::promise<bool>>();
+    std::future<bool> fut = prom->get_future();
+    auto * pack = new StopStreamPack{channels_[*idx].get(), prom};
+    g_main_context_invoke(main_ctx_, stop_stream_push_idle_cb, pack);
+    return fut.get();
+  }
+
   bool relocate_stream_remote_url(const std::string & mount_key, const std::string & new_url, std::string * err_msg)
   {
     if (!started_) {
@@ -946,7 +1131,7 @@ public:
     RPushChannel * ch = channels_[*idx].get();
     auto prom = std::make_shared<std::promise<std::pair<bool, std::string>>>();
     std::future<std::pair<bool, std::string>> fut = prom->get_future();
-    auto * job = new RelocatePack{ch, trimmed, prom, cfg_, *idx};
+    auto * job = new RelocatePack{ch, trimmed, prom, cfg_};
     g_main_context_invoke(main_ctx_, relocate_stream_idle_cb, job);
     const std::pair<bool, std::string> result = fut.get();
     if (!result.first && err_msg != nullptr) *err_msg = result.second;
@@ -1020,17 +1205,25 @@ bool spawn_gstreamer_rtsp_url_relay(
     }
     return false;
   }
-  std::string pipeline;
-  if (use_h265) {
-    pipeline = "rtspsrc location=" + pull_url +
-      " latency=0 protocols=tcp ! rtph265depay ! h265parse ! rtspclientsink location=" + push_url +
-      " protocols=tcp";
-  } else {
-    pipeline = "rtspsrc location=" + pull_url +
-      " latency=0 protocols=tcp ! rtph264depay ! h264parse ! rtspclientsink location=" + push_url +
-      " protocols=tcp";
-  }
-  std::vector<std::string> store = {"gst-launch-1.0", "-e", pipeline};
+  const std::string depay = use_h265 ? "rtph265depay" : "rtph264depay";
+  const std::string pay = use_h265 ? "rtph265pay" : "rtph264pay";
+  // RTP 解包再打包后送 rtspclientsink；parse+sink 易导致部分 ingest 服务端断连。
+  std::vector<std::string> store = {
+    "gst-launch-1.0",
+    "-e",
+    "rtspsrc",
+    "location=" + pull_url,
+    "latency=100",
+    "protocols=tcp",
+    "!",
+    depay,
+    "!",
+    pay,
+    "!",
+    "rtspclientsink",
+    "location=" + push_url,
+    "protocols=tcp",
+  };
   std::vector<char *> argv;
   argv.reserve(store.size() + 1);
   for (auto & s : store) {
@@ -1045,8 +1238,16 @@ bool spawn_gstreamer_rtsp_url_relay(
     }
     return false;
   }
+  std::this_thread::sleep_for(std::chrono::milliseconds(400));
+  if (::kill(pid, 0) != 0) {
+    int status = 0;
+    (void)::waitpid(pid, &status, WNOHANG);
+    if (err_msg != nullptr) {
+      *err_msg = "gst-launch 子进程已退出（pipeline/连接失败，请检查 pull/push URL 与 H264/H265 是否匹配）";
+    }
+    return false;
+  }
   *out_pid = static_cast<int>(pid);
-  (void)err_msg;
   return true;
 #endif
 }
@@ -1095,6 +1296,26 @@ std::optional<std::size_t> RtspRemoteClientPush::find_channel(const std::string 
 std::uint64_t RtspRemoteClientPush::pushed_frames(std::size_t stream_idx) const
 {
   return impl_->pushed_frames(stream_idx);
+}
+
+bool RtspRemoteClientPush::stream_push_healthy(const std::string & mount_path) const
+{
+  return impl_->stream_push_healthy(mount_path);
+}
+
+bool RtspRemoteClientPush::stream_push_session_exists(const std::string & mount_path) const
+{
+  return impl_->stream_push_session_exists(mount_path);
+}
+
+bool RtspRemoteClientPush::stream_push_paused(const std::string & mount_path) const
+{
+  return impl_->stream_push_paused(mount_path);
+}
+
+bool RtspRemoteClientPush::stop_stream_push(const std::string & mount_path)
+{
+  return impl_->stop_stream_push(mount_path);
 }
 
 }  // namespace m_common

@@ -10,7 +10,7 @@
 mission_bridge:
   ros__parameters:
     map_yaml_path: ""
-    odom_topic: "/mavros/local_position/odom"
+    odom_topic: "/mavros/gps_input/local"
     global_frame: "map"
     robot_frame: "base_link"
     map_datum_ref_key: "ref_gnss_10"
@@ -20,9 +20,24 @@ mission_bridge:
 
 nav_status_aggregator:
   ros__parameters:
-    gps_topic: "/mavros/global_position/raw/fix"
+    gps_topic: "/mavros/gps_input/raw/fix"
     publish_rate: 2.0
     vehicle_id: "usv_real_001"
     odom_timeout: 2.0
     gps_timeout: 5.0
     stuck_progress_timeout: 12.0
+
+# —— 电子围栏：作业区/禁止区/硬边界 ——
+zone_manager:
+  ros__parameters:
+    # 硬边界折线栅格膨胀格数（掩码分辨率=地图分辨率 1m/格 时 ±2m）
+    boundary_dilation_cells: 2
+    # 掩码/filter_info 周期重发间隔（s）；0=关闭（TRANSIENT_LOCAL 已保证晚加入者收到最后一帧）
+    republish_period_sec: 0.0
+
+zone_monitor:
+  ros__parameters:
+    enabled: true
+    # 检查周期（s）与连续违规确认次数：0.5s × 5 ≈ 2.5s 防抖
+    check_period_sec: 0.5
+    violation_threshold: 5

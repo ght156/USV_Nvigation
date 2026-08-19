@@ -1,0 +1,9 @@
+# §4.2.4 mission_pause / mission_resume / mission_cancel
+# action: "pause" / "resume" / "cancel"
+string user_id
+string action
+string execution_id
+string bid
+---
+int32 result
+string msg

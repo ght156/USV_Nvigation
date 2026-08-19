@@ -1,0 +1,5 @@
+# decision → boat_control: 解锁/锁定
+bool armed
+---
+int32 result
+string msg

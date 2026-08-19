@@ -28,6 +28,7 @@ from rclpy.action import ActionClient
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from rclpy.duration import Duration as RDuration
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.task import Future
 from rclpy.time import Time as RTime
 from std_msgs.msg import Empty
@@ -40,12 +41,15 @@ from m_common.srv import CancelMission, SendWaypoints, SetPause, EmergencyStop
 from workspace_nav.gps_map_conversion import (
     atomic_write_json,
     datum_lat_lon_from_cfg,
+    enu_delta_to_map_xy,
+    geodetic_delta_enu_m,
     lat_lon_list_to_waypoints_document,
     parse_waypoint_message,
     read_map_origin,
     verify_waypoints_file,
 )
 from workspace_nav.waypoint_with_state import make_waypoint_path
+from workspace_nav.zone_geometry import point_in_polygon
 
 GREEN = "\x1b[32m"
 RESET = "\x1b[0m"
@@ -184,6 +188,7 @@ class MissionBridgeNode(Node):
         self.declare_parameter("discard_watchdog_sec", 4.0)
         self.declare_parameter("suppress_passive_waypoints_after_cancel", True)
         self.declare_parameter("target_buoy_min_write_period_sec", 0.0)
+        self.declare_parameter("nav_zones_topic", "/nav_zones/current")
 
         self._dbg = bool(self.get_parameter("debug_mode").value)
         wf_param = (
@@ -322,9 +327,9 @@ class MissionBridgeNode(Node):
         self._target_buoy_min_period = max(
             0.0, float(self.get_parameter("target_buoy_min_write_period_sec").value)
         )
-        self._nav_xy: List[Tuple[float, float]] = []
+        self._nav_xy: List[Tuple[float, float, float]] = []  # (map_x, map_y, yaw_rad)
         self.current_index = 0
-        self._paused_nav_xy: List[Tuple[float, float]] = []
+        self._paused_nav_xy: List[Tuple[float, float, float]] = []
         self._paused_index: int = 0
         self.navigating = False
         self._current_pose_xy = (0.0, 0.0)
@@ -361,6 +366,19 @@ class MissionBridgeNode(Node):
         _cg_in = self.get_parameter("color_topic").value
         self.create_subscription(String, _wp_in, self._cb_waypoint, 10)
         self.create_subscription(String, _cg_in, self._cb_color, 10)
+        # 当前生效导航区域（zone_manager 发布，TRANSIENT_LOCAL），用于航点预校验
+        self._zone_polys: Optional[Dict[str, Any]] = None
+        _zones_qos = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        self.create_subscription(
+            String,
+            self.get_parameter("nav_zones_topic").value,
+            self._cb_nav_zones_current,
+            _zones_qos,
+        )
         if self._mission_cancel_topic:
             self.create_subscription(
                 Empty,
@@ -895,6 +913,7 @@ class MissionBridgeNode(Node):
                 (
                     float(e["x"]),
                     float(e["y"]),
+                    0.0,
                 )
                 for e in document["waypoints"]
             ]
@@ -986,7 +1005,8 @@ class MissionBridgeNode(Node):
                 return
             if self.current_index >= len(self._nav_xy):
                 return
-            x, y = self._nav_xy[self.current_index]
+            x, y = self._nav_xy[self.current_index][:2]
+            yaw = float(self._nav_xy[self.current_index][2])
 
         rx, ry = self._robot_xy()
         dist = math.hypot(x - rx, y - ry)
@@ -1001,11 +1021,12 @@ class MissionBridgeNode(Node):
             return
 
         goal = FollowWaypoints.Goal()
-        goal.poses = [self.create_pose_msg(x, y, 0.0, 0.0)]
+        goal.poses = [self.create_pose_msg(x, y, 0.0, yaw)]
         with self._sm_lock:
             self.navigating = True
         self._log_green(
-            f"Sending waypoint {self.current_index + 1}/{len(self._nav_xy)} x={x:.2f}, y={y:.2f}"
+            f"Sending waypoint {self.current_index + 1}/{len(self._nav_xy)} "
+            f"x={x:.2f}, y={y:.2f}, yaw={yaw:.3f}"
         )
 
         if not self._waypoint_client.wait_for_server(timeout_sec=self._action_timeout_sec):
@@ -1248,9 +1269,73 @@ class MissionBridgeNode(Node):
     # Service callbacks
     # ----------------------------------------------------------------------- #
 
+    def _cb_nav_zones_current(self, msg: String) -> None:
+        """缓存 zone_manager 发布的当前生效区域（经纬度 → map 系多边形）。
+
+        仅作业区/禁止区参与航点预校验；硬边界交给 KeepoutFilter + 规划器绕行，
+        无路时由 FollowWaypoints 失败路径上报，不在此预先拒绝。
+        """
+        try:
+            data = json.loads(msg.data)
+        except json.JSONDecodeError:
+            self.get_logger().warning("/nav_zones/current JSON 解析失败，忽略")
+            return
+
+        def _conv(pts) -> List[Tuple[float, float]]:
+            out: List[Tuple[float, float]] = []
+            for p in pts or []:
+                try:
+                    lon, lat = float(p[0]), float(p[1])
+                except (TypeError, ValueError, IndexError):
+                    continue
+                east, north = geodetic_delta_enu_m(
+                    self._datum_lat, self._datum_lon, lat, lon
+                )
+                out.append(
+                    enu_delta_to_map_xy(
+                        east, north, self._map_ox, self._map_oy, self._map_origin_yaw
+                    )
+                )
+            return out
+
+        zones = {
+            "work_area": _conv(data.get("work_area")),
+            "forbidden_zones": [_conv(p) for p in (data.get("forbidden_zones") or [])],
+        }
+        self._zone_polys = zones
+        if zones["work_area"] or zones["forbidden_zones"]:
+            self.get_logger().info(
+                f"导航区域已生效（预校验开启）: 作业区 {len(zones['work_area'])} 点, "
+                f"禁止区 {len(zones['forbidden_zones'])} 个"
+            )
+
+    def _nav_zones_violation(self, ll: List[Tuple[float, float]]) -> Optional[str]:
+        """检查航点是否违反作业区/禁止区；返回 None 表示合法，否则为拒绝原因。"""
+        z = self._zone_polys
+        if not z:
+            return None
+        wa = z.get("work_area") or []
+        fb = z.get("forbidden_zones") or []
+        if not wa and not fb:
+            return None
+        for i, (lat, lon) in enumerate(ll):
+            east, north = geodetic_delta_enu_m(self._datum_lat, self._datum_lon, lat, lon)
+            x, y = enu_delta_to_map_xy(
+                east, north, self._map_ox, self._map_oy, self._map_origin_yaw
+            )
+            if wa and not point_in_polygon(x, y, wa):
+                return f"航点 #{i} ({lat:.7f}, {lon:.7f}) 在作业区外"
+            for j, poly in enumerate(fb):
+                if point_in_polygon(x, y, poly):
+                    return f"航点 #{i} ({lat:.7f}, {lon:.7f}) 落在禁止区 #{j} 内"
+        return None
+
     def _cb_send_waypoints(self, request: SendWaypoints.Request,
                            response: SendWaypoints.Response) -> SendWaypoints.Response:
-        """Service: 下发航线 (SendWaypoints). Service 调用等价于 explicit_replan，可抢占 RUNNING/PAUSED。"""
+        """Service: 下发航线 (SendWaypoints). Service 调用等价于 explicit_replan，可抢占 RUNNING/PAUSED。
+
+        航点为 WGS84 lat/lon + yaw(rad)；内部转换为 map 坐标后执行。
+        """
         wps = request.waypoints
         mission_id = request.mission_id.strip() if request.mission_id else ""
         command_id = request.command_id.strip() if request.command_id else ""
@@ -1281,11 +1366,33 @@ class MissionBridgeNode(Node):
             self.get_logger().warning(response.message)
             return response
 
-        nav_xy: List[Tuple[float, float]] = []
-        for ps in wps:
-            nav_xy.append((float(ps.pose.position.x), float(ps.pose.position.y)))
+        ll: List[Tuple[float, float]] = []
+        yaws: List[float] = []
+        for wp in wps:
+            lat = float(wp.latitude)
+            lon = float(wp.longitude)
+            if lat == 0.0 and lon == 0.0:
+                response.success = False
+                response.message = "Invalid waypoint (0, 0)"
+                self.get_logger().warning(response.message)
+                return response
+            if lat < -90.0 or lat > 90.0 or lon < -180.0 or lon > 180.0:
+                response.success = False
+                response.message = f"Lat/lon out of range: ({lat}, {lon})"
+                self.get_logger().warning(response.message)
+                return response
+            ll.append((lat, lon))
+            yaws.append(float(wp.yaw))
 
-        mh = waypoint_mission_hash(nav_xy, mission_id)
+        # 作业区/禁止区预校验（在抢占当前任务与写盘之前，拒绝不产生影响）
+        zone_violation = self._nav_zones_violation(ll)
+        if zone_violation:
+            response.success = False
+            response.message = f"航点违反导航区域限制，已拒绝: {zone_violation}"
+            self.get_logger().warning(response.message)
+            return response
+
+        mh = waypoint_mission_hash(ll, mission_id)
 
         with self._sm_lock:
             if self._state in (MissionState.RUNNING, MissionState.PAUSED):
@@ -1297,15 +1404,33 @@ class MissionBridgeNode(Node):
                 self._paused_index = 0
 
         try:
-            document = {
-                "waypoints": [{"x": x, "y": y} for x, y in nav_xy],
-            }
+            document = lat_lon_list_to_waypoints_document(
+                ll,
+                self._datum_lat,
+                self._datum_lon,
+                self._datum_easting,
+                self._datum_northing,
+                self._projection,
+                self._datum_source,
+                str(self._map_yaml_path) if self._map_yaml_path else "",
+                self._ref_key,
+                self._map_ox,
+                self._map_oy,
+                self._map_origin_yaw,
+            )
+            for i, e in enumerate(document["waypoints"]):
+                e["yaw"] = float(yaws[i])
             atomic_write_json(self._waypoints_path.parent, self._waypoints_path, document)
         except Exception as e:
             response.success = False
-            response.message = f"Failed to write waypoints.json: {e}"
+            response.message = f"Failed to convert/write waypoints: {e}"
             self.get_logger().error(response.message)
             return response
+
+        nav_xy: List[Tuple[float, float, float]] = [
+            (float(e["x"]), float(e["y"]), float(yaws[i]))
+            for i, e in enumerate(document["waypoints"])
+        ]
 
         self._current_mission_id = mission_id if mission_id else None
         self._current_command_id = command_id if command_id else None

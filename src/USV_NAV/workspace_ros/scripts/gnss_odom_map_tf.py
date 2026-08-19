@@ -8,13 +8,17 @@
 不设 map_config_yaml、改用手工经纬度时须显式给定 map_origin_latitude/longitude。
 
 不与 MAVROS local_position TF 做任何 NED/ENU 换算；直接使用话题中的量。
+实船 ArduPilot/MAVROS 的局部里程话题是 /mavros/gps_input/local（与 nav2_params_real_mavros.yaml
+的 odom_topic 一致），不再是 PX4 时代的 /mavros/local_position/odom。
 
 订阅必须使用与 MAVROS 常见发布端一致的 QoS（多为 Sensor BEST_EFFORT），否则会因 RELIABILITY 不匹配而永远收不到数据。
 
 若对每一对有效 NavSatFix+Odometry 都重算并发布，map→odom 会随 GNSS/融合噪声抖动（影响 AMCL 等）。
 initialize_once:=true（默认）时仅在首次合格数据对上计算变换、深拷贝缓存并加锁，再按 republish_hz
-仅重发该缓存（时间戳刷新为当前时刻），之后忽略后续 GPS/odom 对变换的再估计；需持续跟 drift
-或在线修正时请设 initialize_once:=false（恢复每次有效对即重算、无锁、无周期重发定时器）。
+仅重发该缓存；时间戳跟随最新收到的 RTK（inspvaa/gngga）stamp，与 NX gps_input 插件发布的
+odom→base_link（同源 inspvaa）保持一致，避免两段 TF 使用不同时钟导致 controller 未来外推失败。
+仅当 RTK 时间戳全为 0（驱动未填）时才退回主机当前时刻。之后忽略后续 GPS/odom 对变换的再估计；
+需持续跟 drift 或在线修正时请设 initialize_once:=false（恢复每次有效对即重算、无锁、无周期重发定时器）。
 """
 
 import copy
@@ -81,8 +85,8 @@ class GnssOdomMapTf(Node):
         except rclpy.exceptions.ParameterAlreadyDeclaredException:
             pass
 
-        self.declare_parameter('global_topic', '/mavros/global_position/global')
-        self.declare_parameter('local_odom_topic', '/mavros/local_position/odom')
+        self.declare_parameter('global_topic', '/mavros/gps_input/raw/fix')
+        self.declare_parameter('local_odom_topic', '/mavros/gps_input/local')
         self.declare_parameter('map_frame', 'map')
         self.declare_parameter('odom_frame', 'odom')
         # 与 Nav2 map_server 同一份 YAML；非空则从中读 map_origin_ref_key，忽略下面手工经纬度。
@@ -137,6 +141,9 @@ class GnssOdomMapTf(Node):
 
         self._last_fix = None  # NavSatFix
         self._last_odom = None  # Odometry
+        # 最近一帧 RTK 时间戳：锁定后仍持续更新，供周期重发 map→odom 使用
+        self._last_fix_stamp = None
+        self._last_odom_stamp = None
 
         self._broadcaster = TransformBroadcaster(self)
 
@@ -168,6 +175,8 @@ class GnssOdomMapTf(Node):
         return bool(stamp_msg.sec != 0 or stamp_msg.nanosec != 0)
 
     def _on_fix(self, msg: NavSatFix):
+        # 即使已锁定也要记录最新 RTK 时间戳（重发 TF 用）
+        self._last_fix_stamp = msg.header.stamp
         if self._initialize_once and self._locked:
             return
         if msg.status.status < NavSatStatus.STATUS_FIX:
@@ -176,6 +185,7 @@ class GnssOdomMapTf(Node):
         self._try_publish()
 
     def _on_odom(self, msg: Odometry):
+        self._last_odom_stamp = msg.header.stamp
         if self._initialize_once and self._locked:
             return
         self._last_odom = msg
@@ -185,8 +195,18 @@ class GnssOdomMapTf(Node):
         if self._cached_transform is None:
             return
         t = copy.deepcopy(self._cached_transform)
-        t.header.stamp = self.get_clock().now().to_msg()
+        t.header.stamp = self._latest_rtk_stamp() or self.get_clock().now().to_msg()
         self._broadcaster.sendTransform(t)
+
+    def _latest_rtk_stamp(self):
+        """返回最新一帧 RTK 非零时间戳；均未填（0）或尚无数据时返回 None。"""
+        best = None
+        for s in (self._last_fix_stamp, self._last_odom_stamp):
+            if s is not None and self._stamp_is_nonzero(s):
+                t = Time.from_msg(s)
+                if best is None or t.nanoseconds > Time.from_msg(best).nanoseconds:
+                    best = s
+        return best
 
     def _try_publish(self):
         if self._initialize_once and self._locked:

@@ -1,0 +1,9 @@
+# §4.2.1.4 单点导航/重定位
+# 设备未解锁时由 decision 内部先 arm,再下发单点导航
+float64 lat
+float64 lon
+float32 alt
+float32 speed
+---
+int32 result
+string msg

@@ -1,0 +1,11 @@
+# 上层 → 导航：查询当前生效的导航区域
+#
+# 实现：m_common/srv/GetNavZones.srv
+# Service：/mission_bridge/get_nav_zones（zone_manager 节点）
+#
+# 未设置任何区域时 success=true 且 zones 各字段为空
+# 详见 docs/作业区与电子围栏.md
+
+---
+bool success
+m_common/NavZones zones

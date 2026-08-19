@@ -1,0 +1,14 @@
+# decision → perception: 启停/配置识别
+# action: "start" / "stop" / "update_config"
+#   start         → MissionExecuting/Init 进入时,带任务里要识别的目标
+#   stop          → MissionExecuting/Finishing 退出时,或 cancel/emergency
+#   update_config → 运行中动态改目标/阈值
+# colors / enabled_target_types 列表语义由 perception 端定义。
+string action
+string execution_id
+string[] enabled_target_types
+string[] colors
+string roi              # 可选,区域字符串编码(空=全图)
+---
+int32 result
+string msg

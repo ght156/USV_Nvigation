@@ -1,0 +1,7 @@
+# §4.2.1.8 航线全局参数
+# finish_action: 0=返回上次模式 1=悬停 2=返航 3=重复执行 4=进船坞
+float32 speed
+uint8   finish_action
+---
+int32 result
+string msg

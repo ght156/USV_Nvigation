@@ -1,0 +1,5 @@
+# decision → nav: 停在当前位置(任务/航段还活着,可由后续 gotoPoint 续上)
+# Acting 期间防止 nav 继续前进、Paused 进入、Fault/Offline 进入都用本接口。
+---
+int32 result
+string msg

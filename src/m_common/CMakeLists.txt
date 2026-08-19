@@ -37,12 +37,16 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/NavStatus.msg"
   "msg/NavTaskEvent.msg"
   "msg/MissionWaypoint.msg"
+  "msg/GeoPolygon.msg"
+  "msg/NavZones.msg"
   "srv/RTSPStreamSwitch.srv"
   "srv/ReportVideoWarning.srv"
   "srv/SendWaypoints.srv"
   "srv/SetPause.srv"
   "srv/EmergencyStop.srv"
   "srv/CancelMission.srv"
+  "srv/SetNavZones.srv"
+  "srv/GetNavZones.srv"
   DEPENDENCIES builtin_interfaces geometry_msgs sensor_msgs std_msgs
 )
 ament_export_dependencies(rosidl_default_runtime)
@@ -53,6 +57,10 @@ add_subdirectory(rtsp_interface)
 
 install(DIRECTORY include/
   DESTINATION include
+)
+
+install(DIRECTORY urdf/
+  DESTINATION share/${PROJECT_NAME}/urdf
 )
 
 # 新增子库时只需在此追加一行 add_subdirectory(<name>)，

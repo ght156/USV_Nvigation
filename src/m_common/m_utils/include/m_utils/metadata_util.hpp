@@ -12,21 +12,23 @@ struct Metadata {
   std::string description;
 };
 
-// 从环境变量 USV_HOME 解析 metadata 路径：USV_HOME/app/metadata.json。
-// 解析失败或文件不存在时返回 std::nullopt，并通过 error 输出原因。
+// 解析 metadata 路径：<根目录>/app/metadata.json。
+// - x86：根目录优先 USV_HOME，未设置则用进程当前工作目录；文件不存在时返回 nullopt（不报错）。
+// - 非 x86（如 ARM）：根目录为 USV_HOME；未设置 USV_HOME 或文件不存在时返回 nullopt 并写 error。
 std::optional<std::string> resolve_metadata_path_from_usv_home(std::string* error = nullptr);
 
-// 直接通过 USV_HOME/app/metadata.json 读取元数据。
-// 读取失败返回 std::nullopt，并通过 error 输出原因。
+// 读取 <根目录>/app/metadata.json 元数据（根目录规则同 resolve_metadata_path_from_usv_home）。
+// - x86：文件不存在时返回各字段为空的 Metadata；解析失败仍返回 nullopt 并写 error。
+// - 非 x86：USV_HOME/文件缺失或解析失败返回 nullopt 并写 error。
 //
 // 示例：
 //   std::string err;
 //   auto metadata = m_utils::load_metadata_from_usv_home(&err);
 //   if (!metadata) {
-//     // 例如：RCLCPP_ERROR(logger, "load metadata failed: %s", err.c_str());
+//     // 非 x86 或 JSON 解析失败；x86 仅文件缺失时返回空字段 Metadata（has_value 为 true）
 //     return;
 //   }
-//   // 可直接使用 metadata->boat_type / metadata->version / metadata->sn
+//   if (metadata->sn.empty()) { /* x86 无 app/metadata.json 或 sn 未配置 */ }
 std::optional<Metadata> load_metadata_from_usv_home(std::string* error = nullptr);
 
 // 从 metadata.json 加载常用字段；缺失字段会返回空字符串。

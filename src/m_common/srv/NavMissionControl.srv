@@ -1,0 +1,7 @@
+# decision → nav: 航线任务控制(暂停/恢复/取消) —— 对应云端 mission_pause/resume/cancel
+# 作用于当前 nav 正在执行的航线任务(mission_execute 下发的那条)。
+# 立即返回受理;状态变化仍由 /nav/mission_status + /nav/mission_event 回报。
+string action     # "pause" / "resume" / "cancel"
+---
+int32  result     # 0=accepted, 非0=rejected
+string msg

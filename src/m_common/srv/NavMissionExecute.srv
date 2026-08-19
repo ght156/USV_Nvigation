@@ -1,0 +1,12 @@
+# decision → nav: 上传并立即执行航线 —— 对应云端 mission_execute
+# decision 把云平台整条航线原样转发,nav 负责排序/避障/航点动作,decision 不拆点。
+# 若已用 NavMissionUpload 装载过同一 execution_id,nav 可只启动;否则先装载再启动。
+# 语义:立即返回受理(不等船开完);任务进展由
+#   /nav/mission_event(NavTaskEvent) + /nav/mission_status(NavStatus) 回报。
+string  execution_id                 # 任务执行记录 ID,原样回带到 NavStatus/NavTaskEvent.task_id
+float32 speed                        # 航线默认速度
+uint8   finish_action                # 结束动作,见 V0.5 附录 E.4
+m_common/Waypoint[] waypoints        # 整条航线(每个航点含 actions:悬停/采水等)
+---
+int32  result                        # 0=accepted, 非0=rejected
+string msg

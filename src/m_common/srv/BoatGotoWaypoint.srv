@@ -1,0 +1,6 @@
+# decision → boat_control: 单航点导航 / 任务执行中的航点步进
+m_common/Waypoint waypoint
+float32 speed
+---
+int32 result
+string msg

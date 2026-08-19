@@ -2,7 +2,14 @@
 
 # ----------------------------------------------------------------------------------------------- #
 # 实船 Nav2：默认 nav2_params_real_mavros.yaml + map.yaml。
-# 默认 enable_mission_bridge:=true 一并启动 mission_bridge + nav_status_aggregator。
+#
+# 与官方 nav2_bringup/bringup_launch.py 的区别：
+#   - 不启动 amcl。官方 bringup 会无条件 include localization_launch.py（map_server + amcl），
+#     而实船定位（map→odom）由 real_boat_bringup 的 gnss_odom_map_tf 负责；AMCL 是第二套
+#     定位源，一旦拿到 scan/initial pose 就会和 gnss_odom_map_tf 抢同一段 map→odom TF。
+#     这里复制官方结构后只保留 map_server + navigation_launch（controller/planner/bt/...）。
+#   - 默认 enable_mission_bridge:=false（先不起 mission；需要时 enable_mission_bridge:=true
+#     一并启动 mission_bridge + nav_status_aggregator）。
 # ----------------------------------------------------------------------------------------------- #
 
 import os
@@ -13,8 +20,10 @@ from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
-from launch_ros.actions import Node
+from launch_ros.actions import LoadComposableNodes, Node
+from launch_ros.descriptions import ComposableNode, ParameterFile
 from launch_ros.substitutions import FindPackageShare
+from nav2_common.launch import RewrittenYaml
 
 
 def generate_launch_description():
@@ -41,7 +50,20 @@ def generate_launch_description():
 
     nav2_bringup_share = get_package_share_directory('nav2_bringup')
     default_rviz_config = os.path.join(nav2_bringup_share, 'rviz', 'nav2_default_view.rviz')
-    bringup_launch_path = os.path.join(nav2_bringup_share, 'launch', 'bringup_launch.py')
+    navigation_launch_path = os.path.join(nav2_bringup_share, 'launch', 'navigation_launch.py')
+
+    # 与 nav2_bringup/bringup_launch.py 相同的参数重写：yaml_filename 替换为 map:= 路径。
+    remappings = [('/tf', 'tf'), ('/tf_static', 'tf_static')]
+    configured_params = ParameterFile(
+        RewrittenYaml(
+            source_file=params_file,
+            root_key='',
+            param_rewrites={
+                'use_sim_time': use_sim_time,
+                'yaml_filename': map_arg,
+            },
+            convert_types=True),
+        allow_substs=True)
 
     declare_map = DeclareLaunchArgument(
         'map',
@@ -87,7 +109,7 @@ def generate_launch_description():
 
     declare_enable_mission_bridge = DeclareLaunchArgument(
         'enable_mission_bridge',
-        default_value='true',
+        default_value='false',
         description='为 true 时一并启动 mission_bridge + nav_status_aggregator（GCS/上层对接；实船默认开启）',
     )
 
@@ -99,17 +121,50 @@ def generate_launch_description():
 
     declare_mission_odom_topic = DeclareLaunchArgument(
         'mission_odom_topic',
-        default_value='/mavros/local_position/odom',
+        default_value='/mavros/gps_input/local',
         description='mission_bridge / nav_status_aggregator 共用 odom 话题',
     )
 
-    bringup = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(bringup_launch_path),
+    container = Node(
+        package='rclcpp_components',
+        executable='component_container_isolated',
+        name='nav2_container',
+        parameters=[configured_params, {'autostart': autostart}],
+        arguments=['--ros-args', '--log-level', log_level],
+        remappings=remappings,
+        output='screen',
+    )
+
+    # 只加载 map_server（不含 amcl）：定位由 gnss_odom_map_tf 负责。
+    load_map_server = LoadComposableNodes(
+        target_container='/nav2_container',
+        composable_node_descriptions=[
+            ComposableNode(
+                package='nav2_map_server',
+                plugin='nav2_map_server::MapServer',
+                name='map_server',
+                parameters=[configured_params],
+                remappings=remappings),
+            ComposableNode(
+                package='nav2_lifecycle_manager',
+                plugin='nav2_lifecycle_manager::LifecycleManager',
+                name='lifecycle_manager_localization',
+                parameters=[{'use_sim_time': use_sim_time},
+                            {'autostart': autostart},
+                            {'node_names': ['map_server']}]),
+        ],
+    )
+
+    navigation = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(navigation_launch_path),
         launch_arguments={
-            'map': map_arg,
+            'namespace': '',
             'use_sim_time': use_sim_time,
-            'params_file': params_file,
             'autostart': autostart,
+            'params_file': params_file,
+            'use_composition': 'True',
+            'use_respawn': 'False',
+            'container_name': 'nav2_container',
             'log_level': log_level,
         }.items(),
     )
@@ -145,7 +200,9 @@ def generate_launch_description():
         declare_enable_mission_bridge,
         declare_mission_params_file,
         declare_mission_odom_topic,
-        bringup,
+        container,
+        load_map_server,
+        navigation,
         mission_bridge,
         rviz,
     ])

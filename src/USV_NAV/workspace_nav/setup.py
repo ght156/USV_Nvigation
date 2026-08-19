@@ -56,6 +56,8 @@ setup(
             'waypoint_with_state = workspace_nav.waypoint_with_state:main',
             'mission_bridge = workspace_nav.mission_bridge:main',
             'nav_status_aggregator = workspace_nav.nav_status_aggregator:main',
+            'zone_manager = workspace_nav.zone_manager:main',
+            'zone_monitor = workspace_nav.zone_monitor:main',
         ],
     },
 )

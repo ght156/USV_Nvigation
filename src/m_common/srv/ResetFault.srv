@@ -1,0 +1,5 @@
+# 复位 Fault 状态。空请求,服务端在 FaultState 中调用 boat->clearFault()
+# 并触发 "fault_cleared" 事件回到 Idle。
+---
+int32 result
+string msg

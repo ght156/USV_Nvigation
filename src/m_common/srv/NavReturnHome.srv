@@ -1,0 +1,14 @@
+# decision → nav: 返航(去 Home 位姿)
+# 对应云端 set_mode mode=11(返回 Home 点);mode=12 智能返航由 decision 归一到本接口。
+# 语义同 /nav/way_point:必须「立即返回受理」,不得等船开到才回;
+#   - result 仅表示受理:0=accepted, 非0=rejected。
+#   - 到达/失败由 /nav/task_event(NavEvent) 异步回报,seq 原样回带。
+# 目标 Home 位姿由 decision 从飞控 HOME_POSITION(V0.5 §4.1.2.4)取好后传入。
+float64 lat
+float64 lon
+float32 alt
+float32 speed
+uint32  seq        # decision 分配的关联号,须原样回带到 NavState/NavEvent
+---
+int32  result      # 0=accepted, 非0=rejected
+string msg

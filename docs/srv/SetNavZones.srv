@@ -1,0 +1,14 @@
+# 上层 → 导航：全量设置导航区域（作业区/禁止区/硬边界）
+#
+# 实现：m_common/srv/SetNavZones.srv
+# Service：/mission_bridge/set_nav_zones（zone_manager 节点）
+# 区域：m_common/msg/NavZones（GeoPolygon：float64[] longitude / latitude，度）
+#
+# 语义：全量替换，本次下发覆盖此前全部区域
+# 清除全部区域：/mission_bridge/clear_nav_zones（std_srvs/srv/Trigger）
+# 详见 docs/作业区与电子围栏.md
+
+m_common/NavZones zones
+---
+bool success
+string message

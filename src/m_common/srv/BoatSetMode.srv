@@ -1,0 +1,6 @@
+
+# decision → boat_control: 模式切换
+string mode
+---
+int32 result
+string msg

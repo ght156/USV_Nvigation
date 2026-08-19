@@ -1,0 +1,16 @@
+# decision → nav: 单航段导航(去这个点)
+# 架构 A 下,decision 按航点序列逐段调用本服务,nav 负责局部避障 + 实际控船。
+#
+# 语义约定(重要):本服务必须「立即返回受理结果」,不得等船开到目标才回。
+#   - result 仅表示受理:0=accepted, 非0=rejected。
+#   - 真正的到达/失败由 nav 经 /nav/task_event(NavEvent) 异步回报。
+# seq:由 decision 分配的关联号,nav 须在 NavState.current_seq / NavEvent.seq 原样回带,
+#      供 decision 把异步事件配对回本次目标(防止上一目标的迟到 arrived 被误判)。
+float64 lat
+float64 lon
+float32 alt
+float32 speed
+uint32  seq
+---
+int32 result
+string msg

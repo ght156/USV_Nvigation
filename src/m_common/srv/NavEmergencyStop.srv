@@ -1,0 +1,6 @@
+# decision → nav: 立即停一切(高优先级,EmergencyStop 横切入口触发)
+# 与 boat 的 /boat_control/emergency 双保险:任一通道生效都停。
+string reason
+---
+int32 result
+string msg

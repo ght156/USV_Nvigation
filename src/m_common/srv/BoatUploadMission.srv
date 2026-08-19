@@ -1,0 +1,7 @@
+# decision → boat_control: 批量上传航线到飞控(MAVLink mission upload)
+m_common/Waypoint[] waypoints
+float32 speed
+uint8   finish_action
+---
+int32 result
+string msg

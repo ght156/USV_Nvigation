@@ -1,0 +1,5 @@
+# decision → boat_control: 悬停指定秒数
+float32 duration_seconds
+---
+int32 result
+string msg

@@ -29,6 +29,8 @@ def generate_launch_description():
     max_data_age_sec = LaunchConfiguration('max_data_age_sec')
     map_odom_yaw_deg = LaunchConfiguration('map_odom_yaw_deg')
     urdf_file = LaunchConfiguration('urdf_file')
+    local_odom_topic = LaunchConfiguration('local_odom_topic')
+    global_topic = LaunchConfiguration('global_topic')
 
     default_map_yaml = PathJoinSubstitution(
         [FindPackageShare('workspace_nav'), 'config', 'map_real_boat_hk.yaml'])
@@ -79,6 +81,16 @@ def generate_launch_description():
         default_value='0.0',
         description='map→odom：ENU 平移/姿态相对 Nav2 map 的固定绕 z 偏角（度）；常见 ±90。与 gnss_odom_map_tf 同源',
     )
+    declare_local_odom_topic = DeclareLaunchArgument(
+        'local_odom_topic',
+        default_value='/mavros/gps_input/local',
+        description='gnss_odom_map_tf 的局部里程话题；实船 ArduPilot/MAVROS 用 gps_input/local（与 nav2 参数一致）',
+    )
+    declare_global_topic = DeclareLaunchArgument(
+        'global_topic',
+        default_value='/mavros/gps_input/raw/fix',
+        description='gnss_odom_map_tf 的 GNSS 全局位置话题；实船 RTK 经 gps_input 插件发布 raw/fix（global_position/global 无数据）',
+    )
 
     robot_description = ParameterValue(
         Command(['xacro ', urdf_file]),
@@ -119,6 +131,8 @@ def generate_launch_description():
         declare_republish_hz,
         declare_max_age,
         declare_map_yaw,
+        declare_local_odom_topic,
+        declare_global_topic,
 
         Node(
             package='robot_state_publisher',
@@ -144,6 +158,8 @@ def generate_launch_description():
                     'republish_hz': ParameterValue(republish_hz, value_type=float),
                     'max_data_age_sec': ParameterValue(max_data_age_sec, value_type=float),
                     'map_odom_yaw_deg': ParameterValue(map_odom_yaw_deg, value_type=float),
+                    'local_odom_topic': ParameterValue(local_odom_topic, value_type=str),
+                    'global_topic': ParameterValue(global_topic, value_type=str),
                 },
             ],
             output='screen',

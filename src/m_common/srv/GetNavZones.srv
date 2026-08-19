@@ -1,0 +1,5 @@
+# 上层 → 导航：查询当前生效的导航区域
+# 未设置任何区域时 success=true 且 zones 各字段为空
+---
+bool success
+m_common/NavZones zones

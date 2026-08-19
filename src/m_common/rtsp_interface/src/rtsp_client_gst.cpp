@@ -93,19 +93,38 @@ public:
   bool read(cv::Mat & frame)
   {
     std::lock_guard<std::mutex> lk(mtx_);
-    if (!read_once_locked(frame)) {
-      const int attempts = std::max(0, cfg_.max_reconnect_attempts);
-      for (int i = 0; i < attempts; ++i) {
-        if (!reopen_locked()) {
-          continue;
-        }
-        if (read_once_locked(frame)) {
-          return true;
-        }
-      }
+    if (last_link_error_.empty() && read_once_locked(frame)) {
+      return true;
+    }
+#if defined(RTSP_IF_HAS_GSTREAMER)
+    // 解码支路已建立时 pull 超时很常见（尤其 H265 首帧），勿重连否则永远拿不到帧。
+    if (branch_linked_ && last_link_error_.empty()) {
       return false;
     }
-    return true;
+#endif
+    const int attempts = std::max(0, cfg_.max_reconnect_attempts);
+    const int min_interval_ms = std::max(0, cfg_.reconnect_interval_ms);
+    for (int i = 0; i < attempts; ++i) {
+      if (min_interval_ms > 0 && last_reconnect_attempt_ms_ != 0U) {
+        const std::uint64_t elapsed = now_ms() - last_reconnect_attempt_ms_;
+        if (elapsed < static_cast<std::uint64_t>(min_interval_ms)) {
+          break;
+        }
+      }
+      last_reconnect_attempt_ms_ = now_ms();
+      if (!reopen_locked()) {
+        continue;
+      }
+      if (read_once_locked(frame)) {
+        return true;
+      }
+#if defined(RTSP_IF_HAS_GSTREAMER)
+      if (branch_linked_ && last_link_error_.empty()) {
+        return false;
+      }
+#endif
+    }
+    return false;
   }
 
   std::uint64_t last_frame_time_ms() const
@@ -276,7 +295,7 @@ private:
     return false;
 #else
     if (!last_link_error_.empty()) {
-      throw std::runtime_error(last_link_error_);
+      return false;
     }
     if (sink_ == nullptr) {
       return false;
@@ -297,11 +316,15 @@ private:
     GstStructure * s = gst_caps_get_structure(caps, 0);
     int width = 0;
     int height = 0;
+    int stride = 0;
     if (!gst_structure_get_int(s, "width", &width) ||
         !gst_structure_get_int(s, "height", &height) ||
         width <= 0 || height <= 0) {
       gst_sample_unref(sample);
       return false;
+    }
+    if (!gst_structure_get_int(s, "stride", &stride) || stride < width * 3) {
+      stride = (width * 3 + 3) & ~3;
     }
 
     GstMapInfo map;
@@ -310,10 +333,11 @@ private:
       return false;
     }
 
-    const std::size_t min_bytes = static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 3U;
+    const std::size_t min_bytes =
+      static_cast<std::size_t>(stride) * static_cast<std::size_t>(height);
     bool ok = false;
     if (map.size >= min_bytes) {
-      cv::Mat wrapped(height, width, CV_8UC3, map.data);
+      cv::Mat wrapped(height, width, CV_8UC3, map.data, static_cast<std::size_t>(stride));
       frame = wrapped.clone();
       last_frame_time_ms_ = now_ms();
       ok = true;
@@ -428,6 +452,8 @@ private:
   RtspClientGstConfig cfg_;
   std::string opened_url_;
   std::uint64_t last_frame_time_ms_ = 0;
+  /// 上次尝试 reopen 的时间；跨 read() 调用限制重连频率，避免触发摄像机非法登录锁定
+  std::uint64_t last_reconnect_attempt_ms_ = 0;
 
 #if defined(RTSP_IF_HAS_GSTREAMER)
   GstElement * pipeline_ = nullptr;

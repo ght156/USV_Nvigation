@@ -105,6 +105,38 @@ def _setup_nodes(context, *args, **kwargs):
         ]
     )
 
+    # zone_manager / zone_monitor：同一份参数 YAML 的各自节点段 + 与 mission_bridge 一致的地图锚点
+    zone_manager_params = []
+    zone_monitor_params = []
+    if mission_stack_params_file:
+        zone_manager_params.append(mission_stack_params_file)
+        zone_monitor_params.append(mission_stack_params_file)
+    zone_manager_params.extend(
+        [
+            {"use_sim_time": ParameterValue(use_sim_time, value_type=bool)},
+            {
+                "map_yaml_path": ParameterValue(lc("map_yaml_path"), value_type=str),
+                "map_datum_ref_key": ParameterValue(
+                    lc("map_datum_ref_key"), value_type=str
+                ),
+                "global_frame": ParameterValue(lc("global_frame"), value_type=str),
+            },
+        ]
+    )
+    zone_monitor_params.extend(
+        [
+            {"use_sim_time": ParameterValue(use_sim_time, value_type=bool)},
+            {
+                "map_yaml_path": ParameterValue(lc("map_yaml_path"), value_type=str),
+                "map_datum_ref_key": ParameterValue(
+                    lc("map_datum_ref_key"), value_type=str
+                ),
+                "global_frame": ParameterValue(lc("global_frame"), value_type=str),
+                "odom_topic": ParameterValue(odom_topic, value_type=str),
+            },
+        ]
+    )
+
     return [
         Node(
             package="workspace_nav",
@@ -119,6 +151,21 @@ def _setup_nodes(context, *args, **kwargs):
             name="nav_status_aggregator",
             output="screen",
             parameters=aggregator_params,
+        ),
+        # 电子围栏：区域管理（KeepoutFilter 掩码）+ 越界监控
+        Node(
+            package="workspace_nav",
+            executable="zone_manager",
+            name="zone_manager",
+            output="screen",
+            parameters=zone_manager_params,
+        ),
+        Node(
+            package="workspace_nav",
+            executable="zone_monitor",
+            name="zone_monitor",
+            output="screen",
+            parameters=zone_monitor_params,
         ),
     ]
 
@@ -155,8 +202,8 @@ def generate_launch_description():
             _decl("target_buoy_json_path", "", "为空则用环境变量或默认路径"),
             _decl(
                 "odom_topic",
-                "/mavros/local_position/odom",
-                "实船 MAVROS 里程计；与 nav_status_aggregator 共用（launch 内绑定）",
+                "/mavros/gps_input/local",
+                "实船 MAVROS 里程计（ArduPilot gps_input）；与 nav_status_aggregator 共用（launch 内绑定）",
             ),
             _decl("datum_source", "map_yaml", "datum 来源"),
             _decl("projection", "enu", "enu | utm"),
@@ -203,7 +250,7 @@ def generate_launch_description():
             _decl("nav_status_vehicle_id", "usv_001", "vehicle_id"),
             _decl(
                 "aggregator_gps_topic",
-                "/mavros/global_position/raw/fix",
+                "/mavros/gps_input/raw/fix",
                 "实船 MAVROS GPS（可与 mission_bridge 独立配置）",
             ),
             OpaqueFunction(function=_setup_nodes),

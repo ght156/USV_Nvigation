@@ -1,0 +1,5 @@
+# §4.2.1.2 模式切换
+string mode
+---
+int32 result
+string msg

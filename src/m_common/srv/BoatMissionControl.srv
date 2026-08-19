@@ -1,0 +1,6 @@
+# decision → boat_control: 任务级控制
+# action: "start" / "pause" / "resume" / "cancel"
+string action
+---
+int32 result
+string msg

@@ -1,0 +1,8 @@
+# decision → boat_control: §4.2.9 water_sample_control
+# MAV_CMD_WATERPUMP_CONTROL (1100): param1=bottle_no, param2=volume_ml, param3=enable
+uint8   bottle_no
+float32 volume_ml
+bool    enable
+---
+int32 result
+string msg

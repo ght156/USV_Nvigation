@@ -1,0 +1,10 @@
+# decision → nav: 归港(回船坞)—— 对应云端 set_mode mode=8(返回船坞)。
+# 船坞位姿由**导航节点自己预存储并读取**,decision 不传位姿,只发一个触发 + seq。
+# 语义同 /nav/way_point:必须「立即返回受理」,不得等船开到才回;
+#   - result 仅表示受理:0=accepted, 非0=rejected。
+#   - 到达/失败由 /nav/task_event(NavEvent) 异步回报,seq 原样回带。
+float32 speed      # 归港速度;0 = 交给 nav 用默认
+uint32  seq        # decision 分配的关联号,须原样回带到 NavState/NavEvent
+---
+int32  result      # 0=accepted, 非0=rejected
+string msg

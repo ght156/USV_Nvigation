@@ -1,0 +1,12 @@
+# 控制-18~20 示教模式(§4.2.11):teaching_start / teaching_stop / teaching_result_fetch 合一
+# action:
+#   "start" → 开始示教,清空并重写航线,进入采点(sample_mode/sample_interval 生效)
+#   "stop"  → 结束示教,停止采点、汇总航线并上报 teaching_result
+#   "fetch" → 重新获取(control-20),把已存航线原样再上报一遍
+string  action
+string  teaching_id
+string  sample_mode       # "DISTANCE" 等距 / "TIME" 等时(仅 start 用)
+float32 sample_interval   # DISTANCE:米 / TIME:秒(仅 start 用)
+---
+int32  result             # 0 受理成功,非 0 见附录 C(如 1007 已有会话进行中)
+string msg

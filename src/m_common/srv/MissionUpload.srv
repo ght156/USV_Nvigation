@@ -1,0 +1,10 @@
+# §4.2.2 mission_upload
+# 仅把航线灌进飞控,不切 AUTO
+string user_id
+string execution_id
+float32 speed
+uint8   finish_action
+m_common/Waypoint[] waypoints
+---
+int32 result
+string msg

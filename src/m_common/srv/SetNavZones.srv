@@ -1,0 +1,7 @@
+# 上层 → 导航：全量设置导航区域（作业区/禁止区/硬边界）
+# 语义为全量替换：本次下发覆盖此前全部区域
+# 清除全部区域请调用 /mission_bridge/clear_nav_zones（std_srvs/Trigger）
+m_common/NavZones zones
+---
+bool success
+string message
