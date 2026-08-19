@@ -42,6 +42,11 @@ apm.params
 push_build_nx.sh
 rviz2.rviz
 
+# 本地部署配置与文档副本（pre-push 策略：docs 仅允许 .md）
+config/
+docs/msg/
+docs/srv/
+
 # 系统
 .DS_Store
 Thumbs.db
