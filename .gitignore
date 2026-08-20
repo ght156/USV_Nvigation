@@ -51,3 +51,4 @@ docs/srv/
 .DS_Store
 Thumbs.db
 docs/*.xlsx
+docs/.~*
