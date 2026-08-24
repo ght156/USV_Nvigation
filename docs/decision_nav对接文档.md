@@ -249,6 +249,17 @@ ros2 action send_goal /mission_bridge/navigate m_common/action/NavigateTask \
    - **有活动任务** → 任务 Goal 收 `ABORTED + RESULT_GEOFENCE_VIOLATION`（`error_code="GEOFENCE_VIOLATION"`），该 Result 是越界失败的唯一依据；
    - **无活动任务** → 发布 `/mission_bridge/safety_event`（`m_common/msg/NavSafetyEvent`，定义：`src/m_common/msg/NavSafetyEvent.msg`；`event_code="GEOFENCE_VIOLATION"`，`fence_type`=exclusion/inclusion，`transition`=ENTER/EXIT，`enabled`=true 触发 / false 解除）。
 
+**告警四种场景**（按 `fence_id + enabled` 配对产生/恢复）：
+
+| 场景 | fence_type | transition | enabled |
+|---|---|---|---|
+| 闯入禁航区，触发告警 | exclusion | ENTER | true |
+| 驶出禁航区，解除告警 | exclusion | ENTER | false |
+| 驶出作业区，触发告警 | inclusion | EXIT | true |
+| 返回作业区，解除告警 | inclusion | EXIT | false |
+
+注意：告警与急停同源——连续 `violation_threshold`（默认 5 次 × 0.5 s ≈ 2.5 s）确认越界后才触发，不是一越线即发；围栏被更新/清除时若告警激活，会补发 `enabled=false` 解除。
+
 > **硬边界（不闭合折线，本平台扩展）**：对接说明未定义，经 GCS `/nav_zones` JSON 话题或旧接口下发；硬边界**不做航点预校验**（由规划器绕行），只进代价地图。
 
 ### 5.3 调用示例
@@ -301,7 +312,12 @@ ros2 service call /mission_bridge/get_geofence m_common/srv/GetGeoFence
 
 ### 6.2 `/mission_bridge/safety_event` — 异步安全事件
 
-`m_common/msg/NavSafetyEvent`，事件驱动，QoS RELIABLE depth=1。**只在无活动任务时**上报越界；有任务时越界由 Action Result 承担，不重复发。字段与取值见 §5.2 与 msg 定义。
+**对接方式：Topic 订阅，不是 Service**。Decision 侧启动后订阅一次即可，无需调用、无需轮询、无需应答；有事件时导航主动推送。
+
+- 消息：`m_common/msg/NavSafetyEvent`（定义：`src/m_common/msg/NavSafetyEvent.msg`）；
+- QoS：RELIABLE，depth=1，**非 latched**（后启动的订阅者收不到历史事件；当前也没有"查询告警状态"的接口，告警状态靠 Decision 自行根据收到的事件流维护）；
+- 内容：触发与解除走同一话题，按 `fence_id + enabled` 配对（`enabled=true` 产生告警、`false` 解除）；`transition` 沿用触发时的值（ENTER=闯入禁航区、EXIT=驶出作业区），四种场景对照表见 §5.2；
+- **只在无活动任务时**上报越界；有任务时越界由 Action Result 承担，不重复发。
 
 ### 6.3 `/task_event` — 保留给 GCS（Decision 勿依赖）
 

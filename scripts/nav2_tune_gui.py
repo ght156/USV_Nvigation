@@ -11,6 +11,8 @@ Nav2 在线调参 + 取消任务小工具（tkinter + rclpy）。
     重启 launch 后恢复参数文件里的值。
   - 滑块初始值默认读取 nav2_params_real_mavros.yaml 对应参数；节点在线时，
     启动后会用节点当前值再覆盖一次。
+  - 滑块范围围绕参数文件里的值 ±50% 自适应（不再用写死的全局范围），
+    数值框可直接键入精确值，键入超出滑块范围时会自动扩展范围。
   - 参数列表已按本版 Nav2（1.1.19/Humble）源码核对，只放支持动态更新的项；
     参数前缀与 launch 一致（controller_server / velocity_smoother / costmap 节点）。
   - 「取消任务」不依赖 mission 栈：直接对 navigate_to_pose / follow_waypoints /
@@ -35,6 +37,7 @@ from unique_identifier_msgs.msg import UUID
 
 
 # (中文名, 目标节点, 参数名, 最小值, 最大值, 步长, 小数位, 文件默认值)
+# 注：最小/最大值为历史参考，滑块范围现按参数文件值 ±50% 自适应生成
 PARAMS = [
     ("期望线速 (m/s)",          "/controller_server",        "FollowPath.desired_linear_vel",                       0.0, 2.0, 0.05, 2, 1.0),
     ("最大角加速 (rad/s²)",     "/controller_server",        "FollowPath.max_angular_accel",                        0.0, 3.0, 0.05, 2, 0.45),
@@ -103,7 +106,7 @@ class TuneApp:
         ).pack(anchor="w", padx=10, pady=(8, 0))
 
         self._sliders = []
-        self._value_labels = []
+        self._value_entries = []
         for idx, (label, node, param, vmin, vmax, step, digits, default) in enumerate(PARAMS):
             initial = defaults.get((node, param), default)
             self._add_slider(idx, label, node, param, vmin, vmax, step, digits, initial)
@@ -132,23 +135,63 @@ class TuneApp:
                 action, self.node.create_client(
                     CancelGoal, f"/{action}/_action/cancel_goal"))
 
+    @staticmethod
+    def _range_around(value):
+        """滑块范围围绕实际工作点 ±50%，保证调整分辨率集中在当前值附近。"""
+        if value <= 0:
+            return 0.0, 1.0
+        return max(0.0, value * 0.5), value * 1.5
+
+    def _expand_range(self, idx, value):
+        """若值超出当前滑块范围，向外扩展并留 10% 余量。"""
+        slider = self._sliders[idx]
+        lo, hi = slider[5], slider[6]
+        if lo <= value <= hi:
+            return
+        new_lo = min(lo, value)
+        new_hi = max(hi, value)
+        margin = (new_hi - new_lo) * 0.1
+        slider[5] = max(0.0, new_lo - margin)
+        slider[6] = new_hi + margin
+        slider[0].config(from_=slider[5], to=slider[6])
+
     def _add_slider(self, idx, label, node, param, vmin, vmax, step, digits, initial):
         row = ttk.Frame(self.root)
         row.pack(fill="x", padx=10, pady=2)
 
         ttk.Label(row, text=label, width=24, anchor="w").pack(side="left")
-        initial = max(vmin, min(vmax, initial))
+        lo, hi = self._range_around(initial)
         var = tk.DoubleVar(value=initial)
         scale = ttk.Scale(
-            row, from_=vmin, to=vmax, orient="horizontal", variable=var,
+            row, from_=lo, to=hi, orient="horizontal", variable=var,
             command=lambda _v, i=idx: self._on_change(i),
         )
         scale.pack(side="left", fill="x", expand=True, padx=6)
-        val = ttk.Label(row, text=f"{initial:.{digits}f}", width=8, anchor="e")
-        val.pack(side="right")
+        entry = ttk.Entry(row, width=10, justify="right")
+        entry.insert(0, f"{initial:.{digits}f}")
+        entry.pack(side="right")
+        entry.bind("<Return>", lambda _e, i=idx: self._commit_entry(i))
+        entry.bind("<FocusOut>", lambda _e, i=idx: self._commit_entry(i))
 
-        self._sliders.append((scale, var, node, param, digits, vmin, vmax))
-        self._value_labels.append(val)
+        self._sliders.append([scale, var, node, param, digits, lo, hi])
+        self._value_entries.append(entry)
+
+    def _commit_entry(self, idx):
+        """数值框回车/失焦：键入精确值，超范围时自动扩展滑块范围。"""
+        slider = self._sliders[idx]
+        entry = self._value_entries[idx]
+        var, node_name, param, digits = slider[1], slider[2], slider[3], slider[4]
+        try:
+            value = float(entry.get())
+        except ValueError:
+            entry.delete(0, "end")
+            entry.insert(0, f"{var.get():.{digits}f}")
+            return
+        self._expand_range(idx, value)
+        var.set(value)
+        entry.delete(0, "end")
+        entry.insert(0, f"{value:.{digits}f}")
+        self._set_remote(node_name, param, round(value, digits))
 
     def _on_change(self, idx):
         # 防抖：拖动停止 200ms 后才实际下发
@@ -159,7 +202,9 @@ class TuneApp:
     def _apply(self, idx):
         scale, var, node_name, param, digits, _, _ = self._sliders[idx]
         value = round(var.get(), digits)
-        self._value_labels[idx].config(text=f"{value:.{digits}f}")
+        entry = self._value_entries[idx]
+        entry.delete(0, "end")
+        entry.insert(0, f"{value:.{digits}f}")
         self._set_remote(node_name, param, value)
 
     def _set_remote(self, node_name, param, value):
@@ -213,13 +258,18 @@ class TuneApp:
                 j = params.index(p)
                 if j < len(resp.values):
                     value = resp.values[j].double_value
-                    _, var, _, _, digits, vmin, vmax = self._sliders[idx]
-                    value = max(vmin, min(vmax, value))
-                    var.set(value)
-                    self.ui_after(lambda v=value, d=digits, i=idx: self._value_labels[i].config(
-                        text=f"{v:.{d}f}"))
+                    self.ui_after(lambda i=idx, v=value: self._set_from_node(i, v))
         except Exception as e:  # noqa: BLE001
             self.ui_after(lambda: self.log(f"[{node_name}] 读取参数失败: {e}"))
+
+    def _set_from_node(self, idx, value):
+        """用节点在线值更新滑块；超出范围时扩展滑块范围。"""
+        self._expand_range(idx, value)
+        slider = self._sliders[idx]
+        slider[1].set(value)
+        entry = self._value_entries[idx]
+        entry.delete(0, "end")
+        entry.insert(0, f"{value:.{slider[4]}f}")
 
     def cancel_mission(self):
         threading.Thread(target=self._cancel_mission_worker, daemon=True).start()

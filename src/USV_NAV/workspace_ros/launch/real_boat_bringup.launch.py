@@ -7,7 +7,7 @@
 #   - robot_state_publisher（从 m_common/urdf/usv_cf.xacro 发布传感器 TF）
 #   - gnss_odom_map_tf（map→odom 动态 TF）
 #   - 可选：nav2_cmd_vel_to_mavros 速度桥（PX4 setpoint_raw/local）
-#   - 可选：usv_ardupilot_velocity_bridge/ardupilot_velocity_bridge 速度桥（ArduPilot setpoint_velocity/cmd_vel，TwistStamped）
+#   - 可选：usv_ardupilot_velocity_bridge/ardupilot_velocity_bridge 速度桥（ArduPilot setpoint_velocity/cmd_vel_unstamped，Twist）
 # ----------------------------------------------------------------------------------------------- #
 
 from launch import LaunchDescription
