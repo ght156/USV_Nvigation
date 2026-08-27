@@ -77,14 +77,14 @@ controller_server:
     progress_checker:
       plugin: "nav2_controller::SimpleProgressChecker"
       # —— 在 movement_time_allowance 秒内至少移动 required_movement_radius 米，否则视为卡住 ——
-      required_movement_radius: 3.0
-      movement_time_allowance: 12.0
+      required_movement_radius: 2.0
+      movement_time_allowance: 30.0
 
     general_goal_checker:
       stateful: true
       plugin: "nav2_controller::SimpleGoalChecker"
       # —— 到达判定容差：xy (米) / yaw (弧度) ——
-      xy_goal_tolerance: 1.0
+      xy_goal_tolerance: 2.0
       yaw_goal_tolerance: 0.5
     FollowPath:
       plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
@@ -104,15 +104,15 @@ controller_server:
       #   min 过小：carrot 在弯内侧，船未转完前瞻点已到近处 → S 线、左右震荡，严重时像反向拧。
       #   max 过大：沿路径直行过久 → 转弯滞后、有效半径大，目标在船后时先冲很远再拐。
       lookahead_dist: 10.0                    # 静态Fallback距离，use_velocity_scaled_lookahead_dist: true时无效
-      lookahead_time: 18.0
+      lookahead_time: 16.0
       use_velocity_scaled_lookahead_dist: true
-      min_lookahead_dist: 6.0
-      max_lookahead_dist: 10.0
+      min_lookahead_dist: 5.0
+      max_lookahead_dist: 8.0
 
       # —— 曲率限速：路径转弯半径 < min_radius 时线速度向 min_speed 靠拢 ——
       # min_radius 宜与船体最小转弯半径、min_lookahead_dist 同量级；过小 → 频繁压到 min_speed 走走停停
       use_regulated_linear_velocity_scaling: true
-      regulated_linear_scaling_min_speed: 0.0       # 急弯最低速；过小舵效差易画圈，可试 0.2~0.3.不能低到船舵效明显失效
+      regulated_linear_scaling_min_speed: 0.1       # 急弯最低速；过小舵效差易画圈，可试 0.2~0.3.不能低到船舵效明显失效
       regulated_linear_scaling_min_radius: 5.0       # 触发减速的等效转弯半径 (m)
 
       # —— 代价减速（软限速，与碰撞弧急停是两套独立机制）——
@@ -127,14 +127,14 @@ controller_server:
       inflation_cost_scaling_factor: 1.0
 
       # —— 接近目标时减速。距离须 ≥ 船头前伸量，否则到达前已全速冲过 ——
-      min_approach_linear_velocity: 0.1
+      min_approach_linear_velocity: 0.0
       approach_velocity_scaling_dist: 5.0   #剩余路径长度小于此值，开始线性降速，直到最小线速度min_approach_linear_velocity
 
       # —— 转向控制 ——
-      use_rotate_to_heading: true              # 机器人航向与路径起点航向偏差过大（超过 rotate_to_heading_min_angle），或者在接近终点（在容差内）需要调整终态朝向时（rotate_to_heading_angular_vel调整速度），会停止线速度，进行原地旋转。
+      use_rotate_to_heading: true              # 机器人航向与路径起点航向偏差过大（超过 rotate_to_heading_min_angle），或者在接近终点（在容差内）需要调整终态朝向时（rotate_to_heading_angular_vel调整速度），会停止线速度，进行原地旋转。对齐前瞻点方向
       rotate_to_heading_angular_vel: 0.35   # 原地旋转目标角速度；注意下游桥硬限幅 ±0.35/0.28，
                                            # 超过部分会被桥削掉，调大需同步改桥的 max_*_angular_z
-      rotate_to_heading_min_angle: 1.57  #1.57  90度     0.785    45度
+      rotate_to_heading_min_angle: 0.785  #1.57  90度     0.785    45度
       # —— 碰撞检测（硬急停，与上面代价减速独立）——
       # 沿当前 (vx, ω) 向前仿真一条弧，弧长 = min(v × 本参数, 前瞻距离 carrot_dist)，
       # 弧上任何位姿 footprint 压到障碍 → 抛异常急停/恢复。RViz 看 /lookahead_collision_arc。
@@ -213,7 +213,7 @@ global_costmap:
       footprint: "[[2.72, 0.95], [2.72, -0.95], [-0.4, -0.95], [-0.4, 0.95]]"
       # —— 全局代价地图分辨率 (m/格)。原则：全局代价地图分辨率 = 地图分辨率 ——
       resolution: 0.5
-      track_unknown_space: True
+      track_unknown_space: True  #false，unknow会当成free
       # —— global 挂 voxel_layer 用于远距离障碍预判（obstacle_max_range 15m）。
       #    注意：非滚动窗口下，动态物（行人/车辆）离开后其标记可能残留（clearing 需要射线穿过旧体素，
       #    动态物走后无新射线穿过原位置则永久残留）。水上动态物少时影响不大；
@@ -260,7 +260,7 @@ global_costmap:
         cost_scaling_factor: 1.0
         # —— 全局膨胀半径 (m)：规划器按 base_link 点搜索，此值≈船离静态障碍多远。
         #    船体外接半径 ≈ 2.88m，3.5m ≈ 船身 + 0.6m 余量；再大窄道会被高代价夹住绕行甚至无解 ——
-        inflation_radius: 3.5
+        inflation_radius: 4.0
       always_send_full_costmap: True
       
 map_server:
@@ -278,24 +278,29 @@ map_saver:
 
 planner_server:
   ros__parameters:
-    expected_planner_frequency: 1.0
+    expected_planner_frequency: 2.0
     use_sim_time: false
     planner_plugins: ["GridBased"]
     GridBased:
       plugin: "nav2_smac_planner/SmacPlanner2D"
       # —— 路径终点容差 (m)。粗分辨率地图可适当加大 ——
       # 路径曲折会加剧 RPP 曲率检测；换图后若 S 线/画圈，同步查 global resolution 与 RPP min_radius
-      tolerance: 1.0
+      tolerance: 2.0
       # —— 代价穿越乘数：>1 时规划器更倾向绕开代价区而非穿越。水面避障建议 2.0~3.0 ——
-      cost_travel_multiplier: 2.0
+      cost_travel_multiplier: 3.0
       downsample_costmap: false
       downsampling_factor: 1
       # —— 允许穿越未知区域 (true=允许，false=只有已知空闲可走) ——
-      allow_unknown: true
+      allow_unknown: false
       max_iterations: 1000000
       max_on_approach_iterations: 1000
       # —— 最大规划时间 (s)，超时则返回失败 ——
       max_planning_time: 3.0
+      # —— 终点朝向策略(仅 SmacPlanner2D)：
+      #    true  = 末端沿最后一段路径方向(切向)靠近，避免临近终点原地扭头；
+      #    false = 终点姿态强制为 goal 朝向(适合要求精确纵/横对准的静态靠泊)。
+      #    归港对准建议 true；若要终点必须等于 goal 朝向则改 false。 ——
+      use_final_approach_orientation: false
       smoother:
         max_iterations: 1000
         # —— 平滑权重：w_smooth 越大路径越平滑但可能偏离原始路径；w_data 保持接近原始 ——
@@ -303,7 +308,6 @@ planner_server:
         w_data: 0.2
         tolerance: 1.0e-10
         do_refinement: true
-        refinement_num: 2
         
         
 # —— smoother_server —————————————————————————————————————————————————————————
