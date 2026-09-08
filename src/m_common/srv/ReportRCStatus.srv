@@ -1,0 +1,5 @@
+# 上报飞控遥控器状态（mavros rc_io -> 上游）,见/mavros/rc_status
+# status: 0=未开启, 1=遥控器开启未操作, 2=遥控器操作中
+int32 status
+---
+bool result

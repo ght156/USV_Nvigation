@@ -20,7 +20,7 @@ struct RtspClientGstConfig
   /// RTSP 播放地址，例如 rtsp://127.0.0.1:8554/live/cam_live
   std::string url;
 
-  /// rtspsrc latency（毫秒），越小实时性越高，抗抖动越差
+  /// rtspsrc latency（毫秒），越小实时性越高，抗抖动越差。0 时还会关掉 RTP jitter 缓冲。
   int latency_ms = 100;
 
   /// 每次 read() 的等待超时（毫秒）
@@ -53,7 +53,8 @@ public:
   RtspClientGst(RtspClientGst &&) = delete;
   RtspClientGst & operator=(RtspClientGst &&) = delete;
 
-  /// 建立连接。失败抛 std::runtime_error。
+  /// 建立连接，阻塞至解码支路连上（对齐 OpenCV VideoCapture::open / rtsp2 ensure_rtsp_client_open）。
+  /// 失败抛 std::runtime_error。
   void open(const RtspClientGstConfig & cfg);
 
   /// 主动关闭连接。析构时自动调用。
@@ -63,6 +64,7 @@ public:
   bool is_open() const;
 
   /// 拉取一帧 BGR 图像；失败时按配置自动重连并重试。
+  /// 解码支路已建立后的 pull 超时不重连（与 rtsp2 worker 相同）。
   bool read(cv::Mat & frame);
 
   /// 最近一次成功读帧的时间戳（steady clock，ms）。

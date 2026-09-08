@@ -1,7 +1,21 @@
-# §4.2.1.8 航线全局参数
+# §4.2.1.8 无人船参数设置（usv_param_set）
+# 云端字段都是可选字段；has_* = false 表示本次不修改该参数。
+bool  has_low_battery_threshold
+uint8 low_battery_threshold
+
+bool    has_wp_speed
+float32 wp_speed
+
 # finish_action: 0=返回上次模式 1=悬停 2=返航 3=重复执行 4=进船坞
-float32 speed
-uint8   finish_action
+bool  has_finish_action
+uint8 finish_action
+
+bool  has_return_dock_battery_threshold
+uint8 return_dock_battery_threshold
+
+# true 表示本次替换完整列表；空数组表示清空。
+bool has_dock_berths
+m_common/DockBerth[] dock_berths
 ---
 int32 result
 string msg

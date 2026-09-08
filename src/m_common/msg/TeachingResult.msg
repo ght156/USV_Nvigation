@@ -2,6 +2,7 @@
 # 由 decision 采点汇总后发布,mqtt_bridgev2 订阅后转 MQTT state
 string  teaching_id
 int32   result             # 0 成功;非 0 或 waypoints 为空视为示教失败
+string  message            # 失败时为可读原因；成功时可为空
 m_common/Waypoint[] waypoints
 float32 total_distance_m   # 示教总里程(米)
 int64   duration_ms        # 示教总时长(毫秒)

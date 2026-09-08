@@ -100,6 +100,15 @@ bool spawn_gstreamer_rtsp_url_relay(
   const std::string & pull_url, const std::string & push_url, bool use_h265, int * out_pid,
   std::string * err_msg);
 
+/// Jetson NVMM 低延迟转码所需插件是否齐全（nvv4l2decoder + nvvidconv + nvv4l2h264enc + rtspclientsink）。
+bool jetson_nvmm_h265_to_h264_available();
+
+/// 方案 A：相机 H.265 → nvv4l2decoder → NVMM → nvv4l2h264enc → rtspclientsink 直推远端（gst-launch 子进程）。
+/// @param bitrate_kbps 编码码率（kbps）；@param fps 用于 iframeinterval（约 1s GOP）
+bool spawn_gstreamer_jetson_h265_to_h264_relay(
+  const std::string & pull_url, const std::string & push_url, int bitrate_kbps, int fps,
+  int * out_pid, std::string * err_msg);
+
 }  // namespace m_common
 
 #endif  // M_COMMON__RTSP_INTERFACE__RTSP_REMOTE_CLIENT_PUSH_HPP_

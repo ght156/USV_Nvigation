@@ -6,6 +6,7 @@
 #include "rtsp_device_detect.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <mutex>
@@ -84,7 +85,7 @@ public:
   {
     std::lock_guard<std::mutex> lk(mtx_);
 #if defined(RTSP_IF_HAS_GSTREAMER)
-    return pipeline_ != nullptr && sink_ != nullptr;
+    return pipeline_ != nullptr && sink_ != nullptr && branch_linked_.load();
 #else
     return false;
 #endif
@@ -97,8 +98,8 @@ public:
       return true;
     }
 #if defined(RTSP_IF_HAS_GSTREAMER)
-    // 解码支路已建立时 pull 超时很常见（尤其 H265 首帧），勿重连否则永远拿不到帧。
-    if (branch_linked_ && last_link_error_.empty()) {
+    // 与 rtsp2 相同：解码支路已建立时 pull 超时很常见，勿重连。
+    if (branch_linked_.load() && last_link_error_.empty()) {
       return false;
     }
 #endif
@@ -119,7 +120,7 @@ public:
         return true;
       }
 #if defined(RTSP_IF_HAS_GSTREAMER)
-      if (branch_linked_ && last_link_error_.empty()) {
+      if (branch_linked_.load() && last_link_error_.empty()) {
         return false;
       }
 #endif
@@ -152,7 +153,7 @@ private:
   void link_dynamic_branch(GstPad * new_pad)
   {
     if (new_pad == nullptr || pipeline_ == nullptr || queue_ == nullptr) return;
-    if (branch_linked_) return;
+    if (branch_linked_.load()) return;
 
     GstCaps * caps = gst_pad_get_current_caps(new_pad);
     if (caps == nullptr) {
@@ -161,10 +162,15 @@ private:
     if (caps == nullptr) return;
 
     std::string encoding_name;
-    GstStructure * st = gst_caps_get_structure(caps, 0);
-    if (st != nullptr) {
+    const guint n_st = gst_caps_get_size(caps);
+    for (guint i = 0; i < n_st; ++i) {
+      GstStructure * st = gst_caps_get_structure(caps, i);
+      if (st == nullptr) continue;
       const char * enc = gst_structure_get_string(st, "encoding-name");
-      if (enc != nullptr) encoding_name = enc;
+      if (enc != nullptr && enc[0] != '\0') {
+        encoding_name = enc;
+        break;
+      }
     }
     gst_caps_unref(caps);
 
@@ -172,7 +178,7 @@ private:
       c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
     }
     if (encoding_name.empty()) {
-      last_link_error_ = "RtspClientGst: cannot determine encoding-name from RTSP caps";
+      // 控制轨 / caps 未就绪：等下一次 pad-added，不要当错误去重连。
       return;
     }
 
@@ -222,24 +228,81 @@ private:
       return;
     }
 
+    if (active_decoder_ == "nvv4l2decoder" &&
+        g_object_class_find_property(G_OBJECT_GET_CLASS(decoder_), "enable-max-performance") !=
+          nullptr)
+    {
+      g_object_set(G_OBJECT(decoder_), "enable-max-performance", TRUE, nullptr);
+    }
+
+    GstElement * nvcvt = nullptr;
+    const bool use_nv = m_common::rtsp_device_is_jetson() && active_decoder_ == "nvv4l2decoder" &&
+                        gst_has_factory_name("nvvidconv");
+    if (use_nv) {
+      nvcvt = gst_element_factory_make("nvvidconv", "nvcvt");
+      if (nvcvt == nullptr) {
+        last_link_error_ = "RtspClientGst: failed to create nvvidconv";
+        return;
+      }
+    }
+
     GstCaps * bgr_caps = gst_caps_new_simple("video/x-raw", "format", G_TYPE_STRING, "BGR", nullptr);
     g_object_set(G_OBJECT(capsfilter_), "caps", bgr_caps, nullptr);
     gst_caps_unref(bgr_caps);
 
+    gst_bin_add(GST_BIN(pipeline_), depay_);
     if (parse_ != nullptr) {
-      gst_bin_add_many(
-        GST_BIN(pipeline_), depay_, parse_, decoder_, convert_, capsfilter_, sink_, nullptr);
-      if (!gst_element_link_many(queue_, depay_, parse_, decoder_, convert_, capsfilter_, sink_, nullptr)) {
-        last_link_error_ = "RtspClientGst: failed to link branch elements with parser";
-        return;
-      }
+      gst_bin_add(GST_BIN(pipeline_), parse_);
+    }
+    gst_bin_add(GST_BIN(pipeline_), decoder_);
+    if (nvcvt != nullptr) {
+      gst_bin_add(GST_BIN(pipeline_), nvcvt);
+    }
+    gst_bin_add_many(GST_BIN(pipeline_), convert_, capsfilter_, sink_, nullptr);
+
+    bool linked = false;
+    if (parse_ != nullptr) {
+      linked = gst_element_link_many(queue_, depay_, parse_, decoder_, nullptr) == TRUE;
     } else {
-      gst_bin_add_many(
-        GST_BIN(pipeline_), depay_, decoder_, convert_, capsfilter_, sink_, nullptr);
-      if (!gst_element_link_many(queue_, depay_, decoder_, convert_, capsfilter_, sink_, nullptr)) {
-        last_link_error_ = "RtspClientGst: failed to link branch elements";
-        return;
+      linked = gst_element_link_many(queue_, depay_, decoder_, nullptr) == TRUE;
+    }
+    if (!linked) {
+      last_link_error_ = "RtspClientGst: failed to link depay/decoder";
+      return;
+    }
+    GstElement * before_cvt = decoder_;
+    if (nvcvt != nullptr) {
+      // nvv4l2decoder→nvvidconv 直出 BGRx：NV12→BGR 的重 CSC 走 GPU，
+      // 留给 videoconvert 的只是 BGRx→BGR 去 alpha（实测满帧 25fps；
+      // 不带 caps 时 videoconvert 全量 CPU 转换，720p 掉到 ~18fps）
+      nvcvt_caps_ = gst_element_factory_make("capsfilter", "nvcvt_caps");
+      GstCaps * bgrx_caps =
+          gst_caps_new_simple("video/x-raw", "format", G_TYPE_STRING, "BGRx", nullptr);
+      bool nv_bgrx_ok = false;
+      if (nvcvt_caps_ != nullptr) {
+        g_object_set(G_OBJECT(nvcvt_caps_), "caps", bgrx_caps, nullptr);
+        gst_bin_add(GST_BIN(pipeline_), nvcvt_caps_);
+        nv_bgrx_ok = gst_element_link_many(decoder_, nvcvt, nvcvt_caps_, nullptr) == TRUE;
+        if (!nv_bgrx_ok) {
+          gst_element_unlink(decoder_, nvcvt);
+          gst_bin_remove(GST_BIN(pipeline_), nvcvt_caps_);
+          nvcvt_caps_ = nullptr;
+        }
       }
+      gst_caps_unref(bgrx_caps);
+      if (nv_bgrx_ok) {
+        before_cvt = nvcvt_caps_;
+      } else {
+        if (gst_element_link(decoder_, nvcvt) != TRUE) {
+          last_link_error_ = "RtspClientGst: failed to link nvv4l2decoder→nvvidconv";
+          return;
+        }
+        before_cvt = nvcvt;
+      }
+    }
+    if (gst_element_link_many(before_cvt, convert_, capsfilter_, sink_, nullptr) != TRUE) {
+      last_link_error_ = "RtspClientGst: failed to link convert→appsink";
+      return;
     }
 
     GstPad * sink_pad = gst_element_get_static_pad(queue_, "sink");
@@ -258,11 +321,13 @@ private:
     gst_element_sync_state_with_parent(depay_);
     if (parse_ != nullptr) gst_element_sync_state_with_parent(parse_);
     gst_element_sync_state_with_parent(decoder_);
+    if (nvcvt != nullptr) gst_element_sync_state_with_parent(nvcvt);
+    if (nvcvt_caps_ != nullptr) gst_element_sync_state_with_parent(nvcvt_caps_);
     gst_element_sync_state_with_parent(convert_);
     gst_element_sync_state_with_parent(capsfilter_);
     gst_element_sync_state_with_parent(sink_);
 
-    branch_linked_ = true;
+    branch_linked_.store(true);
     active_encoding_ = encoding_name;
     g_print(
       "RtspClientGst: encoding=%s, decoder=%s, url=%s\n",
@@ -275,9 +340,40 @@ private:
   void open_locked_or_throw()
   {
     if (!open_locked()) {
+#if defined(RTSP_IF_HAS_GSTREAMER)
+      std::string err = last_link_error_.empty()
+                          ? ("RtspClientGst: failed to open stream: " + opened_url_)
+                          : last_link_error_;
+      close_pipeline_locked();
+      throw std::runtime_error(err);
+#else
       throw std::runtime_error("RtspClientGst: failed to open stream: " + opened_url_);
+#endif
     }
   }
+
+#if defined(RTSP_IF_HAS_GSTREAMER)
+  static constexpr std::uint64_t kOpenLinkTimeoutMs = 8000;
+
+  bool wait_until_branch_linked_locked()
+  {
+    const std::uint64_t deadline = now_ms() + kOpenLinkTimeoutMs;
+    while (now_ms() < deadline) {
+      if (branch_linked_.load()) {
+        return true;
+      }
+      if (!last_link_error_.empty()) {
+        return false;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    if (last_link_error_.empty()) {
+      last_link_error_ =
+        "RtspClientGst: timeout waiting for RTSP decode branch url=" + opened_url_;
+    }
+    return false;
+  }
+#endif
 
   bool reopen_locked()
   {
@@ -369,7 +465,7 @@ private:
 
     close_pipeline_locked();
 
-    branch_linked_ = false;
+    branch_linked_.store(false);
     active_encoding_.clear();
     active_decoder_.clear();
     last_link_error_.clear();
@@ -378,6 +474,7 @@ private:
     decoder_ = nullptr;
     convert_ = nullptr;
     capsfilter_ = nullptr;
+    nvcvt_caps_ = nullptr;
 
     pipeline_ = gst_pipeline_new("rtsp_client_gst_pipeline");
     rtspsrc_ = gst_element_factory_make("rtspsrc", "src");
@@ -394,12 +491,21 @@ private:
       "latency", std::max(0, cfg_.latency_ms),
       "protocols", cfg_.prefer_tcp_transport ? static_cast<guint>(GST_RTSP_LOWER_TRANS_TCP)
                                              : static_cast<guint>(GST_RTSP_LOWER_TRANS_UDP),
+      "drop-on-latency", TRUE,
       nullptr);
+    if (cfg_.latency_ms <= 0 &&
+        g_object_class_find_property(G_OBJECT_GET_CLASS(rtspsrc_), "buffer-mode") != nullptr)
+    {
+      // 0 = none：不做 RTP jitter 缓冲，对齐 rtsp2 hw relay 的 latency=0
+      g_object_set(G_OBJECT(rtspsrc_), "buffer-mode", 0, nullptr);
+    }
     g_object_set(
       G_OBJECT(queue_),
-      "max-size-buffers", std::max(1, cfg_.appsink_max_buffers),
+      // 该队列过的是 RTP 包：按包数限 2 会在 IDR（几十~上百包）时必丢包。
+      // 改为按时间限 1s（包数/字节不限），leaky=downstream 丢旧保新
+      "max-size-buffers", 0U,
       "max-size-bytes", 0U,
-      "max-size-time", 0ULL,
+      "max-size-time", static_cast<guint64>(1000000000ULL),
       "leaky", 2,  // downstream: 丢旧帧，保新帧
       nullptr);
     g_object_set(
@@ -419,14 +525,14 @@ private:
       throw std::runtime_error("RtspClientGst: failed to set pipeline PLAYING");
     }
 
-    return true;
+    return wait_until_branch_linked_locked();
 #endif
   }
 
   void close_pipeline_locked()
   {
 #if defined(RTSP_IF_HAS_GSTREAMER)
-    branch_linked_ = false;
+    branch_linked_.store(false);
     active_encoding_.clear();
     active_decoder_.clear();
     last_link_error_.clear();
@@ -464,8 +570,10 @@ private:
   GstElement * decoder_ = nullptr;
   GstElement * convert_ = nullptr;
   GstElement * capsfilter_ = nullptr;
+  /// nvvidconv 输出侧 BGRx capsfilter（仅 Jetson+nvv4l2 支路；须随支路同步状态）
+  GstElement * nvcvt_caps_ = nullptr;
   GstElement * sink_ = nullptr;
-  bool branch_linked_ = false;
+  std::atomic<bool> branch_linked_{false};
   std::string active_encoding_;
   std::string active_decoder_;
   std::string last_link_error_;

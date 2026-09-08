@@ -1,4 +1,8 @@
 # §4.2.1.5 Home 点
+# use_current=true 使用 decision 在最近一次解锁上升沿保存的内存 Home，
+# 此时忽略 lat/lon/alt；不是使用收到请求当下的位置。
+# false 时 lat/lon 必填(mqtt_bridgev2 会先校验)
+bool use_current
 float64 lat
 float64 lon
 float32 alt

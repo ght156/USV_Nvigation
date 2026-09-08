@@ -1,7 +1,10 @@
-# Decision → 导航：写入完整电子围栏快照（开机一次 + 云平台更新时）
-# 全量替换语义；空数组 = 清除已保存的全部围栏
-# 校验失败返回 success=false，并保留上一次有效围栏
+# 写入导航侧完整电子围栏快照；空数组表示清空。
 m_common/GeoFence[] fences
+# 与围栏一起发送的当前导航配置快照；导航可按能力消费。
+bool has_pre_dock_point
+m_common/MissionWaypoint pre_dock_point
+float32 wp_speed
+m_common/DockBerth[] dock_berths
 ---
 bool success
 string message

@@ -1,8 +1,9 @@
-# 控制-18~20 示教模式(§4.2.11):teaching_start / teaching_stop / teaching_result_fetch 合一
+# 控制-19~22 示教模式(§4.2.12):start / stop / result_fetch / cancel 合一
 # action:
 #   "start" → 开始示教,清空并重写航线,进入采点(sample_mode/sample_interval 生效)
 #   "stop"  → 结束示教,停止采点、汇总航线并上报 teaching_result
-#   "fetch" → 重新获取(control-20),把已存航线原样再上报一遍
+#   "fetch" → 同步获取当前/最终航点快照,不触发 teaching_result 上报
+#   "cancel"→ 取消示教并清空该会话的全部航点和结果
 string  action
 string  teaching_id
 string  sample_mode       # "DISTANCE" 等距 / "TIME" 等时(仅 start 用)
@@ -10,3 +11,11 @@ float32 sample_interval   # DISTANCE:米 / TIME:秒(仅 start 用)
 ---
 int32  result             # 0 受理成功,非 0 见附录 C(如 1007 已有会话进行中)
 string msg
+# 以下字段仅 fetch 成功时由 MQTT bridge 写入 services_reply.data.common
+string teaching_id
+string phase               # SAMPLING / FINALIZING / COMPLETED / FAILED
+bool finished
+string error_code         # 终态失败时的稳定机器可读错误常量,否则为空
+m_common/Waypoint[] waypoints
+float32 total_distance_m
+int64 duration_ms

@@ -6,6 +6,8 @@
 
 本文档在项目现有说明（[`实船调试.md`](./实船调试.md)、[`PROJECT_ARCHITECTURE_AND_NAV2.md`](./PROJECT_ARCHITECTURE_AND_NAV2.md)）之上，汇总 **控制链差异**、按优先级分层的改动清单，以及 **MAVROS（PX4 插件侧）常用话题语义**。不涉及具体飞控 PID 与地面站校准步骤；那些仍以 PX4/QGC、队里规范为准。
 
+> **里程计 QoS 兼容**：`/mavros/gps_input/local` 的发布/订阅 QoS 不匹配（mavros 是 BEST_EFFORT、Nav2/导航侧订阅是 RELIABLE）及「全部订阅端统一 BEST_EFFORT」的改动，见 **[`../../docs/Nav2与MAVROS里程计QoS兼容说明.md`](../../docs/Nav2与MAVROS里程计QoS兼容说明.md)**。
+
 ---
 
 ## 1. 当前仿真控制链 vs 目标实船链

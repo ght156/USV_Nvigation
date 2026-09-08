@@ -13,42 +13,62 @@
 # limitations under the License.
 
 import os
-from rcl_interfaces.srv import SetParameters
-import rclpy
-import rclpy
-from launch import LaunchDescription
-from launch_ros.actions import Node
-from ament_index_python.packages import get_package_share_directory, get_package_prefix
 
+from ament_index_python.packages import get_package_prefix, get_package_share_directory
 from launch import LaunchDescription
-from launch.substitutions import LaunchConfiguration  
-from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.actions import (
-    DeclareLaunchArgument,
-    GroupAction,
-    IncludeLaunchDescription,
-    SetEnvironmentVariable,
-    ExecuteProcess
-)
+from launch.actions import DeclareLaunchArgument, OpaqueFunction
+from launch.conditions import IfCondition
+from launch.substitutions import LaunchConfiguration
+from launch_ros.actions import Node
+
+
+def launch_setup(context, *args, **kwargs):
+    package_name = 'apriltag_localization'
+    package_prefix = get_package_prefix(package_name)
+    package_share = get_package_share_directory(package_name)
+
+    default_params = os.path.join(package_prefix, 'config', 'detection_cfg.yml')
+    params_file = LaunchConfiguration('params_file').perform(context)
+    if not params_file:
+        params_file = default_params
+
+    rviz_config = os.path.join(package_share, 'rviz', 'apriltag_localization.rviz')
+
+    apriltag_node = Node(
+        package=package_name,
+        executable='apriltag_localization_cpp',
+        name='apriltag_node',
+        parameters=[params_file],
+        output='both',
+    )
+
+    rviz_node = Node(
+        package='rviz2',
+        executable='rviz2',
+        name='apriltag_rviz',
+        arguments=['-d', rviz_config],
+        condition=IfCondition(LaunchConfiguration('rviz')),
+        output='screen',
+    )
+
+    return [apriltag_node, rviz_node]
+
 
 def generate_launch_description():
-    
-    # 获取你的包的路径
     package_name = 'apriltag_localization'
-    package_dir = get_package_prefix(package_name)
-    
-    # 指定YAML配置文件的路径
-    params_file_path = os.path.join(package_dir, 'config', 'detection_cfg.yml')
-    print(f"Loading parameters from: {params_file_path}")
-    # 启动节点并加载参数
-    my_node_with_params = Node(
-        package=package_name,
-        executable='apriltag_localization_cpp', # 应在CMakeLists.txt或setup.py中定义
-        name='apriltag_node', # 节点名，应与YAML文件中的顶层名称一致
-        parameters=[params_file_path], # 加载YAML文件中的所有参数
-        output='both'
-    )
-    
+    package_prefix = get_package_prefix(package_name)
+    default_params = os.path.join(package_prefix, 'config', 'detection_cfg.yml')
+
     return LaunchDescription([
-        my_node_with_params
+        DeclareLaunchArgument(
+            'params_file',
+            default_value=default_params,
+            description='Full path to apriltag_localization YAML config',
+        ),
+        DeclareLaunchArgument(
+            'rviz',
+            default_value='false',
+            description='Whether to launch RViz2 for TF/Image visualization',
+        ),
+        OpaqueFunction(function=launch_setup),
     ])

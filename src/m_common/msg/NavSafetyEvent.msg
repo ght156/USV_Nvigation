@@ -1,8 +1,4 @@
-# 导航异步安全事件（无活动任务 Action 时的电子围栏越界等）
-# event_code 固定取值：GEOFENCE_VIOLATION
-# fence_type：exclusion=禁航区；inclusion=作业区
-# transition：ENTER=闯入；EXIT=驶出
-# enabled：true=告警触发；false=告警解除
+# 无活动 NavigateTask 时导航侧产生的异步安全事件。
 std_msgs/Header header
 uint8 severity
 string event_code

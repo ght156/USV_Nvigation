@@ -692,6 +692,61 @@ rviz2
 
 ---
 
+## 10.7 网页地图工具（rosbridge WebSocket 实时查看）
+
+> 对应仓库 `ros_map_tool`（`ros_map_tool_v3_nav2_live.html`），纯静态 HTML，浏览器打开即用。
+> 它不走 ROS DDS，**只通过 WebSocket 连 rosbridge**，所以打开网页那台机（地面站笔记本）的
+> `ROS_DOMAIN_ID` / `ROS_LOCALHOST_ONLY` / `RMW_IMPLEMENTATION` 对它**无影响**；
+> 只要 **nav2 与 rosbridge 在同一 Domain**（域以 `echo $ROS_DOMAIN_ID` 实际为准；当前 NX 与笔记本均为 **5 + `rmw_cyclonedds_cpp`**），浏览器就能看到船。
+
+### 10.7.1 网页里该填什么 IP？
+
+**填“运行 rosbridge_server 的那台机器”的地址**（它必须和 nav2 同一台机、同一 `ROS_DOMAIN_ID`），
+**不是**“打开网页那台机器（地面站/笔记本）”的 IP。
+
+| 场景 | 网页地址 |
+| --- | --- |
+| rosbridge 和浏览器在**同一台机** | `ws://127.0.0.1:9090` |
+| 浏览器在**另一台机**（笔记本浏览器 → 实船 NX） | `ws://<NX的IP>:9090`，如 `ws://192.168.2.101:9090` |
+
+查“运行 rosbridge 的那台机”的 IP：
+
+```bash
+ip -4 addr show   # 或 hostname -I / ifconfig
+```
+
+取网卡上**非 `127.x`** 的那行 `inet`（实船 NX 常为 `192.168.2.101`；手机热点下会变，用实际分配值或 `nvidia-desktop.local`）。
+
+> **关键：rosbridge 在哪台机，网页就填哪台机的地址。** 如果 rosbridge 是跑在**笔记本（地面站）**上（当前就是：监听 `0.0.0.0:9090`），网页直接填 `ws://127.0.0.1:9090`，不要再填 NX 的 IP（NX 的 9090 并不可达）。
+
+### 10.7.2 启动 rosbridge（NX 或地面站笔记本任选其一）
+
+```bash
+sudo apt install ros-humble-rosbridge-server   # 一次即可
+```
+
+```bash
+# 域以 nav2 实际为准（当前 =5）；RMW 与 nav2 一致（当前 =rmw_cyclonedds_cpp）
+source /opt/ros/humble/setup.bash
+source ~/USV_NAV/install/setup.bash
+export ROS_DOMAIN_ID=5
+export ROS_LOCALHOST_ONLY=0
+ros2 launch rosbridge_server rosbridge_websocket_launch.xml
+```
+
+当前实船的 rosbridge 是跑在**地面站笔记本**上（同样域 5 + CycloneDDS、`ROS_LOCALHOST_ONLY=0`），所以网页用 `ws://127.0.0.1:9090`。
+
+### 10.7.3 工具里怎么用
+
+打开 `ros_map_tool_v3_nav2_live.html` → 切 **“📡 Nav2 实时”** → 地址填 10.7.1 算出的 `ws://...` → **“🔌 连接 ROS”**。
+前端自动订阅 `/map`、`/usv_map_pose`、`/plan`。
+
+* **`/map`**（Nav2 `map_server` 发布，transient_local 锁存）：建议在 nav2 **之后**启动 rosbridge；页面连得晚可能收不到历史锁存值，此时点 **“↻ 重新订阅”**，或直接在编辑器加载 `config/map.yaml`+其 `image` 指向的 PGM。
+* **`/usv_map_pose`**：非 Nav2 自带，需另跑 `ros_map_tool` 仓库里的 `usv_map_pose_bridge.py`（靠 TF `map→base_link` 查询），否则船位/朝向不刷新。
+* **`/plan`**：Nav2 全局路径，默认 `/plan`。
+
+---
+
 # 十一、增量同步与免密配置（脚本已内置在仓库）
 
 项目 `tools/` 目录已包含两个脚本，无需手工创建。

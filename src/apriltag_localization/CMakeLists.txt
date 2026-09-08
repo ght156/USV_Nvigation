@@ -14,57 +14,27 @@ find_package(ament_cmake_python REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(Eigen3 REQUIRED)
 find_package(yaml-cpp REQUIRED)
-# find_package(VTK REQUIRED)
 find_package(PCL 1.10 REQUIRED)
 find_package(rclcpp REQUIRED)
+find_package(rclcpp_components REQUIRED)
 find_package(rclpy REQUIRED)
 find_package(m_common REQUIRED)
 find_package(tf2 REQUIRED)
+find_package(tf2_ros REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
-
-# if(TARGET Python3::Python)
-#     set_target_properties(Python3::Python PROPERTIES
-#         IMPORTED_LOCATION "${Python3_LIBRARY}"
-#         INTERFACE_INCLUDE_DIRECTORIES "${Python3_INCLUDE_DIR}"
-#     )
-# endif()
-# if(TARGET Python::Python)
-#     set_target_properties(Python::Python PROPERTIES
-#         IMPORTED_LOCATION "${Python3_LIBRARY}"
-#         INTERFACE_INCLUDE_DIRECTORIES "${Python3_INCLUDE_DIR}"
-#     )
-# endif()
-
+find_package(sensor_msgs REQUIRED)
 
 # 获取架构
-if(${CMAKE_SYSTEM_PROCESSOR} MATCHES "x86_64")  
+if(${CMAKE_SYSTEM_PROCESSOR} MATCHES "x86_64")
   set(SYSTEM_ARCHITECTURE  "x86" CACHE STRING "system architecture" FORCE)
 else()
   set(SYSTEM_ARCHITECTURE  "arm" CACHE STRING "system architecture" FORCE)
 endif()
-# include(SKD/include)
 
 set(ENABLE_AI ON CACHE BOOL "开启AI-22.04开启" FORCE) # arm64 22.04开启
-if(${SYSTEM_ARCHITECTURE} MATCHES "x86")  
-    # Filter out -flto=auto flags
-    # string(REGEX REPLACE "-flto=auto *" "" CMAKE_C_FLAGS "${CMAKE_C_FLAGS}")
-    # string(REGEX REPLACE "-flto=auto *" "" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
-    # string(REGEX REPLACE "-flto=auto *" "" CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS}")
-    # string(REGEX REPLACE "-flto=auto *" "" CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS}")
-    # string(REGEX REPLACE "-flto=auto *" "" CMAKE_MODULE_LINKER_FLAGS "${CMAKE_MODULE_LINKER_FLAGS}") #只在x86 cuda禁用flto
-    # set(onnxruntime_DIR /home/jzw/Libs/onnxruntime-linux-x64-gpu-1.22.0/)
-    # set(TENSORRT_INCLUDE_DIRS /home/jzw/Libs/TensorRT-10.13.0.35/include)
-    # set(TENSORRT_LIBRARY_DIRS /home/jzw/Libs/TensorRT-10.13.0.35/lib)
-    # find_package(onnxruntime REQUIRED)
-#   endif()
-  # set(CHIP_TYPE NVIDIA)
+if(${SYSTEM_ARCHITECTURE} MATCHES "x86")
 else()
-  # set(ENABLE_AI ON CACHE BOOL "开启AI-22.04开启" FORCE) # arm64 22.04开启
-  # arm64
-  # set(TENSORRT_INCLUDE_DIRS /home/jzw/Libs/TensorRT-10.13.0.35/include)
-  # set(TENSORRT_LIBRARY_DIRS /home/jzw/Libs/TensorRT-10.13.0.35/lib)
-  # set(CHIP_TYPE NVIDIA)
 endif()
 
 link_directories(${TENSORRT_LIBRARY_DIRS})
@@ -73,69 +43,99 @@ include_directories(include/)
 add_subdirectory(apriltag)
 include_directories(./)
 add_definitions(${PCL_DEFINITIONS})
-# 创建可执行文件
-add_executable(apriltag_localization_cpp
-  src/apriltag_node.cpp
-)
 
-target_include_directories(apriltag_localization_cpp PUBLIC 
-      include/ 
-      ${EIGEN3_INCLUDE_DIR} 
-      ${PCL_INCLUDE_DIRS}
-      ${tf2_INCLUDE_DIRS}
-      ${tf2_geometry_msgs_INCLUDE_DIRS}
-      ${geometry_msgs_INCLUDE_DIRS}
-      )
-set(PCL_LIBS ${PCL_LIBRARIES})
-# ament_target_dependencies(apriltag_localization_cpp
-#   rclcpp
-#   cv_bridge
-#   grap_rgbd # 这里会传递库的依赖信息
-#   OpenCV
-#   Eigen3
-#   trt_infer_lib
-#   # message_filters
-#   yaml-cpp
-#   PCL
-#   # vtk
-#   VTK
-# )
-target_link_libraries(apriltag_localization_cpp PUBLIC
-  ${Python3_LIBRARY}
-  rclcpp::rclcpp
-  # GTest::gtest_main
-  cv_bridge::cv_bridge
+# ComposableNodeContainer 加载 perception::AprilTagLocalizationNode
+add_library(apriltag_localization_components SHARED
+  src/apriltag_node.cpp
+  src/apriltag_localization_node.cpp
+  src/apriltag_component_register.cpp
+)
+target_include_directories(apriltag_localization_components PUBLIC
+  "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
+  "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>"
+  "$<INSTALL_INTERFACE:include>"
+  ${EIGEN3_INCLUDE_DIR}
+  ${PCL_INCLUDE_DIRS}
+)
+target_compile_definitions(apriltag_localization_components PRIVATE
+  APRILTAG_LOCALIZATION_COMPONENTS_BUILDING_DLL
+)
+target_link_libraries(apriltag_localization_components
   ${OpenCV_LIBS}
   m_common::mlogger
-  # deploy_core
-  # trt_core
-  # detection_6d_foundationpose
   yaml-cpp
   ${PCL_LIBRARIES}
   fmt
   apriltag
-  ${tf2_LIBRARIES}
-  ${tf2_geometry_msgs_LIBRARIES}
-  ${geometry_msgs_LIBRARIES}
-  # ${ament_cmake_python_LIBRARIES}
-  # yolo
 )
-# 安装可执行文件（可选）
+ament_target_dependencies(apriltag_localization_components
+  rclcpp
+  rclcpp_components
+  cv_bridge
+  m_common
+  tf2
+  tf2_ros
+  tf2_geometry_msgs
+  geometry_msgs
+  sensor_msgs
+)
+
+rclcpp_components_register_nodes(
+  apriltag_localization_components
+  "perception::AprilTagLocalizationNode"
+)
+
+add_executable(apriltag_localization_cpp src/apriltag_node_main.cpp)
+target_include_directories(apriltag_localization_cpp PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+ament_target_dependencies(apriltag_localization_cpp rclcpp m_common)
+target_link_libraries(apriltag_localization_cpp
+  apriltag_localization_components
+  m_common::mlogger
+)
+
+install(TARGETS apriltag_localization_components
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION lib/${PROJECT_NAME}
+)
+
 install(TARGETS apriltag_localization_cpp
   RUNTIME DESTINATION lib/${PROJECT_NAME}
 )
 
-# install(DIRECTORY 
-#   ${CMAKE_CURRENT_SOURCE_DIR}/camera_config/
-#   DESTINATION camera_config
-# )
-install(DIRECTORY 
+install(DIRECTORY include/
+  DESTINATION include
+)
+
+install(DIRECTORY
   ${CMAKE_CURRENT_SOURCE_DIR}/config/
   DESTINATION config
 )
 
-install(DIRECTORY 
+install(DIRECTORY
   ${CMAKE_CURRENT_SOURCE_DIR}/launch/
   DESTINATION share/${PROJECT_NAME}/launch
 )
+
+install(DIRECTORY
+  ${CMAKE_CURRENT_SOURCE_DIR}/rviz/
+  DESTINATION share/${PROJECT_NAME}/rviz
+)
+
+ament_export_include_directories(include)
+ament_export_libraries(apriltag_localization_components)
+ament_export_dependencies(
+  rclcpp
+  rclcpp_components
+  cv_bridge
+  m_common
+  tf2
+  tf2_ros
+  tf2_geometry_msgs
+  geometry_msgs
+  sensor_msgs
+)
+
 ament_package()

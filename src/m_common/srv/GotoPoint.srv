@@ -2,6 +2,9 @@
 # 设备未解锁时由 decision 内部先 arm,再下发单点导航
 float64 lat
 float64 lon
+# 以下三个字段仅供内部导航接口预留；云协议 NavPointVo 不包含它们，
+# mqtt_bridgev2 当前全部填 0。
+float64 yaw
 float32 alt
 float32 speed
 ---

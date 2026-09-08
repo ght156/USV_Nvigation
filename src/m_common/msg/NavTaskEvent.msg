@@ -1,5 +1,4 @@
-# 导航任务事件字段 schema（对应 /task_event JSON）
-# 运行时 Topic 类型仍为 std_msgs/String；本 msg 供 find_package(m_common) 对照字段
+# 导航任务事件（对应 /task_event JSON）
 # 事件驱动，QoS: RELIABLE, depth=50
 
 std_msgs/Header header             # stamp

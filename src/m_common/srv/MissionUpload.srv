@@ -1,10 +1,18 @@
 # §4.2.2 mission_upload
 # 仅把航线灌进飞控,不切 AUTO
+# user_id: 任务归属者(mqtt_bridgev2 填 productKey),decision 用于任务归属校验
 string user_id
 string execution_id
+# V0.7 E.18: 1=航线任务, 2=单点导航, 3=返回船坞
+uint8 mission_type
+# 云协议中 speed/finish_action 可选；false 时由 decision 读取 UsvParamState 全局默认值。
+bool    has_speed
 float32 speed
+bool    has_finish_action
 uint8   finish_action
 m_common/Waypoint[] waypoints
+# 本次任务的电子围栏完整快照；空数组表示本任务不启用围栏。
+m_common/GeoFence[] geo_fences
 ---
 int32 result
 string msg

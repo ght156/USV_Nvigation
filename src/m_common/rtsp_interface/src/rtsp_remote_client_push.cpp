@@ -4,7 +4,9 @@
 #include "m_common/rtsp_interface/rtsp_remote_client_push.hpp"
 
 #include <atomic>
+#include <algorithm>
 #include <cctype>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <future>
@@ -18,13 +20,15 @@
 #include <vector>
 
 #if defined(__linux__)
-#include <spawn.h>
+#include <cerrno>
+#include <csignal>
+#include <stdlib.h>
+#include <sys/prctl.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 #include <chrono>
 #include <thread>
-extern char ** environ;
 #endif
 
 #include <opencv2/imgproc.hpp>
@@ -49,6 +53,36 @@ bool gst_has_factory(const char * name)
   gst_object_unref(f);
   return true;
 }
+
+#if defined(__linux__)
+bool spawn_child_pdeathsig(
+  const char * file, char * const argv[], pid_t * out_pid, std::string * err_msg)
+{
+  if (file == nullptr || argv == nullptr || out_pid == nullptr) {
+    return false;
+  }
+  *out_pid = -1;
+  const pid_t pid = ::fork();
+  if (pid < 0) {
+    if (err_msg != nullptr) {
+      *err_msg = std::string("fork(") + file + ") 失败 errno=" + std::to_string(errno);
+    }
+    return false;
+  }
+  if (pid == 0) {
+    (void)::prctl(PR_SET_PDEATHSIG, SIGTERM);
+    if (::getppid() == 1) {
+      _exit(127);
+    }
+    (void)::setpgid(0, 0);
+    ::execvp(file, argv);
+    _exit(127);
+  }
+  (void)::setpgid(pid, pid);
+  *out_pid = pid;
+  return true;
+}
+#endif
 
 bool jetson_hw_h264_available()
 {
@@ -142,14 +176,22 @@ H265Impl resolve_h265_impl(const std::string & raw)
     "\" （可用 auto | x265 | x265enc | nvv4l2h265enc | jetson | hw）");
 }
 
-std::string h264_branch(int kbps, H264Impl impl)
+int gop_frames_from_fps(int fps)
+{
+  return std::max(15, (fps > 0) ? fps : 25);
+}
+
+std::string h264_branch(int kbps, H264Impl impl, int fps)
 {
   if (kbps < 200) kbps = 200;
+  const int gop = gop_frames_from_fps(fps);
   if (impl == H264Impl::kX264) {
     return std::string(
-      "x264enc tune=zerolatency speed-preset=ultrafast key-int-max=10 threads=0 bframes=0 b-adapt=false "
+      "x264enc tune=zerolatency speed-preset=veryfast key-int-max=") +
+      std::to_string(gop) +
+      " threads=0 bframes=0 b-adapt=false "
       "ref=1 cabac=false dct8x8=false mb-tree=false rc-lookahead=0 sync-lookahead=0 sliced-threads=false "
-      "bitrate=") +
+      "bitrate=" +
       std::to_string(kbps) + " ! h264parse";
   }
   if (impl == H264Impl::kOpenH264) {
@@ -158,58 +200,68 @@ std::string h264_branch(int kbps, H264Impl impl)
       " rate-control=bitrate complexity=low ! h264parse";
   }
   if (impl == H264Impl::kNvV4L2) {
+    // GOP≈1s；编码后 queue 不 leaky（leaky 会丢 P 帧导致播放花屏）。preset-level=2 Medium。
     return std::string("nvv4l2h264enc bitrate=") + std::to_string(kbps * 1000) +
-      " iframeinterval=10 insert-sps-pps=true "
-      "! queue max-size-buffers=4 max-size-time=0 max-size-bytes=0 ! h264parse";
+      " iframeinterval=" + std::to_string(gop) + " idrinterval=" + std::to_string(gop) +
+      " insert-sps-pps=true num-B-Frames=0 "
+      "preset-level=2 profile=0 control-rate=1 maxperf-enable=true "
+      "! queue max-size-buffers=8 max-size-time=0 max-size-bytes=0 ! h264parse";
   }
   throw std::logic_error("rtsp_remote_push[gst]: h264_branch: unexpected H264Impl");
 }
 
-std::string h265_branch(int kbps, H265Impl impl)
+std::string h265_branch(int kbps, H265Impl impl, int fps)
 {
   if (kbps < 200) kbps = 200;
+  const int gop = gop_frames_from_fps(fps);
   if (impl == H265Impl::kNvV4L2) {
     return std::string("nvv4l2h265enc bitrate=") + std::to_string(kbps * 1000) +
-      " iframeinterval=10 insert-sps-pps=true "
-      "! queue max-size-buffers=4 max-size-time=0 max-size-bytes=0 ! h265parse";
+      " iframeinterval=" + std::to_string(gop) + " idrinterval=" + std::to_string(gop) +
+      " insert-sps-pps=true num-B-Frames=0 "
+      "preset-level=2 "
+      "! queue max-size-buffers=8 max-size-time=0 max-size-bytes=0 ! h265parse";
   }
   return std::string(
-           "x265enc speed-preset=ultrafast tune=zerolatency key-int-max=10 bitrate=") +
-    std::to_string(kbps) + " ! h265parse";
+           "x265enc speed-preset=veryfast tune=zerolatency key-int-max=") +
+    std::to_string(gop) + " bitrate=" + std::to_string(kbps) + " ! h265parse";
 }
 
-std::string build_h264_client_launch(H264Impl impl, int kbps)
+std::string build_h264_client_launch(H264Impl impl, int kbps, int fps)
 {
   // rtspclientsink 使用 request pad sink_%u，不能与 rtph264pay 由 gst_parse 静态链接；
   // 直接接入 h264parse 输出的 video/x-h264，由 sink 内部完成 RTP/RECORD。
   const std::string tail = " ! rtspclientsink name=rsink";
-  const std::string q = "queue max-size-buffers=1 max-size-time=0 max-size-bytes=0 ! ";
-  const std::string q_nvmm = "queue max-size-buffers=4 max-size-time=0 max-size-bytes=0 ! ";
+  // 编码前可丢旧原帧；编码后不得 leaky。
+  const std::string q =
+    "queue max-size-buffers=2 max-size-time=0 max-size-bytes=0 leaky=downstream ! ";
   if (impl == H264Impl::kNvV4L2) {
+    // appsrc 直接出 BGRx（CPU 侧已转），nvvidconv VIC 上传 NVMM；无 videoconvert
     return std::string(
-             "( appsrc name=ros_src is-live=true format=time ! videoconvert ! "
-             "video/x-raw,format=NV12 ! nvvidconv ! video/x-raw(memory:NVMM),format=NV12 ! ") +
-      q_nvmm + h264_branch(kbps, impl) + tail + " )";
+             "( appsrc name=ros_src is-live=true format=time ! "
+             "video/x-raw,format=BGRx ! "
+             "nvvidconv ! video/x-raw(memory:NVMM),format=NV12 ! ") +
+      q + h264_branch(kbps, impl, fps) + tail + " )";
   }
   return std::string("( appsrc name=ros_src is-live=true format=time ! videoconvert ! "
                      "video/x-raw,format=I420 ! ") +
-    q + h264_branch(kbps, impl) + tail + " )";
+    q + h264_branch(kbps, impl, fps) + tail + " )";
 }
 
-std::string build_h265_client_launch(H265Impl impl, int kbps)
+std::string build_h265_client_launch(H265Impl impl, int kbps, int fps)
 {
   const std::string tail = " ! rtspclientsink name=rsink";
-  const std::string q = "queue max-size-buffers=1 max-size-time=0 max-size-bytes=0 ! ";
-  const std::string q_nvmm = "queue max-size-buffers=4 max-size-time=0 max-size-bytes=0 ! ";
+  const std::string q =
+    "queue max-size-buffers=2 max-size-time=0 max-size-bytes=0 leaky=downstream ! ";
   if (impl == H265Impl::kNvV4L2) {
     return std::string(
-             "( appsrc name=ros_src is-live=true format=time ! videoconvert ! "
-             "video/x-raw,format=NV12 ! nvvidconv ! video/x-raw(memory:NVMM),format=NV12 ! ") +
-      q_nvmm + h265_branch(kbps, impl) + tail + " )";
+             "( appsrc name=ros_src is-live=true format=time ! "
+             "video/x-raw,format=BGRx ! "
+             "nvvidconv ! video/x-raw(memory:NVMM),format=NV12 ! ") +
+      q + h265_branch(kbps, impl, fps) + tail + " )";
   }
   return std::string("( appsrc name=ros_src is-live=true format=time ! videoconvert ! "
                      "video/x-raw,format=I420 ! ") +
-    q + h265_branch(kbps, impl) + tail + " )";
+    q + h265_branch(kbps, impl, fps) + tail + " )";
 }
 
 struct RPushChannel;
@@ -225,7 +277,16 @@ struct RPushCtx
 struct RPushChannel
 {
   RPushChannel() { g_weak_ref_init(&appsrc_weak, nullptr); }
-  ~RPushChannel() { g_weak_ref_clear(&appsrc_weak); }
+  ~RPushChannel()
+  {
+    for (auto & s : bgrx_slots) {
+      if (s.data != nullptr) {
+        std::free(s.data);
+        s.data = nullptr;
+      }
+    }
+    g_weak_ref_clear(&appsrc_weak);
+  }
   RPushChannel(const RPushChannel &) = delete;
   RPushChannel & operator=(const RPushChannel &) = delete;
 
@@ -246,6 +307,8 @@ struct RPushChannel
   RtspCodec codec{RtspCodec::kH264};
   int bitrate_kbps{2000};
   std::uint64_t frame_index{0};
+  /// 首帧 wall-clock，用于实时 PTS（避免按 fps 虚拟时间戳把码流排进未来）
+  GstClockTime pts_base{GST_CLOCK_TIME_NONE};
   std::uint64_t pushed_total{0};
 
   std::atomic<bool> paused{false};
@@ -254,6 +317,16 @@ struct RPushChannel
   std::atomic<bool> logged_first_push{false};
   /// bus ERROR/EOS 或 appsrc push 失败时置位；重建管线成功后清零
   std::atomic<bool> push_broken{false};
+
+  /// Jetson 硬编：appsrc 喂 BGRx，跳过 videoconvert；池内 wrap 避免每帧 memcpy+invoke
+  bool jetson_nvmm_input{false};
+  struct BgrxSlot
+  {
+    std::uint8_t * data{nullptr};
+    std::size_t bytes{0};
+    std::atomic<int> busy{0};
+  };
+  BgrxSlot bgrx_slots[3]{};
 };
 
 struct HealthPack
@@ -331,6 +404,7 @@ gboolean stop_stream_push_idle_cb(gpointer user_data)
       g_weak_ref_clear(&ch->appsrc_weak);
       g_weak_ref_init(&ch->appsrc_weak, nullptr);
       ch->frame_index = 0;
+      ch->pts_base = GST_CLOCK_TIME_NONE;
     }
     ch->paused.store(true, std::memory_order_release);
     ch->push_broken.store(false, std::memory_order_release);
@@ -358,9 +432,10 @@ gboolean idle_rpush_buffer(gpointer user_data)
   }
   std::lock_guard<std::mutex> serial_lk(w->ch->stream_serial_mtx);
   GstElement * src_el = nullptr;
-  std::uint64_t fi = 0;
   int fps_num = 25;
   int fps_den = 1;
+  GstClockTime pts = 0;
+  GstClockTime dur = 0;
   {
     std::lock_guard<std::mutex> lk(w->ch->mu);
     gpointer p = g_weak_ref_get(&w->ch->appsrc_weak);
@@ -388,14 +463,19 @@ gboolean idle_rpush_buffer(gpointer user_data)
       gst_caps_unref(caps);
     }
 
-    fi = w->ch->frame_index;
-    fps_num = w->ch->fps_num;
-    fps_den = w->ch->fps_den;
+    fps_num = std::max(1, w->ch->fps_num);
+    fps_den = std::max(1, w->ch->fps_den);
+    const GstClockTime now = gst_util_get_timestamp();
+    if (w->ch->pts_base == GST_CLOCK_TIME_NONE) {
+      w->ch->pts_base = now;
+    }
+    pts = (now > w->ch->pts_base) ? (now - w->ch->pts_base) : 0;
+    dur = gst_util_uint64_scale(1, GST_SECOND * static_cast<guint64>(fps_den), static_cast<guint64>(fps_num));
   }
 
-  GST_BUFFER_PTS(w->buf) = gst_util_uint64_scale(fi, GST_SECOND * fps_den, fps_num);
-  GST_BUFFER_DURATION(w->buf) = gst_util_uint64_scale(1, GST_SECOND * fps_den, fps_num);
-  GST_BUFFER_DTS(w->buf) = GST_BUFFER_PTS(w->buf);
+  GST_BUFFER_PTS(w->buf) = pts;
+  GST_BUFFER_DURATION(w->buf) = dur;
+  GST_BUFFER_DTS(w->buf) = pts;
   GST_BUFFER_FLAG_SET(w->buf, GST_BUFFER_FLAG_LIVE);
   const GstFlowReturn flow = gst_app_src_push_buffer(GST_APP_SRC(src_el), w->buf);
   gst_object_unref(src_el);
@@ -467,6 +547,157 @@ gboolean rpush_bus_cb(GstBus *, GstMessage * msg, gpointer user_data)
   return TRUE;
 }
 
+void rpush_bgrx_clear(RPushChannel * ch)
+{
+  for (auto & s : ch->bgrx_slots) {
+    if (s.data != nullptr) {
+      std::free(s.data);
+      s.data = nullptr;
+    }
+    s.bytes = 0;
+    s.busy.store(0, std::memory_order_relaxed);
+  }
+}
+
+bool rpush_bgrx_ensure(RPushChannel * ch, int w, int h)
+{
+  const std::size_t need =
+    static_cast<std::size_t>(std::max(1, w)) * static_cast<std::size_t>(std::max(1, h)) * 4U;
+  if (ch->bgrx_slots[0].data != nullptr && ch->bgrx_slots[0].bytes == need) {
+    return true;
+  }
+  rpush_bgrx_clear(ch);
+  for (auto & s : ch->bgrx_slots) {
+    void * p = nullptr;
+    if (posix_memalign(&p, 4096, need) != 0 || p == nullptr) {
+      rpush_bgrx_clear(ch);
+      return false;
+    }
+    s.data = static_cast<std::uint8_t *>(p);
+    s.bytes = need;
+    s.busy.store(0, std::memory_order_relaxed);
+  }
+  return true;
+}
+
+void rpush_bgrx_wrap_notify(gpointer data)
+{
+  auto * busy = static_cast<std::atomic<int> *>(data);
+  busy->store(0, std::memory_order_release);
+}
+
+bool rpush_push_jetson_bgrx(RPushChannel * ch, const cv::Mat & bgr_in)
+{
+  cv::Mat img = bgr_in;
+  if (img.empty() || img.cols < 1 || img.rows < 1) return false;
+
+  std::unique_lock<std::mutex> serial_lk(ch->stream_serial_mtx, std::try_to_lock);
+  if (!serial_lk.owns_lock()) return false;
+
+  int locked_w = 0;
+  int locked_h = 0;
+  {
+    std::lock_guard<std::mutex> lk(ch->mu);
+    ch->pending_w = img.cols;
+    ch->pending_h = img.rows;
+    locked_w = ch->locked_w;
+    locked_h = ch->locked_h;
+  }
+  if (locked_w > 0 && locked_h > 0 && (img.cols != locked_w || img.rows != locked_h)) {
+    cv::Mat resized;
+    cv::resize(img, resized, cv::Size(locked_w, locked_h), 0, 0, cv::INTER_LINEAR);
+    img = std::move(resized);
+  }
+  const int fw = img.cols;
+  const int fh = img.rows;
+  if (!rpush_bgrx_ensure(ch, fw, fh)) return false;
+
+  RPushChannel::BgrxSlot * slot = nullptr;
+  for (auto & s : ch->bgrx_slots) {
+    int expected = 0;
+    if (s.busy.compare_exchange_strong(expected, 1, std::memory_order_acq_rel)) {
+      slot = &s;
+      break;
+    }
+  }
+  if (slot == nullptr) return false;
+
+  if (!img.isContinuous()) img = img.clone();
+  cv::Mat bgrx(fh, fw, CV_8UC4, slot->data);
+  cv::cvtColor(img, bgrx, cv::COLOR_BGR2BGRA);
+
+  GstBuffer * buf = gst_buffer_new_wrapped_full(
+    static_cast<GstMemoryFlags>(0), slot->data, slot->bytes, 0, slot->bytes, &slot->busy,
+    rpush_bgrx_wrap_notify);
+  if (buf == nullptr) {
+    slot->busy.store(0, std::memory_order_release);
+    return false;
+  }
+
+  gpointer p = nullptr;
+  int fps_num = 25;
+  int fps_den = 1;
+  GstClockTime pts = 0;
+  GstClockTime dur = 0;
+  {
+    std::lock_guard<std::mutex> lk(ch->mu);
+    p = g_weak_ref_get(&ch->appsrc_weak);
+    if (p == nullptr) {
+      gst_buffer_unref(buf);
+      return false;
+    }
+    if (ch->locked_w <= 0 || ch->locked_h <= 0) {
+      ch->locked_w = fw;
+      ch->locked_h = fh;
+      GstCaps * caps = gst_caps_new_simple(
+        "video/x-raw", "format", G_TYPE_STRING, "BGRx", "width", G_TYPE_INT, fw, "height",
+        G_TYPE_INT, fh, "framerate", GST_TYPE_FRACTION, ch->fps_num, ch->fps_den, nullptr);
+      gst_app_src_set_caps(GST_APP_SRC(p), caps);
+      gst_caps_unref(caps);
+    }
+    fps_num = std::max(1, ch->fps_num);
+    fps_den = std::max(1, ch->fps_den);
+    const GstClockTime now = gst_util_get_timestamp();
+    if (ch->pts_base == GST_CLOCK_TIME_NONE) {
+      ch->pts_base = now;
+    }
+    pts = (now > ch->pts_base) ? (now - ch->pts_base) : 0;
+    dur = gst_util_uint64_scale(
+      1, GST_SECOND * static_cast<guint64>(fps_den), static_cast<guint64>(fps_num));
+  }
+
+  GST_BUFFER_PTS(buf) = pts;
+  GST_BUFFER_DURATION(buf) = dur;
+  GST_BUFFER_DTS(buf) = pts;
+  GST_BUFFER_FLAG_SET(buf, GST_BUFFER_FLAG_LIVE);
+  const GstFlowReturn flow = gst_app_src_push_buffer(GST_APP_SRC(p), buf);
+  gst_object_unref(GST_ELEMENT(p));
+
+  if (flow >= GST_FLOW_OK) {
+    std::lock_guard<std::mutex> lk(ch->mu);
+    ++ch->pushed_total;
+    ++ch->frame_index;
+    if (!ch->logged_first_push.exchange(true, std::memory_order_relaxed)) {
+      std::fprintf(
+        stderr,
+        "[rtsp_remote_push][gst] mount=\"%s\" 首帧已进入管线（BGRx wrap→nvvidconv NVMM，无 videoconvert/memcpy/invoke）\n",
+        ch->mount_path.c_str());
+    }
+    return true;
+  }
+  if (flow != GST_FLOW_FLUSHING) {
+    ch->push_broken.store(true, std::memory_order_release);
+  }
+  const std::uint64_t n = ch->appsrc_push_fail_count.fetch_add(1, std::memory_order_relaxed) + 1;
+  if (n <= 8 || (n % 250 == 0)) {
+    std::fprintf(
+      stderr, "[rtsp_remote_push][gst] mount=\"%s\" appsrc push-buffer failed flow=%d (%s)\n",
+      ch->mount_path.c_str(), static_cast<int>(flow), gst_flow_get_name(flow));
+  }
+  gst_buffer_unref(buf);
+  return false;
+}
+
 void rpush_configure_appsrc(RPushChannel * ch, GstElement * pipeline)
 {
   GstElement * src = gst_bin_get_by_name(GST_BIN(pipeline), "ros_src");
@@ -480,11 +711,13 @@ void rpush_configure_appsrc(RPushChannel * ch, GstElement * pipeline)
     ch->locked_w = 0;
     ch->locked_h = 0;
   }
+  rpush_bgrx_clear(ch);
   gst_app_src_set_caps(GST_APP_SRC(src), nullptr);
   {
     std::lock_guard<std::mutex> lk(ch->mu);
     g_weak_ref_set(&ch->appsrc_weak, G_OBJECT(src));
     ch->frame_index = 0;
+    ch->pts_base = GST_CLOCK_TIME_NONE;
   }
   gst_object_unref(src);
 }
@@ -569,9 +802,10 @@ gboolean relocate_stream_idle_cb(gpointer user_data)
   }
 
   const int kbps = (ch->bitrate_kbps >= 200) ? ch->bitrate_kbps : 200;
+  const int fps = (ch->fps_num > 0) ? ch->fps_num : 25;
   std::string launch = (ch->codec == RtspCodec::kH265)
-                           ? build_h265_client_launch(resolve_h265_impl(cfg.h265_encoder), kbps)
-                           : build_h264_client_launch(resolve_h264_impl(cfg.h264_encoder), kbps);
+                           ? build_h265_client_launch(resolve_h265_impl(cfg.h265_encoder), kbps, fps)
+                           : build_h264_client_launch(resolve_h264_impl(cfg.h264_encoder), kbps, fps);
 
   GError * perr = nullptr;
   ch->pipeline = gst_parse_launch(launch.c_str(), &perr);
@@ -724,11 +958,15 @@ public:
         ch->fps_den = 1;
         ch->codec = s.codec;
         ch->bitrate_kbps = (s.bitrate_kbps >= 200) ? s.bitrate_kbps : 200;
+        ch->jetson_nvmm_input = (s.codec == RtspCodec::kH265)
+                                  ? (resolve_h265_impl(cfg_.h265_encoder) == H265Impl::kNvV4L2)
+                                  : (resolve_h264_impl(cfg_.h264_encoder) == H264Impl::kNvV4L2);
 
         const int kbps = ch->bitrate_kbps;
+        const int fps = ch->fps_num;
         std::string launch = (s.codec == RtspCodec::kH265)
-                               ? build_h265_client_launch(resolve_h265_impl(cfg_.h265_encoder), kbps)
-                               : build_h264_client_launch(resolve_h264_impl(cfg_.h264_encoder), kbps);
+                               ? build_h265_client_launch(resolve_h265_impl(cfg_.h265_encoder), kbps, fps)
+                               : build_h264_client_launch(resolve_h264_impl(cfg_.h264_encoder), kbps, fps);
 
         GError * perr = nullptr;
         ch->pipeline = gst_parse_launch(launch.c_str(), &perr);
@@ -817,8 +1055,9 @@ public:
     std::fprintf(stderr, "[rtsp_remote_push][gst] 已向远端 ingest 推流，路数=%zu\n", channels_.size());
     for (std::size_t i = 0; i < channels_.size(); ++i) {
       std::fprintf(
-        stderr, "[rtsp_remote_push][gst]  #%zu mount=\"%s\" -> %s\n", i,
-        channels_[i]->mount_path.c_str(), channels_[i]->remote_url.c_str());
+        stderr, "[rtsp_remote_push][gst]  #%zu mount=\"%s\" -> %s%s\n", i,
+        channels_[i]->mount_path.c_str(), channels_[i]->remote_url.c_str(),
+        channels_[i]->jetson_nvmm_input ? " (BGRx wrap→nvvidconv NVMM)" : "");
     }
   }
 
@@ -864,11 +1103,15 @@ public:
     ch->fps_den = 1;
     ch->codec = s.codec;
     ch->bitrate_kbps = (s.bitrate_kbps >= 200) ? s.bitrate_kbps : 200;
+    ch->jetson_nvmm_input = (s.codec == RtspCodec::kH265)
+                              ? (resolve_h265_impl(cfg_.h265_encoder) == H265Impl::kNvV4L2)
+                              : (resolve_h264_impl(cfg_.h264_encoder) == H264Impl::kNvV4L2);
 
     const int kbps = ch->bitrate_kbps;
+    const int fps = ch->fps_num;
     std::string launch = (s.codec == RtspCodec::kH265)
-                           ? build_h265_client_launch(resolve_h265_impl(cfg_.h265_encoder), kbps)
-                           : build_h264_client_launch(resolve_h264_impl(cfg_.h264_encoder), kbps);
+                           ? build_h265_client_launch(resolve_h265_impl(cfg_.h265_encoder), kbps, fps)
+                           : build_h264_client_launch(resolve_h264_impl(cfg_.h264_encoder), kbps, fps);
 
     GError * perr = nullptr;
     ch->pipeline = gst_parse_launch(launch.c_str(), &perr);
@@ -963,8 +1206,8 @@ public:
     ch_raw->push_broken.store(false, std::memory_order_release);
 
     std::fprintf(
-      stderr, "[rtsp_remote_push][gst] append_stream mount=\"%s\" -> %s\n", ch_raw->mount_path.c_str(),
-      ch_raw->remote_url.c_str());
+      stderr, "[rtsp_remote_push][gst] append_stream mount=\"%s\" -> %s%s\n", ch_raw->mount_path.c_str(),
+      ch_raw->remote_url.c_str(), ch_raw->jetson_nvmm_input ? " (BGRx wrap→nvvidconv NVMM)" : "");
     return true;
   }
 
@@ -978,6 +1221,9 @@ public:
     if (global_paused_.load(std::memory_order_acquire) || ch->paused.load()) {
       ++ch->paused_drop_counter;
       return false;
+    }
+    if (ch->jetson_nvmm_input) {
+      return rpush_push_jetson_bgrx(ch.get(), bgr_in);
     }
     cv::Mat img = bgr_in;
     if (!img.isContinuous()) img = img.clone();
@@ -1206,8 +1452,9 @@ bool spawn_gstreamer_rtsp_url_relay(
     return false;
   }
   const std::string depay = use_h265 ? "rtph265depay" : "rtph264depay";
-  const std::string pay = use_h265 ? "rtph265pay" : "rtph264pay";
-  // RTP 解包再打包后送 rtspclientsink；parse+sink 易导致部分 ingest 服务端断连。
+  const std::string parse = use_h265 ? "h265parse" : "h264parse";
+  // GS 1.20：rtspclientsink 为 request pad，不能与 rtph26xpay 由 gst-launch 静态链接；
+  // 用 depay+parse 送 ES 给 clientsink（由其内部打包 RECORD）。
   std::vector<std::string> store = {
     "gst-launch-1.0",
     "-e",
@@ -1218,7 +1465,7 @@ bool spawn_gstreamer_rtsp_url_relay(
     "!",
     depay,
     "!",
-    pay,
+    parse,
     "!",
     "rtspclientsink",
     "location=" + push_url,
@@ -1231,14 +1478,11 @@ bool spawn_gstreamer_rtsp_url_relay(
   }
   argv.push_back(nullptr);
   pid_t pid = -1;
-  const int rc = ::posix_spawnp(&pid, "gst-launch-1.0", nullptr, nullptr, argv.data(), environ);
-  if (rc != 0) {
-    if (err_msg != nullptr) {
-      *err_msg = std::string("posix_spawnp(gst-launch-1.0) 失败 errno=") + std::to_string(rc);
-    }
+  if (!spawn_child_pdeathsig("gst-launch-1.0", argv.data(), &pid, err_msg)) {
     return false;
   }
-  std::this_thread::sleep_for(std::chrono::milliseconds(400));
+  // 等管线建链/连远端；过短会把立刻失败的 gst-launch 误判为成功（僵尸仍占 pid）
+  std::this_thread::sleep_for(std::chrono::milliseconds(1200));
   if (::kill(pid, 0) != 0) {
     int status = 0;
     (void)::waitpid(pid, &status, WNOHANG);
@@ -1247,7 +1491,134 @@ bool spawn_gstreamer_rtsp_url_relay(
     }
     return false;
   }
+  // 僵尸：已死但未 wait，仍可能 kill==0；再试 waitpid
+  {
+    int status = 0;
+    const pid_t w = ::waitpid(pid, &status, WNOHANG);
+    if (w == pid) {
+      if (err_msg != nullptr) {
+        *err_msg = "gst-launch 子进程已退出（pipeline/连接失败，请检查 pull/push URL 与 H264/H265 是否匹配）";
+      }
+      return false;
+    }
+  }
   *out_pid = static_cast<int>(pid);
+  return true;
+#endif
+}
+
+bool jetson_nvmm_h265_to_h264_available()
+{
+  static std::once_flag once;
+  std::call_once(once, []() { gst_init(nullptr, nullptr); });
+  return gst_has_factory("nvv4l2decoder") && gst_has_factory("nvvidconv") &&
+         gst_has_factory("nvv4l2h264enc") && gst_has_factory("rtspclientsink") &&
+         gst_has_factory("rtph265depay") && gst_has_factory("h265parse") &&
+         gst_has_factory("h264parse");
+}
+
+bool spawn_gstreamer_jetson_h265_to_h264_relay(
+  const std::string & pull_url, const std::string & push_url, int bitrate_kbps, int fps,
+  int * out_pid, std::string * err_msg)
+{
+  if (out_pid == nullptr) return false;
+  *out_pid = -1;
+#if !defined(__linux__)
+  if (err_msg != nullptr) *err_msg = "spawn_gstreamer_jetson_h265_to_h264_relay 仅 Linux";
+  return false;
+#else
+  if (!jetson_nvmm_h265_to_h264_available()) {
+    if (err_msg != nullptr) {
+      *err_msg =
+        "Jetson NVMM 转码插件不齐（需 nvv4l2decoder+nvvidconv+nvv4l2h264enc+rtspclientsink；"
+        "请安装 nvidia-l4t-gstreamer 并配置 NVIDIA apt 源）";
+    }
+    return false;
+  }
+  if (pull_url.empty() || push_url.empty()) {
+    if (err_msg != nullptr) *err_msg = "pull_url/push_url 不能为空";
+    return false;
+  }
+
+  int kbps = bitrate_kbps;
+  if (kbps < 200) kbps = 200;
+  int gop = fps > 0 ? fps : 25;
+  if (gop < 5) gop = 5;
+  if (gop > 60) gop = 60;
+  const std::string bitrate_bps = std::to_string(kbps * 1000);
+  const std::string iframe = std::to_string(gop);
+
+  // 低延迟 NVMM：不解 CPU BGR；queue leaky 丢旧帧；rtspsrc latency=0
+  std::vector<std::string> store = {
+    "gst-launch-1.0",
+    "-e",
+    "rtspsrc",
+    "location=" + pull_url,
+    "latency=0",
+    "protocols=tcp",
+    "!",
+    "rtph265depay",
+    "!",
+    "h265parse",
+    "!",
+    "nvv4l2decoder",
+    "!",
+    "queue",
+    "max-size-buffers=1",
+    "max-size-time=0",
+    "max-size-bytes=0",
+    "leaky=downstream",
+    "!",
+    "nvvidconv",
+    "!",
+    "video/x-raw(memory:NVMM),format=NV12",
+    "!",
+    "nvv4l2h264enc",
+    "bitrate=" + bitrate_bps,
+    "iframeinterval=" + iframe,
+    "insert-sps-pps=true",
+    "!",
+    "queue",
+    "max-size-buffers=2",
+    "max-size-time=0",
+    "max-size-bytes=0",
+    "!",
+    "h264parse",
+    "config-interval=-1",
+    "!",
+    "rtspclientsink",
+    "location=" + push_url,
+    "protocols=tcp",
+  };
+
+  std::vector<char *> argv;
+  argv.reserve(store.size() + 1);
+  for (auto & s : store) {
+    argv.push_back(s.data());
+  }
+  argv.push_back(nullptr);
+
+  pid_t pid = -1;
+  if (!spawn_child_pdeathsig("gst-launch-1.0", argv.data(), &pid, err_msg)) {
+    return false;
+  }
+  std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+  if (::kill(pid, 0) != 0) {
+    int status = 0;
+    (void)::waitpid(pid, &status, WNOHANG);
+    if (err_msg != nullptr) {
+      *err_msg =
+        "gst-launch NVMM H265→H264 子进程已退出（检查相机 H.265、远端 ingest、以及 "
+        "gst-inspect-1.0 nvv4l2h264enc）";
+    }
+    return false;
+  }
+  *out_pid = static_cast<int>(pid);
+  std::fprintf(
+    stderr,
+    "[rtsp_nvmm] H265→H264 relay started pid=%d bitrate_kbps=%d iframeinterval=%d\n"
+    "  pull=%s\n  push=%s\n",
+    *out_pid, kbps, gop, pull_url.c_str(), push_url.c_str());
   return true;
 #endif
 }

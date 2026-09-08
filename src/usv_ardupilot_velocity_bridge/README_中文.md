@@ -281,7 +281,9 @@ ros2 launch usv_ardupilot_velocity_bridge ardupilot_velocity_bridge.launch.py
 
 ```text
 state_topic
-input_cmd_topic
+input_cmd_topic          # 旧版单话题参数，保留兼容
+input_cmd_topics         # 输入话题列表（launch 用逗号分隔字符串传入）
+input_cmd_qos            # 输入订阅 QoS：reliable / best_effort（默认 best_effort）
 output_cmd_topic
 
 publish_rate_hz
@@ -301,6 +303,18 @@ max_negative_yaw_rate
 max_linear_accel
 max_linear_decel
 max_angular_accel
+```
+
+### 输入话题与 QoS
+
+`input_cmd_topics` 支持配置多个输入话题，每个话题各建一个订阅，共同写入同一份当前指令状态（后到者覆盖先到者），任一来源停发后由超时保护统一归零。
+
+`input_cmd_qos` 默认 `best_effort`。按 DDS 兼容规则（订阅要求 ≤ 发布提供），**best_effort 订阅可以同时匹配 reliable 和 best_effort 两种发布者**，因此不同节点以不同 QoS 发布速度指令都能被接收；若上游要求可靠传输，可改回 `reliable`（此时只匹配 reliable 发布者）。
+
+```bash
+ros2 run usv_ardupilot_velocity_bridge ardupilot_velocity_bridge --ros-args \
+  -p "input_cmd_topics:=[\"/cmd_vel_nav\",\"/cmd_vel_auto\"]" \
+  -p input_cmd_qos:=best_effort
 ```
 
 实际参数名称以当前 `ardupilot_velocity_bridge.cpp` 和 `ardupilot_velocity_bridge.launch.py` 为准。

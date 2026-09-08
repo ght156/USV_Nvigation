@@ -9,6 +9,7 @@ string execution_id
 string[] enabled_target_types
 string[] colors
 string roi              # 可选,区域字符串编码(空=全图)
+bool overlay_enabled    # 当前推流画面是否编码检测框
 ---
 int32 result
 string msg

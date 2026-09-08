@@ -43,6 +43,16 @@ ACTION 直接发给 BT Navigator，不会发布 /goal_pose 话题，因此无法
   这样把脚本+该 json 一起拷到 NX/别台机器，上次的点位仍然可用。
   手工命令：save | load | savepath PATH
 
+带朝向的点位来源（避免“点没有航向、靠 auto_yaw 猜”）：
+  1) ros_map_tool 航点规划器导出 YAML（waypoint_i: [x, y, yaw(弧度)]），
+     用命令 importyaml PATH 或启动参数 -p waypoint_yaml:=PATH 导入；
+  2) RViz 工具栏「2D Goal Pose」点击+拖拽本身带朝向。注意：默认话题 /goal_pose
+     会被 bt_navigator 直接执行（船会立刻自己开过去）。建议在 RViz 工具属性里把
+     Goal Topic 改为 /rviz_patrol/goal_pose，并以 -p goal_topic:=/rviz_patrol/goal_pose
+     启动本节点，这样只记录不触发导航。
+  注：auto_yaw 只对无朝向来源（Publish Point 的 /clicked_point）生效，
+     不会覆盖 2D Goal Pose / YAML 导入点自带的朝向。
+
 坐标说明：RViz 里 2D Goal Pose 发的 /goal_pose 已经是 map 坐标系（frame_id: map），
 因此本节点直接把这些 PoseStamped 交给 Nav2，无需再做经纬度转换。
 
@@ -208,6 +218,9 @@ class RvizPatrolRecorder(Node):
         self.declare_parameter("loop_count", 0)  # 0 = 无限循环
         self.declare_parameter("publish_markers", True)
         self.declare_parameter("waypoints_file", DEFAULT_WAYPOINTS_FILE)
+        self.declare_parameter(
+            "waypoint_yaml", ""
+        )  # 启动时额外导入 ros_map_tool 导出的航点 YAML（waypoint_i: [x, y, yaw]），非空则覆盖已有点位
         self.declare_parameter("autosave", True)  # 记录/编辑后自动保存到文件
         self.declare_parameter("autoload", True)  # 启动时自动加载已保存点位
         self.declare_parameter("arrival_tolerance", 1.5)  # single 模式到达判定 (m)
@@ -251,6 +264,9 @@ class RvizPatrolRecorder(Node):
             self.get_parameter("waypoints_file").get_parameter_value().string_value
         ).strip()
         self._waypoints_file = wf or DEFAULT_WAYPOINTS_FILE
+        self._waypoint_yaml = (
+            self.get_parameter("waypoint_yaml").get_parameter_value().string_value
+        ).strip()
         self._autosave = bool(self.get_parameter("autosave").value)
         self._autoload = bool(self.get_parameter("autoload").value)
         self._arrival_tolerance = float(self.get_parameter("arrival_tolerance").value)
@@ -340,6 +356,10 @@ class RvizPatrolRecorder(Node):
         if self._autoload:
             self._load_points()
 
+        # 启动时若指定了地图工具导出的航点 YAML，导入并覆盖当前点位
+        if self._waypoint_yaml:
+            self._import_waypoint_yaml(self._waypoint_yaml)
+
         # ---- 启动信息 --------------------------------------------------------
         mode_desc = (
             "batch：整串丢给 follow_waypoints，循环由客户端重新下发"
@@ -364,7 +384,7 @@ class RvizPatrolRecorder(Node):
             f"  卡滞/重发      : 卡滞判定 {self._stall_timeout:.0f}s，失败/卡住自动重发 {self._max_retries} 次"
         )
         self.get_logger().info(
-            f"  自动朝向       : {'开（上一点→本点方向；首点用船位指向）' if self._auto_yaw else '关（保持下发 yaw）'}"
+            f"  自动朝向       : {'开（仅对无朝向来源生效：Publish Point 用上一→本点方向，首点用船位指向；2D Goal Pose/YAML 自带朝向不覆盖）' if self._auto_yaw else '关（保持下发 yaw）'}"
         )
         self.get_logger().info(
             f"  持久化文件     : {self._waypoints_file}"
@@ -413,7 +433,15 @@ class RvizPatrolRecorder(Node):
             _yellow(
                 "  save            立即保存点位到文件\n"
                 "  load            从文件重新加载点位\n"
-                "  savepath PATH   改用新的持久化文件路径并保存"
+                "  savepath PATH   改用新的持久化文件路径并保存\n"
+                "  importyaml PATH 导入 ros_map_tool 导出的航点 YAML（waypoint_i: [x, y, yaw]，替换当前点位）"
+            )
+        )
+        self.get_logger().info(
+            _yellow(
+                "带朝向打点：RViz 工具属性里把 2D Goal Pose 的话题改为 /rviz_patrol/goal_pose，\n"
+                "  并以 -p goal_topic:=/rviz_patrol/goal_pose 启动本节点，即可点击+拖拽记录朝向，\n"
+                "  且不触发 bt_navigator 立即导航（/goal_pose 默认会被 Nav2 直接执行）。"
             )
         )
 
@@ -484,6 +512,8 @@ class RvizPatrolRecorder(Node):
             self._save_points(force=True)
         elif c in ("load", "reload"):
             self._load_points()
+        elif c.startswith(("importyaml ", "loadyaml ", "imp ")) and len(parts) >= 2:
+            self._import_waypoint_yaml(cmd.split(" ", 1)[1])
         elif c.startswith(("savepath ", "savefile ")) and len(parts) >= 2:
             self._cmd_save_path(cmd.split(" ", 1)[1])
         elif c in ("help", "h", "?"):
@@ -654,6 +684,7 @@ class RvizPatrolRecorder(Node):
             float(msg.pose.orientation.z),
             float(msg.pose.orientation.w),
             frame,
+            has_heading=True,  # 2D Goal Pose 拖拽给出真实朝向，不被 auto_yaw 覆盖
         )
 
     def _cb_simple_goal(self, msg: PoseStamped) -> None:
@@ -676,6 +707,7 @@ class RvizPatrolRecorder(Node):
             float(msg.pose.orientation.z),
             float(msg.pose.orientation.w),
             frame,
+            has_heading=True,  # 备用通道同样带朝向
         )
 
     def _cb_clicked_point(self, msg) -> None:
@@ -694,15 +726,20 @@ class RvizPatrolRecorder(Node):
             0.0,
             1.0,
             frame,
+            has_heading=False,  # Publish Point 不带朝向，允许 auto_yaw 推算
         )
 
     def _add_pose_point(
-        self, x, y, z, qx, qy, qz, qw, frame
+        self, x, y, z, qx, qy, qz, qw, frame, has_heading: bool = False
     ) -> None:
-        """去重 + （可选）自动朝向 + 追加记录 + 打印 + 刷新 marker。返回是否记录成功。"""
+        """去重 + （可选）自动朝向 + 追加记录 + 打印 + 刷新 marker。返回是否记录成功。
+
+        has_heading=True 表示来源本身携带朝向（/goal_pose、/move_base_simple/goal），
+        即使 auto_yaw 开启也尊重原始朝向，不再用行进方向覆盖。
+        """
         p = RecordedPoint(x, y, z, qx, qy, qz, qw, frame)
         auto_note = ""
-        if self._auto_yaw:
+        if self._auto_yaw and not has_heading:
             # 参考点：上一个点；若无，用船当前位置指向本点
             ref = None
             with self._lock:
@@ -835,6 +872,53 @@ class RvizPatrolRecorder(Node):
         )
         self._publish_route_markers()
         self._print_points()
+        return True
+
+    def _import_waypoint_yaml(self, path_str: str) -> bool:
+        """导入 ros_map_tool 导出的航点 YAML（waypoint_i: [x, y, yaw(弧度)]），替换当前点位。
+
+        导入的航点自带真实朝向，直接下发；auto_yaw 只影响之后新点击记录的点。
+        """
+        import re
+
+        path = Path(path_str.strip()).expanduser()
+        try:
+            text = path.read_text(encoding="utf-8")
+        except Exception as e:  # noqa: BLE001
+            self.get_logger().warning(_yellow(f"读取航点 YAML 失败：{path}（{e}）"))
+            return False
+        matches = re.findall(
+            r"^\s*waypoint_(\d+)\s*:\s*\[\s*([-+\d.eE]+)\s*,"
+            r"\s*([-+\d.eE]+)\s*,\s*([-+\d.eE]+)\s*\]",
+            text,
+            flags=re.MULTILINE,
+        )
+        if not matches:
+            self.get_logger().warning(
+                _yellow(f"{path} 里没有 waypoint_i: [x, y, yaw] 条目。")
+            )
+            return False
+        loaded: List[RecordedPoint] = []
+        for _idx, xs, ys, yaws in sorted(matches, key=lambda m: int(m[0])):
+            try:
+                x, y, yaw = float(xs), float(ys), float(yaws)
+            except ValueError:
+                continue
+            qx, qy, qz, qw = self._q_from_yaw(yaw)
+            loaded.append(
+                RecordedPoint(x, y, 0.0, qx, qy, qz, qw, self._expected_frame)
+            )
+        if not loaded:
+            self.get_logger().warning(_yellow("航点 YAML 解析结果为空。"))
+            return False
+        with self._lock:
+            self._points = loaded
+        self.get_logger().info(
+            _green(f"已从 {path} 导入 {len(loaded)} 个带朝向航点（yaw 弧度）。")
+        )
+        self._publish_route_markers()
+        self._print_points()
+        self._save_points()
         return True
 
     def _cmd_save_path(self, new_path: str) -> None:

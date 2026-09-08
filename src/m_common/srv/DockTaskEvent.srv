@@ -1,0 +1,31 @@
+# 归港 → 上层（嵌软状态机）：上报关键事件并等待 ACK
+#
+# 服务名：/dock_task/event
+# 方向：船端 dock_mission(client) → 嵌软状态机(server, 回 ACK)
+# 替代原 fire-and-forget /dock_task/event topic —— 上层必须确认收到。
+#
+# 事件名（event）取值见 docs/归港任务对接文档.md §3.2：
+#   DOCK_TASK_ACCEPTED / UNDOCK_TASK_ACCEPTED / DOCK_STAGING_STARTED /
+#   DOCK_HANDOFF / UNDOCK_HANDOFF / DOCK_SUCCEEDED / UNDOCK_SUCCEEDED /
+#   DOCK_FAILED / DOCK_CANCELLED / MANUAL_TAKEOVER_REQUESTED
+#
+# detail：UTF-8 JSON 对象字符串；无 detail 时为空字符串（等价 "{}"）。
+#   DOCK_TASK_ACCEPTED:        {"mode":"...", "require_camera":true}
+#   DOCK_SUCCEEDED:            {"elapsed_sec":142.5, "mode":"..."}
+#   DOCK_FAILED:               {"reason":"...", "retry_count":3,
+#                               "needs_manual_takeover":true, "needs_reapproach":true}
+#   MANUAL_TAKEOVER_REQUESTED: {"reason":"...", "retry_count":3}
+#
+# 幂等/去重建议：上层可缓存 ack_id 并回显；船端以 event+command_id+stamp_sec
+# 唯一标识一次上报，超时未收到 ACK 时告警重试（不阻塞本侧 FSM）。
+
+string event        # 事件名（必填）
+string mission_id   # 任务标识（可空）
+string command_id   # 指令标识（可空）
+string detail       # UTF-8 JSON 对象字符串；无 detail 为空
+float64 stamp_sec   # 船端事件时间戳（epoch 秒；0=未提供）
+---
+bool success        # true=上层已受理（ACK）；false=上层拒绝/未识别
+string message      # 结果说明 / 失败原因
+string ack_id       # 上层回执唯一 id（幂等/去重；可空）
+float64 ack_stamp_sec  # 上层确认时间戳（epoch 秒；0=未提供）

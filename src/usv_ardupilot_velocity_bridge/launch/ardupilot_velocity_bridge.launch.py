@@ -5,6 +5,12 @@
 Nav2 /cmd_vel_nav (Twist) -> ardupilot_velocity_bridge ->
 /mavros/setpoint_velocity/cmd_vel_unstamped (Twist).
 
+Input: one subscription per topic in input_cmd_topics (comma-separated list).
+input_cmd_qos selects the subscription reliability:
+  - best_effort (default): matches BOTH reliable and best_effort publishers,
+    so any cmd_vel source works without touching the bridge.
+  - reliable: strict, matches reliable publishers only.
+
 The bridge now performs:
   1) command timeout protection,
   2) absolute velocity/yaw-rate limits,
@@ -32,6 +38,9 @@ def _setup(context, *_args, **_kwargs):
     def pf(name: str) -> float:
         return float(ps(name))
 
+    def psl(name: str) -> list:
+        return [t.strip() for t in ps(name).split(",") if t.strip()]
+
     return [
         Node(
             package="usv_ardupilot_velocity_bridge",
@@ -41,6 +50,8 @@ def _setup(context, *_args, **_kwargs):
             parameters=[{
                 "state_topic": ps("state_topic"),
                 "input_cmd_topic": ps("input_cmd_topic"),
+                "input_cmd_topics": psl("input_cmd_topics"),
+                "input_cmd_qos": ps("input_cmd_qos"),
                 "output_cmd_topic": ps("output_cmd_topic"),
                 "publish_rate_hz": pf("publish_rate_hz"),
                 "command_timeout_sec": pf("command_timeout_sec"),
@@ -64,6 +75,12 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument("state_topic", default_value="/mavros/state"),
         DeclareLaunchArgument("input_cmd_topic", default_value="/cmd_vel_nav"),
+        DeclareLaunchArgument(
+            "input_cmd_topics", default_value="/cmd_vel_nav",
+            description="Comma-separated list of input cmd_vel topics"),
+        DeclareLaunchArgument(
+            "input_cmd_qos", default_value="best_effort",
+            description="reliable or best_effort; best_effort matches both"),
         DeclareLaunchArgument(
             "output_cmd_topic",
             default_value="/mavros/setpoint_velocity/cmd_vel_unstamped",

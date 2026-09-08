@@ -1,9 +1,13 @@
 # §4.2.4 mission_pause / mission_resume / mission_cancel
 # action: "pause" / "resume" / "cancel"
+# user_id: 任务归属者,decision 校验与当前任务一致才受理
 string user_id
 string action
 string execution_id
 string bid
+# mission_resume 可选；仅 mission_type=1 有效。true 时从给定航点重新下发剩余航线。
+bool has_start_seq
+int32 start_seq
 ---
 int32 result
 string msg

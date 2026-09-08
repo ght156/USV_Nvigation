@@ -15,10 +15,13 @@ set(_m_common_lib_dir     "${_m_common_prefix}/lib")
 # spdlog is a runtime/link dependency of mlogger.
 find_package(spdlog QUIET)
 
-# ---------- m_common::mlogger (header-only) ----------
+# ---------- m_common::mlogger (header + libmlogger.so) ----------
+# 单例真身（Logger::Instance）在 libmlogger.so：跨 .so 唯一靠动态库符号解析，
+# 下游必须链接本 target（经 ament_target_dependencies(m_common) 也会自动带入）。
 if(NOT TARGET m_common::mlogger)
-  add_library(m_common::mlogger INTERFACE IMPORTED)
+  add_library(m_common::mlogger SHARED IMPORTED)
   set_target_properties(m_common::mlogger PROPERTIES
+    IMPORTED_LOCATION "${_m_common_lib_dir}/libmlogger.so"
     INTERFACE_INCLUDE_DIRECTORIES "${_m_common_include_dir}"
     INTERFACE_COMPILE_FEATURES "cxx_std_17"
   )

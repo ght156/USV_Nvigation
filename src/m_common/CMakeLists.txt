@@ -16,9 +16,10 @@ endif()
 find_package(ament_cmake REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 find_package(builtin_interfaces REQUIRED)
-find_package(geometry_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
+find_package(action_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(geometry_msgs REQUIRED)
 
 # -----------------------------------------------------------------------------
 # 子库聚合容器
@@ -34,26 +35,78 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/StampedStatus.msg"
   "msg/KeyValue.msg"
   "msg/VideoWarningCode.msg"
+  "msg/WaypointAction.msg"
+  "msg/Waypoint.msg"
+  "msg/MissionWaypoint.msg"
+  "msg/MissionState.msg"
+  "msg/SensorFault.msg"
+  "msg/SensorHealth.msg"
+  "msg/SpecialEvent.msg"
+  "msg/TeachingResult.msg"
+  "msg/TeachingState.msg"
+  "msg/ManualControl.msg"
+  "msg/BoatState.msg"
+  "msg/MissionAck.msg"
+  "msg/NavState.msg"
+  "msg/NavEvent.msg"
   "msg/NavStatus.msg"
   "msg/NavTaskEvent.msg"
-  "msg/MissionWaypoint.msg"
-  "msg/GeoPolygon.msg"
-  "msg/NavZones.msg"
+  "msg/DetectionEvent.msg"
+  "msg/AprilTagInfo.msg"
+  "msg/DetectionObj.msg"
+  "msg/DetectionObjList.msg"
   "msg/GeoPoint.msg"
+  "msg/GeoPolygon.msg"
   "msg/GeoFence.msg"
+  "msg/NavZones.msg"
   "msg/NavSafetyEvent.msg"
+  "msg/UsvParamState.msg"
+  "msg/DockBerth.msg"
+
   "srv/RTSPStreamSwitch.srv"
   "srv/ReportVideoWarning.srv"
-  "srv/SendWaypoints.srv"
-  "srv/SetPause.srv"
-  "srv/EmergencyStop.srv"
-  "srv/CancelMission.srv"
-  "srv/SetNavZones.srv"
+  "srv/ReportGuidedSwitchStatus.srv"
+  "srv/ReportRCStatus.srv"
+  "srv/GetGeoFence.srv"
   "srv/GetNavZones.srv"
   "srv/SetGeoFence.srv"
-  "srv/GetGeoFence.srv"
+  "srv/SetNavZones.srv"
+  "srv/ArmState.srv"
+  "srv/GotoPoint.srv"
+  "srv/SetHome.srv"
+  "srv/MissionParamSet.srv"
+  "srv/MissionUpload.srv"
+  "srv/MissionControl.srv"
+  "srv/TeachingControl.srv"
+  "srv/BoatArm.srv"
+  "srv/BoatSetMode.srv"
+  "srv/BoatGotoWaypoint.srv"
+  "srv/BoatHover.srv"
+  "srv/BoatUploadMission.srv"
+  "srv/BoatMissionControl.srv"
+  "srv/BoatWaterSample.srv"
+  "srv/BoatSetHome.srv"
+  "srv/ResetFault.srv"
+  "srv/NavGotoPoint.srv"
+  "srv/NavReturnHome.srv"
+  "srv/NavReturnDock.srv"
+  "srv/NavMissionUpload.srv"
+  "srv/NavMissionExecute.srv"
+  "srv/NavMissionControl.srv"
+  "srv/NavHold.srv"
+  "srv/NavEmergencyStop.srv"
+  "srv/SendWaypoints.srv"
+  "srv/CancelMission.srv"
+  "srv/EmergencyStop.srv"
+  "srv/SetPause.srv"
+  "srv/PerceptionControl.srv"
+  "srv/PayloadControl.srv"
+  "srv/DockTaskEvent.srv"
+
+  "action/ExecuteMission.action"
   "action/NavigateTask.action"
-  DEPENDENCIES builtin_interfaces geometry_msgs sensor_msgs std_msgs
+
+  DEPENDENCIES builtin_interfaces sensor_msgs action_msgs std_msgs geometry_msgs
 )
 ament_export_dependencies(rosidl_default_runtime)
 
@@ -65,9 +118,11 @@ install(DIRECTORY include/
   DESTINATION include
 )
 
-install(DIRECTORY urdf/
-  DESTINATION share/${PROJECT_NAME}/urdf
-)
+# 工作空间级共享机器人描述（URDF/xacro）：安装到 share/m_common/urdf，
+# 下游用 get_package_share_directory('m_common')/urdf/usv.xacro 引用。
+# install(DIRECTORY urdf/
+#   DESTINATION share/${PROJECT_NAME}/urdf
+# )
 
 # 新增子库时只需在此追加一行 add_subdirectory(<name>)，
 # 顶层 CMakeLists 无需关心其源码细节。

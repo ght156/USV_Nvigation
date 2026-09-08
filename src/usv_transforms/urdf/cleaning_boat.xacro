@@ -1,0 +1,127 @@
+<?xml version="1.0"?>
+<!--
+  USV 整车模型（usv_transforms）。
+
+  供 robot_state_publisher 发布静态 TF：base_link → 各传感器（单根树）。
+  odom→camera_init / odom→base_link / map→odom 由 mapping_bridge 发布，勿写入本 URDF。
+
+  相机命名与驱动前缀一致：
+    - Astra dabai DCW：camera_front_astra_*（驱动发布 color/depth/optical；URDF 只挂 *_link）
+    - UVC video_camera：camera_back_video_*（URDF 提供 link→optical；图像 header 用 optical）
+
+  真机外参请用下方 xacro:arg 覆盖；默认 xyz 合并自 m_common/urdf/usv_cf.xacro 实船标定值
+  （源自 USV_NAV/workspace_ros/config/static_transform_real_boat.yaml），勿在各包散落维护。
+  Mid360 倒装时 base→livox 的 roll=π 会经 slam_nav_bridge 从 TF 复制到 odom→camera_init。
+
+  Mid360 当前为倒装（绕车体 X 轴 roll=π）：外壳朝下，光学/点云系仍随 livox_frame。
+  内置 IMU 相对雷达的杆臂不变（挂在 livox_frame 下）。
+-->
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="usv">
+
+  <!-- ======================= 可覆盖参数（外参，单位 m / rad） ======================= -->
+  <!-- base_link → livox_frame：倒装 180°（roll=π，用 xacro 内置 pi）；正装改为 0 0 0 -->
+  <xacro:arg name="livox_xyz" default="1.60 0.0 0.36"/>
+  <xacro:arg name="livox_rpy" default="${pi} 0.0 0.0"/>
+  <!-- livox_frame → imu_link（Mid360 内置 IMU，与 fasterlio extrinsic_T 互为相反平移）：
+       yaml: lidar_in_imu T=[-0.011, -0.02329, 0.04412], R=I
+       → IMU 在雷达系 = -T -->
+  <xacro:arg name="imu_xyz" default="0.011 0.02329 -0.04412"/>
+  <xacro:arg name="imu_rpy" default="0.0 0.0 0.0"/>
+  <xacro:arg name="gps_xyz" default="-0.03 -0.1 0.01"/>
+  <xacro:arg name="gps_rpy" default="0.0 0.0 0.0"/>
+  <!-- base_link → camera_front_astra_link（前向 Astra，对应 usv_cf 的 camera_link） -->
+  <xacro:arg name="camera_front_astra_xyz" default="1.72 0.0 0.1"/>
+  <xacro:arg name="camera_front_astra_rpy" default="0.0 0.0 0.0"/>
+  <!-- base_link → camera_back_video_link（后向 UVC，供 apriltag，对应 usv_cf 的 camera_rear_link；绕 Z 转 180° 朝后） -->
+  <xacro:arg name="camera_back_video_xyz" default="1.60 0.06 0.42"/>
+  <xacro:arg name="camera_back_video_rpy" default="0.0 0.0 ${pi}"/>
+
+  <xacro:arg name="camera_front_hik_xyz" default="1.69 0.0 0.1"/>
+  <xacro:arg name="camera_front_hik_rpy" default="0.0 0.0 0.0"/>
+
+  <xacro:property name="livox_xyz" value="$(arg livox_xyz)"/>
+  <xacro:property name="livox_rpy" value="$(arg livox_rpy)"/>
+  <xacro:property name="imu_xyz" value="$(arg imu_xyz)"/>
+  <xacro:property name="imu_rpy" value="$(arg imu_rpy)"/>
+  <xacro:property name="gps_xyz" value="$(arg gps_xyz)"/>
+  <xacro:property name="gps_rpy" value="$(arg gps_rpy)"/>
+  <xacro:property name="camera_front_astra_xyz" value="$(arg camera_front_astra_xyz)"/>
+  <xacro:property name="camera_front_astra_rpy" value="$(arg camera_front_astra_rpy)"/>
+  <xacro:property name="camera_back_video_xyz" value="$(arg camera_back_video_xyz)"/>
+  <xacro:property name="camera_back_video_rpy" value="$(arg camera_back_video_rpy)"/>
+  <xacro:property name="camera_front_hik_xyz" value="$(arg camera_front_hik_xyz)"/>
+  <xacro:property name="camera_front_hik_rpy" value="$(arg camera_front_hik_rpy)"/>
+
+  <!-- 船体外形（仅 RViz 可视化；不影响 TF/导航），实船尺寸 -->
+  <xacro:property name="hull_length" value="2.72"/>
+  <xacro:property name="hull_width"  value="1.30"/>
+  <xacro:property name="hull_height" value="1.07"/>
+
+  <material name="usv_hull_gray">
+    <color rgba="0.4 0.45 0.5 1.0"/>
+  </material>
+  <material name="usv_sensor_orange">
+    <color rgba="0.9 0.5 0.1 1.0"/>
+  </material>
+
+  <xacro:macro name="sensor_frame" params="name xyz rpy parent:=base_link">
+    <link name="${name}">
+      <visual>
+        <geometry>
+          <box size="0.06 0.06 0.06"/>
+        </geometry>
+        <material name="usv_sensor_orange"/>
+      </visual>
+    </link>
+    <joint name="${parent}_to_${name}" type="fixed">
+      <parent link="${parent}"/>
+      <child link="${name}"/>
+      <origin xyz="${xyz}" rpy="${rpy}"/>
+    </joint>
+  </xacro:macro>
+
+  <!-- REP-103：camera_link → optical（Z 前、X 右、Y 下） -->
+  <xacro:macro name="optical_frame" params="name parent">
+    <link name="${name}"/>
+    <joint name="${parent}_to_${name}" type="fixed">
+      <parent link="${parent}"/>
+      <child link="${name}"/>
+      <origin xyz="0 0 0" rpy="${-pi/2} 0 ${-pi/2}"/>
+    </joint>
+  </xacro:macro>
+
+  <link name="base_link">
+    <visual>
+      <origin xyz="${hull_height - 0.3} 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="${hull_length} ${hull_width} ${hull_height}"/>
+      </geometry>
+      <material name="usv_hull_gray"/>
+    </visual>
+  </link>
+
+  <!-- 倒装 Mid360：base → livox 默认 roll=π；IMU 仍相对雷达系 -->
+  <xacro:sensor_frame name="livox_frame" xyz="${livox_xyz}" rpy="${livox_rpy}"/>
+  <xacro:sensor_frame name="imu_link" xyz="${imu_xyz}" rpy="${imu_rpy}" parent="livox_frame"/>
+  <xacro:sensor_frame name="gps_link" xyz="${gps_xyz}" rpy="${gps_rpy}"/>
+
+  <!-- 前向 Astra：仅挂 link；color/depth/optical 由 astra_camera 驱动发布 -->
+  <xacro:sensor_frame name="camera_front_astra_link"
+                      xyz="${camera_front_astra_xyz}"
+                      rpy="${camera_front_astra_rpy}"/>
+
+  <!-- 前向 Hikvision（RTSP 网络相机，正装）：link + optical；图像 header 用 optical -->
+  <xacro:sensor_frame name="camera_front_hik_link"
+                      xyz="${camera_front_hik_xyz}"
+                      rpy="${camera_front_hik_rpy}"/>
+  <xacro:optical_frame name="camera_front_hik_optical_frame"
+                       parent="camera_front_hik_link"/>
+
+  <!-- 后向 UVC：link + optical；apriltag TF parent 用 link，图像 header 用 optical -->
+  <xacro:sensor_frame name="camera_back_video_link"
+                      xyz="${camera_back_video_xyz}"
+                      rpy="${camera_back_video_rpy}"/>
+  <xacro:optical_frame name="camera_back_video_optical_frame"
+                       parent="camera_back_video_link"/>
+
+</robot>

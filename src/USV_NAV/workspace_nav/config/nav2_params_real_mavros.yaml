@@ -1,5 +1,4 @@
 # -----------------------------------------------------------------------------
-# 实船 / ArduPilot（MAVROS gps_input）Nav2 参数（与仿真 nav2_params.yaml 独立，勿混用）。
 #
 # 里程计 / TF：
 #   - odom→base_link：NX gps_input 插件（inspvaa 时间戳）
@@ -165,7 +164,7 @@ local_costmap:
       # —— 膨胀层：在障碍物周围生成渐变代价。半径过大会让船绕行过远 ——
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        # —— 代价衰减系数：1.0 ≈ 线性衰减；>1 衰减更快（障碍边界更硬）——
+        # —— 代价衰减系数：1.0 ≈ 线性衰减；>1 衰减更快,机器人越敢贴障碍
         cost_scaling_factor: 1.0
         # —— 膨胀半径 (m)：从障碍格向外染色，RPP 代价减速能感知的最远距离 = 此值 ——
         #    须 ≥ RPP cost_scaling_dist（5.0），已对齐
@@ -174,30 +173,48 @@ local_costmap:
       voxel_layer:
         plugin: "nav2_costmap_2d::VoxelLayer"
         enabled: true
+        # —— 是否清空机器人 footprint 覆盖范围内的旧障碍标记（船体近距由本体遮挡/反光，清空更稳）——
+        footprint_clearing_enabled: true
         # —— 发布体素网格 (RViz 可订阅 /local_costmap/voxel_grid 查看) ——调试时true,实船false
-        publish_voxel_map: false
-        # —— 体素 z 轴范围：origin_z=-1.0, z_res=0.2, z_voxels=16 → 覆盖 -1.0~2.2 m (相对 base_link) ——
-        origin_z: -1.0      # 相对开始建立体素，这三个参数只定义VoxelLayer 能处理的 z 范围：
-        z_resolution: 0.2   # z 轴分辨率 (米/层)
-        z_voxels: 16         # z 轴层数
-        max_obstacle_height: 2.0
+        publish_voxel_map: true
+        # —— 体素 z 轴范围：origin_z=-0.3, z_res=0.2, z_voxels=12 → 覆盖 odom [-0.3, 2.1]。
+        #    底边在水面(odom≈-0.25)稍下；顶边盖住观测源保留的最高点(2.1)，避免网格提前截断。 ——
+        origin_z: -0.20      # odom z 区间：base_link≈0、水面≈-0.25、激光≈+0.36
+        z_resolution: 0.1   # z 轴分辨率 (米/层)
+        z_voxels: 12         # z 轴层数
+        # —— 二次过滤上限 (m)：这是能实时调的「真正上限」，以 base_link(odom z=0) 往上计。
+        #    观测源(livox_cloud.max_obstacle_height)已放宽到 2.1，本层才是卡点。
+        #    默认 1.0 ≈ 船/障碍最高只比激光(≈+0.36)高一点；可在工具里在线调(0.8/1.0...)。
+        #    注意：> 此值的点由本层直接跳过，不入体素格。 ——
+        max_obstacle_height: 1.0
         # —— 标记阈值：一个体素列中至少 mark_threshold 个点被占据才标为障碍。0=首次点击即标记 (水面杂波多时可增大到 1~2) ——
-        mark_threshold: 0
+        mark_threshold: 2
+        # —— 体素列被判为 unknown 的点数阈值（源码默认 15，一般无需调整）——
+        unknown_threshold: 15
+        # —— 多层/多源叠加：1=max 取最大代价(推荐)；0=overwrite 直接覆盖 ——
+        combination_method: 1
         observation_sources: livox_cloud
         livox_cloud:
           topic: /livox/lidar
           data_type: "PointCloud2"
+          # —— 观测点保留时间：0=立即过期（动态环境建议 0，配合 clearing）——
+          observation_persistence: 0.0
           # —— clearing: true → 射线穿过区域清除旧障碍 (动态环境需要) ——
           clearing: true
           marking: true
           # —— 障碍距离与高度过滤 ——
-          obstacle_min_range: 0.5    # 盲区 (米)，小于此距离的点忽略
-          obstacle_max_range: 10.0   # 最大检测距离 (米)
+          obstacle_min_range: 2.0    # 盲区 (米)，小于此距离的点忽略
+          # —— 最大检测距离 (m)：应 ≥ local 窗口半宽(20/2=10) 的对角半径≈14，取 20 覆盖整个 20×20 滚动窗口 ——
+          obstacle_max_range: 20.0
           raytrace_min_range: 0.5
-          raytrace_max_range: 11.0   # 射线清除最大距离 (一般比 obstacle_max_range 大一点)
-          # —— 障碍高度筛选：低于 min / 高于 max 的点不参与标记。min 设负值可滤除水面波纹 (相对 base_link) ——
-          min_obstacle_height: 0.0
-          max_obstacle_height: 2.0   # 高于 2 m 的点忽略 (滤桥梁/树冠)
+          # —— 射线清除最大距离 (m)：一般比 obstacle_max_range 大一点，清除射线需覆盖检测范围 ——
+          raytrace_max_range: 22.0
+          # —— 障碍高度筛选 (ObservationBuffer 裁剪，相对 odom z = 初始 base_link 位置) ——
+          #    min 设 -0.25：水面(在初始 base_link 下方约 0.25 m，odom z≈-0.25)及其直反射点会被滤掉，
+          #       避免水面反光产生 ghost；低于水面(吃水线以下)的点亦不入图。
+          #    max 放宽为 2.1：观测源尽量保留，真正的上限交给 voxel_layer.max_obstacle_height(在线调)。
+          min_obstacle_height: -0.25
+          max_obstacle_height: 1.5
       always_send_full_costmap: true #稳定后改false
       
 global_costmap:
@@ -228,15 +245,22 @@ global_costmap:
         filter_info_topic: "/keepout_filter/costmap_filter_info"
         transform_tolerance: 0.1
       # —— Voxel 层（全局远距离） ——
+      #    默认关闭(enabled: false)，仅作远距离障碍预判备胎。全局走 static_layer + keepout_filter 即可；
+      #    若开启会引入动态物残留/水面 ghost(非滚动窗口下 clearing 需射线穿旧体素，水上难清除)。
+      #    参数已与 local_costmap 对齐，将来如需启用可直接置 true。
       voxel_layer:
         plugin: "nav2_costmap_2d::VoxelLayer"
         enabled: false
         publish_voxel_map: false
+        footprint_clearing_enabled: true
         origin_z: -0.2 #体素地图在z方向上的底面高度
         z_resolution: 0.2
         z_voxels: 12
-        max_obstacle_height: 2.0
+        # —— 高度上限 (m)：与 local_costmap/livox_cloud 一致，滤高于 1.8 m 的点 ——
+        max_obstacle_height: 1.8
         mark_threshold: 3
+        unknown_threshold: 15
+        combination_method: 1
         observation_sources: livox_cloud
         livox_cloud:
           topic: /livox/lidar
@@ -244,11 +268,13 @@ global_costmap:
           clearing: true
           marking: true
           obstacle_min_range: 0.8
+          # —— 全局远距离检测 (m)：global 非滚动，可调大以预判远处障碍 ——
           obstacle_max_range: 15.0
           raytrace_min_range: 0.8
           raytrace_max_range: 15.0
-          min_obstacle_height: -0.1  
-          max_obstacle_height: 1.5
+          # —— 高度筛选 (相对 odom z)：min=-0.25 滤水面反射，max=1.8 滤桥梁/树冠，与 local 一致 ——
+          min_obstacle_height: -0.25
+          max_obstacle_height: 1.8
           observation_persistence: 0.0
       # —— 静态地图层 ——
       static_layer:

@@ -1,10 +1,6 @@
-# 单点导航 / 无动作航线（Decision → 导航）
-# waypoints 长度 1 = 单点导航；>= 2 = 按序执行的无动作航线；0 = Goal 请求阶段拒绝
-# seq 保持 Decision 下发原值，导航不重新编号
-# Goal
+# Decision -> navigation：单点与无动作航线共用此 Action。
 m_common/MissionWaypoint[] waypoints
 ---
-# Result
 int32 RESULT_SUCCESS=0
 int32 RESULT_INVALID_GOAL=1
 int32 RESULT_BUSY=2
@@ -24,7 +20,6 @@ string message
 int32 final_current_seq
 int32 final_reached_seq
 ---
-# Feedback
 uint8 PHASE_VALIDATING=1
 uint8 PHASE_PLANNING=2
 uint8 PHASE_TRACKING=3

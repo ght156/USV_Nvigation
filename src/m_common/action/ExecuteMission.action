@@ -1,11 +1,19 @@
 # §4.2.2 mission_execute
 # decision 内部串起 上传→start→逐航点→actions→finish
 # Goal
+# user_id: 任务归属者(mqtt_bridgev2 填 productKey);为空时 decision 拒绝 goal
 string user_id
 string execution_id
+# V0.7 E.18: 1=航线任务, 2=单点导航, 3=返回船坞
+uint8 mission_type
+# 任务级参数可选；has_*=false 时由 decision 使用 UsvParamState 当前全局值。
+bool    has_speed
 float32 speed
+bool    has_finish_action
 uint8   finish_action
 m_common/Waypoint[] waypoints
+# 本次任务的电子围栏完整快照；Decision 在启动导航前写入导航侧。
+m_common/GeoFence[] geo_fences
 ---
 # Result(最终结果)
 int32  result
@@ -14,7 +22,7 @@ string execution_id
 ---
 # Feedback(周期反馈,与 MissionState 对齐)
 string phase
-uint32 current_seq
-uint32 reached_seq
-uint32 waypoint_total
+int32 current_seq
+int32 reached_seq
+int32 waypoint_total
 float32 progress

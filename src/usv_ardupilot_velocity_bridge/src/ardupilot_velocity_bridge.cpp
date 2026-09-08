@@ -3,6 +3,7 @@
 #include <cmath>
 #include <functional>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -61,8 +62,17 @@ public:
     last_output_time_(this->now())
   {
     state_topic_ = this->declare_parameter<std::string>("state_topic", "/mavros/state");
+    // Legacy single-topic parameter, kept for backward compatibility.
     input_cmd_topic_ =
       this->declare_parameter<std::string>("input_cmd_topic", "/cmd_vel_nav");
+    // Any number of input topics; each feeds the same command state, latest wins.
+    input_cmd_topics_ = this->declare_parameter<std::vector<std::string>>(
+      "input_cmd_topics", {input_cmd_topic_});
+    // "reliable" or "best_effort". DDS matches a best_effort subscription with
+    // BOTH reliable and best_effort publishers (requested <= offered), so
+    // best_effort accepts cmd_vel sources regardless of their QoS.
+    input_cmd_qos_ =
+      this->declare_parameter<std::string>("input_cmd_qos", "best_effort");
     output_cmd_topic_ = this->declare_parameter<std::string>(
       "output_cmd_topic", "/mavros/setpoint_velocity/cmd_vel_unstamped");
 
@@ -122,8 +132,22 @@ public:
     state_sub_ = this->create_subscription<mavros_msgs::msg::State>(
       state_topic_, 10, std::bind(&OffboardController::state_cb, this, std::placeholders::_1));
 
-    cmd_sub_ = this->create_subscription<geometry_msgs::msg::Twist>(
-      input_cmd_topic_, 10, std::bind(&OffboardController::cmd_cb, this, std::placeholders::_1));
+    rclcpp::QoS input_qos = rclcpp::QoS(rclcpp::KeepLast(10)).best_effort();
+    if (input_cmd_qos_ == "reliable") {
+      input_qos = rclcpp::QoS(rclcpp::KeepLast(10)).reliable();
+    } else if (input_cmd_qos_ != "best_effort") {
+      RCLCPP_WARN(
+        this->get_logger(),
+        "Unknown input_cmd_qos '%s', falling back to best_effort",
+        input_cmd_qos_.c_str());
+    }
+
+    for (const auto & topic : input_cmd_topics_) {
+      cmd_subs_.push_back(
+        this->create_subscription<geometry_msgs::msg::Twist>(
+          topic, input_qos,
+          std::bind(&OffboardController::cmd_cb, this, std::placeholders::_1)));
+    }
 
     // Use MAVROS setpoint_velocity unstamped Twist topic; no timestamp needed.
     // MAVROS handles ENU -> NED.
@@ -136,10 +160,18 @@ public:
     timer_ = this->create_wall_timer(
       timer_period, std::bind(&OffboardController::control_loop, this));
 
+    std::ostringstream topics_oss;
+    for (std::size_t i = 0; i < input_cmd_topics_.size(); ++i) {
+      if (i > 0) {
+        topics_oss << ", ";
+      }
+      topics_oss << input_cmd_topics_[i];
+    }
+
     RCLCPP_INFO(
       this->get_logger(),
-      "ardupilot_velocity_bridge ready, input=%s output=%s envelope=%s safety=%.2f",
-      input_cmd_topic_.c_str(), output_cmd_topic_.c_str(),
+      "ardupilot_velocity_bridge ready, input=[%s] qos=%s output=%s envelope=%s safety=%.2f",
+      topics_oss.str().c_str(), input_cmd_qos_.c_str(), output_cmd_topic_.c_str(),
       enable_velocity_envelope_ ? "ON" : "OFF", envelope_safety_factor_);
   }
 
@@ -286,6 +318,8 @@ private:
 
   std::string state_topic_;
   std::string input_cmd_topic_;
+  std::vector<std::string> input_cmd_topics_;
+  std::string input_cmd_qos_;
   std::string output_cmd_topic_;
 
   double publish_rate_hz_{20.0};
@@ -319,7 +353,7 @@ private:
   rclcpp::Time last_output_time_;
 
   rclcpp::Subscription<mavros_msgs::msg::State>::SharedPtr state_sub_;
-  rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr cmd_sub_;
+  std::vector<rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr> cmd_subs_;
   rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_pub_;
   rclcpp::TimerBase::SharedPtr timer_;
 };

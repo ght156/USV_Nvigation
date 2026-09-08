@@ -66,13 +66,14 @@ HEX_TO_COLOR = {
 }
 VALID_SEMANTIC = {"green", "red", "black"}
 
-# yaw 哨兵约定：合法航向为 [-2π, 2π] rad；超出该范围（如 Decision 下发的 65536）
-# 一律视为"不指定朝向"，导航取行进方向作为到点朝向。
+# yaw 哨兵约定：航向接口统一为**度**（MissionWaypoint.yaw / dock_yaw / 泊位库 yaw_deg）。
+# 合法航向为 [-360, 360] 度；超出该范围（如 Decision 下发的 65536）一律视为
+# "不指定朝向"，导航取行进方向作为到点朝向。只在生成 Nav2 位姿四元数时转弧度。
 YAW_UNSPECIFIED = 65536.0
 
 
 def yaw_is_specified(yaw: float) -> bool:
-    return math.isfinite(yaw) and -2.0 * math.pi <= yaw <= 2.0 * math.pi
+    return math.isfinite(yaw) and -360.0 <= yaw <= 360.0
 
 
 class MissionState(str, Enum):
@@ -338,7 +339,7 @@ class MissionBridgeNode(Node):
         self._target_buoy_min_period = max(
             0.0, float(self.get_parameter("target_buoy_min_write_period_sec").value)
         )
-        self._nav_xy: List[Tuple[float, float, float]] = []  # (map_x, map_y, yaw_rad)
+        self._nav_xy: List[Tuple[float, float, float]] = []  # (map_x, map_y, yaw_deg)
         self.current_index = 0
         self._paused_nav_xy: List[Tuple[float, float, float]] = []
         self._paused_index: int = 0
@@ -442,6 +443,10 @@ class MissionBridgeNode(Node):
         self._nt_feedback_timer: Optional[Any] = None
         # 越界原因挂起：safety_event 与 emergency_stop 竞速时优先报 GEOFENCE
         self._nt_geofence_pending = False
+        # 最近一次越界事件的围栏类型( exclusion/inclusion )与进出( ENTER/EXIT )，
+        # 用于把 GEOFENCE 细分写进 NavigateTask Result.error_code，供上层区分 2001/2002。
+        self._nt_geofence_type = ""
+        self._nt_geofence_transition = ""
         self._nav_action_server = ActionServer(
             self,
             NavigateTask,
@@ -1057,14 +1062,16 @@ class MissionBridgeNode(Node):
             return self._current_pose_xy
 
     def create_pose_msg(self, x: float, y: float, z: float = 0.0, yaw: float = 0.0) -> PoseStamped:
+        # yaw 为度（接口统一）；Nav2/tf2 位姿四元数用弧度，这里才转。
+        yaw_rad = math.radians(float(yaw))
         pose = PoseStamped()
         pose.header.frame_id = self._global_frame
         pose.header.stamp = self.get_clock().now().to_msg()
         pose.pose.position.x = x
         pose.pose.position.y = y
         pose.pose.position.z = z
-        pose.pose.orientation.z = math.sin(yaw / 2.0)
-        pose.pose.orientation.w = math.cos(yaw / 2.0)
+        pose.pose.orientation.z = math.sin(yaw_rad / 2.0)
+        pose.pose.orientation.w = math.cos(yaw_rad / 2.0)
         return pose
 
     def _send_next_waypoint(self) -> None:
@@ -1100,7 +1107,7 @@ class MissionBridgeNode(Node):
                 px, py = self._nav_xy[self.current_index - 1][:2]
             else:
                 px, py = rx, ry
-            yaw = math.atan2(y - py, x - px)
+            yaw = math.degrees(math.atan2(y - py, x - px))
 
         goal = FollowWaypoints.Goal()
         goal.poses = [self.create_pose_msg(x, y, 0.0, yaw)]
@@ -1467,7 +1474,7 @@ class MissionBridgeNode(Node):
                            response: SendWaypoints.Response) -> SendWaypoints.Response:
         """Service: 下发航线 (SendWaypoints). Service 调用等价于 explicit_replan，可抢占 RUNNING/PAUSED。
 
-        航点为 WGS84 lat/lon + yaw(rad)；内部转换为 map 坐标后执行。
+        航点为 WGS84 lat/lon + yaw(度)；内部转换为 map 坐标后执行，生成 Nav2 位姿时再转弧度。
         """
         wps = request.waypoints
         mission_id = request.mission_id.strip() if request.mission_id else ""
@@ -1743,10 +1750,12 @@ class MissionBridgeNode(Node):
         # zone_monitor 越界与急停竞速时优先报 GEOFENCE_VIOLATION
         with self._nt_lock:
             geofence_pending = self._nt_geofence_pending
+            geofence_type = self._nt_geofence_type
+            geofence_transition = self._nt_geofence_transition
         if geofence_pending:
             self._nt_terminate(
                 NavigateTask.Result.RESULT_GEOFENCE_VIOLATION,
-                "GEOFENCE_VIOLATION",
+                self._geofence_error_code(geofence_type, geofence_transition),
                 "electronic geofence violation",
                 "abort",
             )
@@ -1846,6 +1855,8 @@ class MissionBridgeNode(Node):
                 self._nt_phase = NavigateTask.Feedback.PHASE_VALIDATING
                 self._nt_nav2_feedback_seen = False
                 self._nt_geofence_pending = False
+                self._nt_geofence_type = ""
+                self._nt_geofence_transition = ""
         if slot_taken:
             # 与另一 goal 的极端竞态：后到者直接终止
             self.get_logger().warning("[navigate] abort: another goal registered first")
@@ -1963,6 +1974,24 @@ class MissionBridgeNode(Node):
         self._nt_done.set()
 
     @staticmethod
+    def _geofence_error_code(fence_type: str, transition: str) -> str:
+        """把越界原因细分写进 Result.error_code，供上层区分禁航区(exclusion)与作业区(inclusion)。
+
+        保持 ``GEOFENCE_VIOLATION`` 前缀（兼容只看前缀的调用方），再追加
+        ``围栏类型:进出方向``。例如：
+            GEOFENCE_VIOLATION:EXCLUSION:ENTER   （闯入禁航区 → 2001）
+            GEOFENCE_VIOLATION:INCLUSION:EXIT    （驶出作业区 → 2002）
+        上层 decision 按 error_code 是否包含 ``INCLUSION`` 区分即可，无需改嵌软。
+        """
+        t = (fence_type or "").upper()
+        d = (transition or "").upper()
+        if t and d:
+            return "GEOFENCE_VIOLATION:{}:{}".format(t, d)
+        if t:
+            return "GEOFENCE_VIOLATION:{}".format(t)
+        return "GEOFENCE_VIOLATION"
+
+    @staticmethod
     def _map_nav2_failure(nav2_error_code: int, nav2_error_msg: str) -> int:
         """把 Nav2 FollowWaypoints 失败尽量映射到 NavigateTask Result 码。
 
@@ -2049,6 +2078,8 @@ class MissionBridgeNode(Node):
         if msg.enabled:
             with self._nt_lock:
                 self._nt_geofence_pending = True
+                self._nt_geofence_type = msg.fence_type
+                self._nt_geofence_transition = msg.transition
                 active = self._nt_goal_handle is not None
             if active:
                 self.get_logger().error(
@@ -2057,13 +2088,16 @@ class MissionBridgeNode(Node):
                 )
                 self._nt_terminate(
                     NavigateTask.Result.RESULT_GEOFENCE_VIOLATION,
-                    "GEOFENCE_VIOLATION",
-                    "electronic geofence violation",
+                    self._geofence_error_code(msg.fence_type, msg.transition),
+                    "electronic geofence violation (fence={} {} {})".format(
+                        msg.fence_id, msg.fence_type, msg.transition),
                     "abort",
                 )
         else:
             with self._nt_lock:
                 self._nt_geofence_pending = False
+                self._nt_geofence_type = ""
+                self._nt_geofence_transition = ""
 
 
 def main(args: Optional[list] = None) -> None:
