@@ -118,8 +118,14 @@ class NavStatusAggregator(Node):
         self.create_subscription(
             Odometry, _odom_topic, self._cb_odom, 10,
             callback_group=cg)
+        # GPS 为传感器流，统一 BEST_EFFORT（匹配 raw/fix 的 best_effort 发布端，且兼容 reliable 发布端）
+        _gps_qos = QoSProfile(
+            depth=10,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE,
+        )
         self.create_subscription(
-            NavSatFix, _gps_topic, self._cb_gps, 10,
+            NavSatFix, _gps_topic, self._cb_gps, _gps_qos,
             callback_group=cg)
         self.create_subscription(
             GoalStatusArray, _fw_status_topic, self._cb_action_status, 10,

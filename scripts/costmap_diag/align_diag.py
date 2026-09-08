@@ -22,6 +22,12 @@ TL = QoSProfile(
     reliability=ReliabilityPolicy.RELIABLE,
 )
 
+GPS = QoSProfile(
+    depth=10,
+    reliability=ReliabilityPolicy.BEST_EFFORT,
+    durability=DurabilityPolicy.VOLATILE,
+)
+
 # 与船上一致的滤波链
 R_MIN, R_MAX = 2.0, 20.0
 Z_OBS_MIN, Z_OBS_MAX = -0.25, 1.5
@@ -74,7 +80,7 @@ def main():
         OccupancyGrid, "/global_costmap/costmap", lambda m: got.__setitem__("gcm", m), TL
     )
     n.create_subscription(
-        NavSatFix, "/mavros/gps_input/raw/fix", lambda m: got.__setitem__("fix", m), 10
+        NavSatFix, "/mavros/gps_input/raw/fix", lambda m: got.__setitem__("fix", m), GPS
     )
     n.create_subscription(
         PointCloud2, "/livox/lidar", lambda m: got.__setitem__("pc", m), 10
