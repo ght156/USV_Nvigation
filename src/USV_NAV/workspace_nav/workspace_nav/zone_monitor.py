@@ -7,11 +7,13 @@
 #   - 存在 inclusion（作业区）围栏且船位驶出 → 违规（EXIT）
 #   - 船位闯入任一 exclusion（禁航区） → 违规（ENTER）
 # 连续 violation_threshold 次违规后：
-#   - 无论有无任务都调用 mission_bridge/emergency_stop 急停（锁存，区域更新后解除）
-#   - 无活动任务时（/mission_bridge/state 非 RUNNING/PAUSED）发布
-#     /mission_bridge/safety_event（m_common/msg/NavSafetyEvent）；
-#     有活动任务时由任务接口的终态承担上报（NavigateTask Result / mission 状态事件）
-# 违规条件消失且告警曾触发时，再发一条 enabled=false 表示告警解除。
+#   - 发布 /mission_bridge/safety_event（NavSafetyEvent, enabled=true）——无论有无
+#     活动任务都发：mission_bridge 靠它把活动任务终态判成 GEOFENCE_VIOLATION
+#     （EXCLUSION:ENTER→2001 / INCLUSION:EXIT→2002），否则越界会被误报成急停(2010)
+#   - 调用 mission_bridge/emergency_stop 急停（锁存，回到合法区或区域更新后解除，
+#     解除后再次越界会重新告警+急停）
+# 违规条件消失且告警曾触发时，再发一条 enabled=false 表示告警解除；解除事件的
+# fence_id/fence_type/transition 固定取触发告警那一刻的违规快照，保证告警/解除一一配对。
 # 未设置任何围栏时节点空转。
 # ----------------------------------------------------------------------------------------------- #
 from __future__ import annotations
@@ -48,8 +50,6 @@ _LATCHED_QOS = QoSProfile(
     reliability=ReliabilityPolicy.RELIABLE,
     durability=DurabilityPolicy.TRANSIENT_LOCAL,
 )
-
-_ACTIVE_MISSION_STATES = ("RUNNING", "PAUSED")
 
 
 def _quat_to_yaw(q) -> float:
@@ -89,7 +89,6 @@ class ZoneMonitorNode(Node):
         self.declare_parameter("global_frame", "map")
         self.declare_parameter("odom_topic", "/mavros/gps_input/local")
         self.declare_parameter("nav_zones_topic", "/nav_zones/current")
-        self.declare_parameter("mission_state_topic", "/mission_bridge/state")
         self.declare_parameter("safety_event_topic", "/mission_bridge/safety_event")
         self.declare_parameter("check_period_sec", 0.5)
         self.declare_parameter("violation_threshold", 5)
@@ -128,11 +127,13 @@ class ZoneMonitorNode(Node):
         # map 系围栏：[{fence_id, type, shape, points:[(x,y)], center:(x,y)|None, radius_m}]
         self._fences: List[Dict[str, Any]] = []
         self._odom: Optional[Odometry] = None
-        self._mission_state = ""
         self._violation_streak = 0
-        self._triggered = False        # 急停锁存
+        self._triggered = False        # 急停锁存（回到合法区或围栏更新时解除）
         self._event_active = False     # 是否已发 enabled=true 告警
         self._last_violation: Optional[Tuple[Dict[str, Any], str]] = None
+        # 触发告警那一刻的违规快照：解除事件（enabled=false）一律用它填充
+        # fence_id/fence_type/transition，避免告警后违规围栏切换导致解除与告警对不上
+        self._alarmed_violation: Optional[Tuple[Dict[str, Any], str]] = None
 
         self._tf_buffer = Buffer()
         self._tf_listener = TransformListener(self._tf_buffer, self)
@@ -145,12 +146,6 @@ class ZoneMonitorNode(Node):
             self.get_parameter("nav_zones_topic").value,
             self._cb_nav_zones_current,
             _LATCHED_QOS,
-        )
-        self.create_subscription(
-            String,
-            self.get_parameter("mission_state_topic").value,
-            self._cb_mission_state,
-            10,
         )
         self._safety_pub = self.create_publisher(
             NavSafetyEvent, self.get_parameter("safety_event_topic").value, 1
@@ -193,9 +188,6 @@ class ZoneMonitorNode(Node):
     def _cb_odom(self, msg: Odometry) -> None:
         self._odom = msg
 
-    def _cb_mission_state(self, msg: String) -> None:
-        self._mission_state = msg.data.strip()
-
     def _cb_nav_zones_current(self, msg: String) -> None:
         try:
             data = json.loads(msg.data)
@@ -228,8 +220,7 @@ class ZoneMonitorNode(Node):
         self._triggered = False
         self._violation_streak = 0
         if self._event_active:
-            self._publish_safety_event(None, "", enabled=False)
-            self._event_active = False
+            self._publish_clear_event()
         self.get_logger().info(
             f"围栏更新: {len(fences)} 个 "
             f"(inclusion={sum(1 for f in fences if f['type'] == 'inclusion')}, "
@@ -270,11 +261,11 @@ class ZoneMonitorNode(Node):
             if self._violation_streak > 0:
                 self.get_logger().info("违规条件消失，计数清零")
             self._violation_streak = 0
+            # 回到合法区即解除急停锁存：cancel_mission 清 EMERGENCY 后继续航行，
+            # 再次越界仍能重新告警+急停（旧逻辑只在围栏更新时复位，二次越界会裸奔）
+            self._triggered = False
             if self._event_active:
-                self._publish_safety_event(self._last_violation[0] if self._last_violation else None,
-                                           self._last_violation[1] if self._last_violation else "",
-                                           enabled=False, pose=pose)
-                self._event_active = False
+                self._publish_clear_event(pose)
             return
         fence, transition = violation
         self._last_violation = violation
@@ -290,11 +281,29 @@ class ZoneMonitorNode(Node):
             self.get_logger().error(
                 f"越界确认，触发急停: 围栏 {fence['fence_id']} ({fence['type']}, {transition})"
             )
-            self._call_emergency_stop()
-            # 有活动任务时终态由任务接口承担；无任务时发 NavSafetyEvent
-            if self._mission_state not in _ACTIVE_MISSION_STATES and not self._event_active:
+            # 先发 safety_event 再急停，且无论有无活动任务都发：
+            # mission_bridge 的 _cb_safety_event 靠它置 _nt_geofence_pending，
+            # 活动任务越界才能判成 GEOFENCE_VIOLATION（EXCLUSION:ENTER→2001 /
+            # INCLUSION:EXIT→2002）；不发则急停收尾只能给 RESULT_EMERGENCY_STOP(2010)。
+            # 先发布后急停的顺序保证急停收尾时 pending 已置位，规避竞态。
+            # 重复上报由 _event_active 锁存防抖（围栏解除/更新时发 enabled=False 复位）。
+            if not self._event_active:
+                self._alarmed_violation = violation
                 self._publish_safety_event(fence, transition, enabled=True, pose=pose)
                 self._event_active = True
+            self._call_emergency_stop()
+
+    def _publish_clear_event(self, pose: Optional[Tuple[float, float]] = None) -> None:
+        """发 enabled=false 解除告警并复位告警状态。
+
+        fence_id/fence_type/transition 固定取触发告警时的快照（_alarmed_violation），
+        而非实时 _last_violation：告警后若违规围栏发生切换（A→B），解除仍带 A，
+        平台按 fence_id+enabled 配对才不会错位。围栏更新触发的解除无船位。
+        """
+        fence, transition = self._alarmed_violation if self._alarmed_violation else (None, "")
+        self._publish_safety_event(fence, transition, enabled=False, pose=pose)
+        self._event_active = False
+        self._alarmed_violation = None
 
     def _publish_safety_event(
         self,
