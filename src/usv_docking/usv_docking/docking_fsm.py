@@ -8,14 +8,14 @@
     出泊：[WAIT_DOCK_RELEASE*] -> UNDOCK_EXIT -> UNDOCK_SETTLE（/dock/undock 触发）
     终局（2026-10-05 压紧段设计）：浮动坞位置会漂移，FINAL_DOCK 到达原"死位置"
       （final_target_x±docked_x_tol）不再停车判成功，控制器低速继续倒船（压紧段），
-      成功判据为无线充电信号稳定（主，/wireless_charger_state 好样本连续
-      charge_stable_sec）/ WaitIO 夹爪抓住（并行保留）；压紧超时
-      （final_push_time_sec）或充电话题断流（CHARGE_SIGNAL_LOST）-> ABORT_EXIT 重试
+      成功判据为 WaitIO 夹爪抓住；压紧超时（final_push_time_sec）-> ABORT_EXIT 重试。
+      （2026-10-08 删除充电信号判据：rs485 驱动改版后 /wireless_charger_state
+      只在夹爪抓住后才发布，充电判据不可能先于抓住触发，判定由 WaitIO 单一口径）
     * 夹爪交互状态，仅 dock_claw_enabled=true 时启用（默认 true＝兴飞船；
       船坞无夹爪时置 false）：
       归港开始先经 WAIT_DOCK_OPEN 请求船坞打开夹爪（ControlDO action），成功才进
       ACQUIRE_TAG；BACK_IN/FINAL_DOCK 期间发 WaitIO action 等待夹爪抓住，抓住即
-      DOCKED（与充电判据并行）；倒船位移长时间无进展
+      DOCKED；倒船位移长时间无进展
       （backin_stuck_timeout_sec）-> ABORT_EXIT 驶出由 dock_mission 重试；
       出泊先经 WAIT_DOCK_RELEASE 请求松开夹爪，成功才 UNDOCK_EXIT，失败 FAILED
       （爪子可能仍扣着，禁止盲动）。Action 接口为嵌软的
@@ -27,8 +27,6 @@
   /docking/pose_source      (String: VISION/ODOM_PREDICTION/INVALID)
   /docking/measurement_age  (Float32)
   /docking/abort_request    (String, 来自 safety，空串=无请求)
-  /wireless_charger_state      (usv_rs485_driver/WirelessChargerState,
-                                 压紧段充电判据；接口懒加载，话题名见 charge_topic)
   /dock/start                  (Bool, dock_mission 契约)
   /dock/cancel                 (Empty, dock_mission 契约)
   /dock/undock                 (Bool, dock_mission 契约)
@@ -204,22 +202,12 @@ class DockingFsm(Node):
         self.declare_parameter("final_dock_timeout_sec", 60.0)
         self.declare_parameter("final_dock_tag_loss_timeout_sec", 2.0)
 
-        # ── FINAL_DOCK 压紧段 + 无线充电判据（2026-10-05）──
+        # ── FINAL_DOCK 压紧段（2026-10-05）──
         # 到死位置后控制器低速继续倒船（压紧段，见控制器 final_push_speed）：
-        # 压紧段最长时长，超时未判成功 -> ABORT_EXIT（FINAL_PUSH_TIMEOUT）重试
+        # 压紧段最长时长，超时未抓住 -> ABORT_EXIT（FINAL_PUSH_TIMEOUT）重试
         self.declare_parameter("final_push_time_sec", 6.0)
-        # 无线充电好样本（charging_status∈{1,5} 且 error_code==0）需连续
-        # 稳定此时长才判 DOCKED；任何坏样本清零计时
-        self.declare_parameter("charge_stable_sec", 2.0)
-        # 无线充电状态话题（usv_rs485_driver/msg/WirelessChargerState）与
-        # 监测开关服务（usv_rs485_driver/srv/WirelessChargerMonitor，enable bool；
-        # 进 BACK_IN 打开，回 IDLE/FAILED 关闭，DOCKED 保留便于观察充电）
-        self.declare_parameter("charge_topic", "/wireless_charger_state")
-        self.declare_parameter("charge_monitor_service", "/wireless_charger_monitor")
-        # 压紧段内充电话题超过此时长无消息视为信号链失效
-        # -> ABORT_EXIT（CHARGE_SIGNAL_LOST）；无线充默认 5s 一帧太慢，
-        # 船端 rs485 驱动需把 wireless_charger 轮询周期改为 1000ms
-        self.declare_parameter("charge_status_timeout_sec", 3.0)
+        # 2026-10-08：充电信号判据已删（rs485 驱动改版后 /wireless_charger_state
+        # 只在夹爪抓住后才发布，充电判据不可能先触发；成功判定统一为 WaitIO 抓住）
 
         # ── ALIGN_ENTRY 丢 Tag 宽限 ──
         # 视野边缘检测逐帧闪烁（估计器 0.3s 无帧即切推算），零容忍会与 REACQUIRE
@@ -343,12 +331,9 @@ class DockingFsm(Node):
         self._align_hold = 0.0
         self._align_tag_loss = 0.0
         self._align_y_stuck = 0.0
-        # 压紧段/充电防抖状态：离开 BACK_IN/FINAL_DOCK（含 /dock/cancel）即复位
+        # 压紧段状态：离开 BACK_IN/FINAL_DOCK（含 /dock/cancel）即复位
         self._final_push_start = None
-        self._charge_signal_dead = False
         self._final_push_elapsed = 0.0
-        self._charge_good_elapsed = 0.0
-        self._charge_good_sample = False
         self._violation_count = 0
         self._reacquire_frames = 0
         self._reacquire_miss = 0
@@ -389,15 +374,6 @@ class DockingFsm(Node):
         # 坞内倒船位移停滞检测
         self._stuck_best_x = None
         self._stuck_elapsed = 0.0
-
-        # 无线充电监测/判据（usv_rs485_driver msg/srv，懒加载；
-        # 接口缺失或服务不可用时 warn 一次并降级，充电判据自然失效）
-        self._charge_client = None
-        self._WirelessChargerMonitor = None
-        self._charge_import_failed = False
-        self._charge_monitor_on = False      # 监测已成功打开（服务侧接受调用）
-        self._charge_monitor_warned = False  # 服务不可用只 warn 一次
-        self._charge_last_msg_time = None    # 最近一次充电话题消息时刻（话题级，不随状态复位）
 
         # 状态 -> 转移 handler 分派表（IDLE/DOCKED/FAILED 无 handler，等待外部触发）
         self._trans_handlers = {
@@ -510,7 +486,6 @@ class DockingFsm(Node):
         self._state_enter_time = self.get_clock().now()
         self._reset_state_timers()
         self._manage_io_goals_on_enter(state)
-        self._manage_charge_monitor_on_enter(state)
         self._update_flags_on_enter(state)
 
     def _reset_state_timers(self):
@@ -523,12 +498,9 @@ class DockingFsm(Node):
         self._align_hold = 0.0
         self._align_tag_loss = 0.0
         self._align_y_stuck = 0.0
-        # 压紧段/充电防抖状态：离开 BACK_IN/FINAL_DOCK（含 /dock/cancel）即复位
+        # 压紧段状态：离开 BACK_IN/FINAL_DOCK（含 /dock/cancel）即复位
         self._final_push_start = None
         self._final_push_elapsed = 0.0
-        self._charge_signal_dead = False
-        self._charge_good_elapsed = 0.0
-        self._charge_good_sample = False
         self._violation_count = 0
         self._reacquire_frames = 0
         self._reacquire_miss = 0
@@ -808,115 +780,6 @@ class DockingFsm(Node):
             self.get_parameter("backin_stuck_timeout_sec").value
         )
 
-    # ══════════════ 无线充电监测/判据（usv_rs485_driver msg/srv）══════════════
-    def _ensure_charge_interfaces(self) -> bool:
-        """懒创建充电话题订阅与监测服务客户端；接口包不可导入时 warn 一次
-        并降级（返回 False，充电判据失效，退化为 WaitIO/压紧超时逻辑）。"""
-        if self._charge_client is not None:
-            return True
-        if self._charge_import_failed:
-            return False
-        try:
-            from usv_rs485_driver.msg import WirelessChargerState
-            from usv_rs485_driver.srv import WirelessChargerMonitor
-        except ImportError as exc:
-            self._charge_import_failed = True
-            self.get_logger().warn(
-                f"usv_rs485_driver 无线充电接口不可导入（{exc}），"
-                "充电判据失效，退化为 WaitIO/压紧超时逻辑"
-            )
-            return False
-        p = self.get_parameter
-        self.create_subscription(
-            WirelessChargerState,
-            p("charge_topic").value,
-            self._charge_cb,
-            QoSProfile(depth=10),
-        )
-        self._charge_client = self.create_client(
-            WirelessChargerMonitor, p("charge_monitor_service").value
-        )
-        self._WirelessChargerMonitor = WirelessChargerMonitor
-        return True
-
-    def _set_charge_monitor(self, enable: bool):
-        """打开/关闭无线充电监测。服务不可用时 warn 一次并继续：
-        不阻塞归港，充电判据自然失效（退化为 WaitIO/压紧超时逻辑）。"""
-        if not self._ensure_charge_interfaces():
-            self._charge_monitor_on = False
-            return
-        if not self._charge_client.service_is_ready():
-            if not self._charge_monitor_warned:
-                self._charge_monitor_warned = True
-                self.get_logger().warn(
-                    "无线充电监测服务 "
-                    f"{self.get_parameter('charge_monitor_service').value} 不可用，"
-                    "充电判据失效，退化为 WaitIO/压紧超时逻辑"
-                )
-            self._charge_monitor_on = False
-            return
-        req = self._WirelessChargerMonitor.Request()
-        req.enable = enable
-        self._charge_client.call_async(req)
-        self._charge_monitor_on = enable
-        self.get_logger().info(f"无线充电监测已{'打开' if enable else '关闭'}")
-
-    def _manage_charge_monitor_on_enter(self, state: str):
-        """充电监测生命周期（归港会话单一点）：进 BACK_IN 打开监测；
-        会话结束（回 IDLE/FAILED）关闭；DOCKED 成功保留（便于观察充电）。"""
-        if state == DockState.BACK_IN:
-            self._set_charge_monitor(True)
-        elif state in (DockState.IDLE, DockState.FAILED):
-            if self._charge_monitor_on:
-                self._set_charge_monitor(False)
-
-    def _charge_cb(self, msg):
-        self._charge_last_msg_time = self.get_clock().now()
-        # 好样本：充电状态为已连接/充电中（1/5）且无错误；任何坏样本清零稳定计时
-        good = int(msg.charging_status) in (1, 5) and int(msg.error_code) == 0
-        self._charge_good_sample = good
-        if not good:
-            self._charge_good_elapsed = 0.0
-
-    def _charge_push_check(self, dt) -> bool:
-        """压紧段内充电判据。好样本连续累计 >= charge_stable_sec -> DOCKED；
-        话题超 charge_status_timeout_sec 无消息：夹爪模式（WaitIO 在跑）下
-        降级为告警并继续等 WaitIO/压紧超时（2026-10-06 现场：夹爪 DI 置位仅比
-        断流中止晚 0.1s，信号链单点不该杀死压紧段）；无夹爪时才 ABORT_EXIT
-        （CHARGE_SIGNAL_LOST）。监测未打开时判据失效，直接返回 False。
-        返回 True 表示本 tick 已裁决完毕。"""
-        if not self._charge_monitor_on:
-            return False
-        p = self.get_parameter
-        now = self.get_clock().now()
-        # 从未收到消息时以压紧段起点为基线：监测开了却始终无帧同样算断流
-        last = self._charge_last_msg_time
-        if last is None:
-            last = self._final_push_start
-        if (now - last).nanoseconds * 1e-9 > float(
-            p("charge_status_timeout_sec").value
-        ):
-            if self._claw_on():
-                if not self._charge_signal_dead:
-                    self._charge_signal_dead = True
-                    self.get_logger().warn(
-                        "充电话题断流，但夹爪 WaitIO 在途——降级：压紧段继续，"
-                        "成功判据交给夹爪 DI（原 CHARGE_SIGNAL_LOST 不再中止）"
-                    )
-                return False
-            self._abort_corridor("CHARGE_SIGNAL_LOST")
-            return True
-        if self._charge_good_sample:
-            self._charge_good_elapsed += dt
-            if self._charge_good_elapsed >= float(p("charge_stable_sec").value):
-                self.get_logger().info(
-                    f"无线充电信号稳定 {self._charge_good_elapsed:.1f}s"
-                    "（充电判据）-> DOCKED"
-                )
-                self._enter(DockState.DOCKED)
-                return True
-        return False
-
     # ══════════════ 主循环 ══════════════
     def _tick(self):
         now = self.get_clock().now()
@@ -1163,8 +1026,9 @@ class DockingFsm(Node):
             return
         # 到达原"死位置" -> 进入压紧段（2026-10-05）：浮动坞位置会漂移，
         # 固定位置到位不再判成功，改由控制器低速继续倒船压向夹爪/充电板；
-        # 成功 = 无线充电信号稳定（主）/ WaitIO 抓住（上文并行），
-        # 失败 = 压紧超时 / 充电话题断流 -> ABORT_EXIT 由 dock_mission 重试。
+        # 成功 = WaitIO 夹爪抓住（上文），失败 = 压紧超时 -> ABORT_EXIT 由
+        # dock_mission 重试。（2026-10-08 删充电信号判据：rs485 驱动改版后
+        # 充电状态只在抓住后才发布，该判据不可能先触发）
         # 段内漂出窗口（浮坞移动/Tag 噪声）不复位计时，避免反复重进
         if x is not None and (
             abs(x - float(p("final_target_x").value))
@@ -1175,10 +1039,8 @@ class DockingFsm(Node):
                 self._final_push_start = self.get_clock().now()
                 self.get_logger().info(
                     "FINAL_DOCK 到达死位置，进入压紧段（低速继续倒船，"
-                    "等待无线充电信号/夹爪抓住）"
+                    "等待夹爪抓住）"
                 )
-            if self._charge_push_check(dt):
-                return
             self._final_push_elapsed += dt
             if self._final_push_elapsed > float(p("final_push_time_sec").value):
                 self._abort_corridor("FINAL_PUSH_TIMEOUT")

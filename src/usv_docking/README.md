@@ -158,6 +158,10 @@ python3 -m pytest src/usv_docking/test/ -q
   `jump_reject_unlock_frames` 5→**12**（8.5Hz 下 0.6s→1.4s，噪声簇不再秒解锁）、
   `reloc_guard_escape_sec` 3.0→**8.0**（缓转向伪影簇常持续 3s+ 被误放行，当日 8 次）。
   单测 109/109（含新增 `test_approach_cone_disabled_restores_legacy` 旧行为对照）。
+  ③**当日下午删充电信号判据**——rs485 驱动同事改版后 `/wireless_charger_state` 只在
+  夹爪抓住后才发布（监测 service 删除、充电线程抓住后自启），充电判据不可能先触发，
+  FSM 四个 charge_* 参数与 `_charge_push_check` 全部移除，**成功判定统一为 WaitIO
+  抓住单一口径**；单测 106/106。
 
 
 ---

@@ -773,18 +773,12 @@ def test_claw_enabled_gates_start_and_undock(fsm):
     assert fsm._state == DockState.FAILED
 
 
-# ══════════════ FINAL_DOCK 压紧段 + 无线充电判据（2026-10-05）══════════════
-
-
-class _ChargeMsg:
-    def __init__(self, charging_status=1, error_code=0):
-        self.charging_status = charging_status
-        self.error_code = error_code
+# ══════════════ FINAL_DOCK 压紧段（2026-10-05；2026-10-08 删充电判据）══════════════
 
 
 def test_final_push_timeout_aborts(fsm):
-    """压紧段超时：到死位置后位置不再判成功；无充电监测（服务不可用降级）
-    且无夹爪时，压紧超 final_push_time_sec -> ABORT_EXIT 重试。"""
+    """压紧段超时：到死位置后位置不再判成功；夹爪始终未抓住，
+    压紧超 final_push_time_sec -> ABORT_EXIT 重试。"""
     _start(fsm)
     fsm._enter(DockState.FINAL_DOCK)
     # 首次到死位置：进入压紧段（记时间戳），不判 DOCKED
@@ -809,79 +803,6 @@ def test_final_push_timeout_aborts(fsm):
     assert fsm._state == DockState.IDLE
     assert fsm._needs_reapproach is True
     assert fsm._final_push_start is None
-
-
-def test_charge_stable_docks(fsm):
-    """充电判据（主）：压紧段内好样本（charging_status∈{1,5} 且 error_code==0）
-    连续稳定 charge_stable_sec -> DOCKED；坏样本清零计时。"""
-    _start(fsm)
-    fsm._enter(DockState.FINAL_DOCK)
-    fsm._charge_monitor_on = True  # 模拟监测已打开
-    _feed(fsm, x=0.05, y=0.0, yaw=math.pi)
-    fsm._transitions(0.1)
-    assert fsm._final_push_start is not None
-    # 好样本累计 1.9s（< 2.0s）：不判成功
-    for _ in range(19):
-        fsm._charge_cb(_ChargeMsg())
-        _feed(fsm, x=0.05, y=0.0, yaw=math.pi)
-        fsm._transitions(0.1)
-    assert fsm._state == DockState.FINAL_DOCK
-    # 坏样本清零：再多 1.9s 好样本仍不够（累计重新从 0 起）
-    fsm._charge_cb(_ChargeMsg(charging_status=0, error_code=1))
-    for _ in range(19):
-        fsm._charge_cb(_ChargeMsg())
-        _feed(fsm, x=0.05, y=0.0, yaw=math.pi)
-        fsm._transitions(0.1)
-    assert fsm._state == DockState.FINAL_DOCK
-    # 再补 0.2s 好样本：连续满 2.0s -> DOCKED
-    for _ in range(3):
-        fsm._charge_cb(_ChargeMsg(charging_status=5))
-        _feed(fsm, x=0.05, y=0.0, yaw=math.pi)
-        fsm._transitions(0.1)
-    assert fsm._state == DockState.DOCKED
-    assert fsm._success is True
-
-
-def test_charge_signal_lost_aborts(fsm):
-    """无夹爪模式：压紧段内充电话题超 charge_status_timeout_sec 无消息
-    （监测已打开但始终无帧）-> ABORT_EXIT（CHARGE_SIGNAL_LOST）。"""
-    _start(fsm)
-    fsm._enter(DockState.FINAL_DOCK)
-    fsm._charge_monitor_on = True
-    _feed(fsm, x=0.05, y=0.0, yaw=math.pi)
-    fsm._transitions(0.1)
-    assert fsm._final_push_start is not None
-    # 回拨压紧起点模拟 3.5s 无消息（> 断流判据 3s，< 压紧超时 6s，先触发断流）
-    fsm._final_push_start = fsm.get_clock().now() - Duration(seconds=3.5)
-    _feed(fsm, x=0.05, y=0.0, yaw=math.pi)
-    fsm._transitions(0.1)
-    assert fsm._state == DockState.ABORT_EXIT
-    assert fsm._abort_reason == "CHARGE_SIGNAL_LOST"
-
-
-def test_charge_signal_lost_degrades_when_claw_enabled(fsm):
-    """夹爪模式：充电话题断流不中止（WaitIO 在跑），压紧段继续，
-    夹爪 DI 后置位仍应 DOCKED（2026-10-06 现场：DI 比断流中止晚 0.1s）。"""
-    _enable_claw(fsm)
-    _start(fsm)
-    fsm._control_do_result = (True, "ok")
-    fsm._transitions(0.1)
-    fsm._enter(DockState.FINAL_DOCK)
-    fsm._charge_monitor_on = True
-    _feed(fsm, x=0.05, y=0.0, yaw=math.pi)
-    fsm._transitions(0.1)
-    assert fsm._final_push_start is not None
-    # 断流超 3s：不中止，仅降级
-    fsm._final_push_start = fsm.get_clock().now() - Duration(seconds=3.5)
-    _feed(fsm, x=0.05, y=0.0, yaw=math.pi)
-    fsm._transitions(0.1)
-    assert fsm._state == DockState.FINAL_DOCK
-    assert fsm._charge_signal_dead is True
-    # 随后夹爪 DI 置位（WaitIO 成功）-> DOCKED
-    fsm._claw_grabbed = True
-    _feed(fsm, x=0.05, y=0.0, yaw=math.pi)
-    fsm._transitions(0.1)
-    assert fsm._state == DockState.DOCKED
 
 
 def test_start_requests_dock_open_when_claw_enabled(fsm):
