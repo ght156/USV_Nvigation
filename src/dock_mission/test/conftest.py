@@ -102,7 +102,7 @@ def mock_ros_node(ros_context):
         "docking_goal_checker_id": "docking_goal_checker",
         "cruise_xy_goal_tolerance": 1.0,
         "cruise_yaw_goal_tolerance": 1.0,
-        "docking_xy_goal_tolerance": 0.6,
+        "docking_xy_goal_tolerance": 0.5,
         "docking_yaw_goal_tolerance": 0.15,
         "dock_mission_id": "dock_staging",
     }

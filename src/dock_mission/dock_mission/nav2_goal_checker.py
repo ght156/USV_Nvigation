@@ -27,7 +27,7 @@ CRUISE_PROFILE = GoalCheckerProfile(
 
 DOCKING_PROFILE = GoalCheckerProfile(
     name="docking_goal_checker",
-    xy_goal_tolerance=0.6,
+    xy_goal_tolerance=0.5,
     yaw_goal_tolerance=0.15,
 )
 
