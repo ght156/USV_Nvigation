@@ -38,14 +38,19 @@ def default_database_path() -> Path:
     return share / "config" / "dock_database.yaml"
 
 
+def _load_bays(database_path: Optional[str | Path]) -> tuple[Path, dict[str, Any]]:
+    path = Path(database_path) if database_path else default_database_path()
+    with path.open(encoding="utf-8") as f:
+        root = yaml.safe_load(f) or {}
+    return path, root.get("bays") or {}
+
+
 def load_bay(
     bay_id: str,
     database_path: Optional[str | Path] = None,
 ) -> BayRecord:
-    path = Path(database_path) if database_path else default_database_path()
-    with path.open(encoding="utf-8") as f:
-        root = yaml.safe_load(f) or {}
-    bays: dict[str, Any] = root.get("bays") or {}
+    """加载预泊点记录（gnss_staging / map_staging / standoff_m）。"""
+    path, bays = _load_bays(database_path)
     if bay_id not in bays:
         raise KeyError(f"bay '{bay_id}' not in {path}")
     data = bays[bay_id]

@@ -38,8 +38,7 @@ from tf2_ros.buffer import Buffer
 from tf2_ros.transform_listener import TransformListener
 
 from m_common.action import NavigateTask
-from m_common.msg import NavSafetyEvent
-from m_common.srv import CancelMission, SendWaypoints, SetPause, EmergencyStop
+from m_common.srv import CancelMission, SendWaypoints, SetPause
 
 from workspace_nav.gps_map_conversion import (
     atomic_write_json,
@@ -76,6 +75,50 @@ def yaw_is_specified(yaw: float) -> bool:
     return math.isfinite(yaw) and -360.0 <= yaw <= 360.0
 
 
+# 航点容差必须与 Nav2 的到达判定同源：Nav2 在 xy_goal_tolerance 内就判"到达"，
+# mission_bridge 若拿更小的容差去判"过近跳过"，示教碎点（0.1~0.3 m 的点）既不会被
+# 跳过、又会被 Nav2 判到达；此时到点朝向若按该碎段自身方向补全会拿到噪声航向，
+# 船只能原地对朝向，而 progress_checker 只认平移 → 每 30 s 判一次"没进展"。
+# 故 waypoint_tolerance_m <= 0 时自动读 Nav2 参数文件里的 xy_goal_tolerance。
+NAV2_PARAMS_DEFAULT_NAME = "nav2_params_chengfeng.yaml"
+
+
+def read_nav2_xy_goal_tolerance(path: Path) -> Optional[float]:
+    """从 Nav2 参数 YAML 读 controller_server 下 goal checker 的 xy_goal_tolerance。
+
+    兼容 goal checker 改名：先按 goal_checker_plugins 列出的名字找，再退化为扫描
+    controller_server 下任意含 xy_goal_tolerance 的参数块。任何异常都返回 None。
+    """
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            cfg = yaml.safe_load(f) or {}
+    except Exception:
+        return None
+
+    server = cfg.get("controller_server")
+    params = server.get("ros__parameters") if isinstance(server, dict) else None
+    if not isinstance(params, dict):
+        return None
+
+    names = params.get("goal_checker_plugins") or []
+    if isinstance(names, str):
+        names = [names]
+    for name in list(names) + ["general_goal_checker"]:
+        block = params.get(name)
+        if isinstance(block, dict) and "xy_goal_tolerance" in block:
+            try:
+                return float(block["xy_goal_tolerance"])
+            except (TypeError, ValueError):
+                continue
+    for block in params.values():
+        if isinstance(block, dict) and "xy_goal_tolerance" in block:
+            try:
+                return float(block["xy_goal_tolerance"])
+            except (TypeError, ValueError):
+                continue
+    return None
+
+
 class MissionState(str, Enum):
     WAITING_SYSTEM = "WAITING_SYSTEM"
     IDLE = "IDLE"
@@ -83,7 +126,6 @@ class MissionState(str, Enum):
     PAUSED = "PAUSED"
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
-    EMERGENCY = "EMERGENCY"
 
 
 def _find_workspace_root() -> Optional[Path]:
@@ -189,7 +231,9 @@ class MissionBridgeNode(Node):
         self.declare_parameter("map_datum_ref_key", "ref_gnss_10")
         self.declare_parameter("projection", "enu")
         self.declare_parameter("odom_topic", "/odometry/filtered")
-        self.declare_parameter("waypoint_tolerance_m", 1.5)
+        # <=0 = 自动读 Nav2 参数文件的 xy_goal_tolerance（见 _resolve_waypoint_tolerance）
+        self.declare_parameter("waypoint_tolerance_m", 0.0)
+        self.declare_parameter("nav2_params_path", "")
         self.declare_parameter("tf_check_period_sec", 1.0)
         self.declare_parameter("debug_mode", False)
         self.declare_parameter("allow_replace_running_mission", False)
@@ -197,7 +241,6 @@ class MissionBridgeNode(Node):
         self.declare_parameter("target_buoy_force_rewrite", False)
         self.declare_parameter("waypoint_commit_delay_sec", 0.45)
         self.declare_parameter("mission_cancel_topic", "")
-        self.declare_parameter("discard_watchdog_sec", 4.0)
         self.declare_parameter("suppress_passive_waypoints_after_cancel", True)
         self.declare_parameter("target_buoy_min_write_period_sec", 0.0)
         self.declare_parameter("nav_zones_topic", "/nav_zones/current")
@@ -244,7 +287,7 @@ class MissionBridgeNode(Node):
         else:
             try:
                 share = Path(get_package_share_directory("workspace_nav"))
-                map_path = (share / "config" / "map_hk.yaml").resolve()
+                map_path = (share / "config" / "map.yaml").resolve()
             except Exception as e:
                 self.get_logger().fatal(f"无法解析默认 map_yaml: {e}")
                 raise SystemExit(1) from e
@@ -302,7 +345,7 @@ class MissionBridgeNode(Node):
         )
 
         self._odom_topic = self.get_parameter("odom_topic").value
-        self._tolerance = float(self.get_parameter("waypoint_tolerance_m").value)
+        self._tolerance = self._resolve_waypoint_tolerance(map_path)
 
         self._sm_lock = threading.RLock()
         self._state = MissionState.WAITING_SYSTEM
@@ -329,10 +372,6 @@ class MissionBridgeNode(Node):
             .get_parameter_value()
             .string_value.strip()
         )
-        self._discard_watchdog_sec = max(
-            0.0, float(self.get_parameter("discard_watchdog_sec").value)
-        )
-
         self._suppress_passive_after_cancel = bool(
             self.get_parameter("suppress_passive_waypoints_after_cancel").value
         )
@@ -360,7 +399,7 @@ class MissionBridgeNode(Node):
         self._delayed_mission: Optional[Tuple[List[Tuple[float, float]], str]] = None
         self._waypoint_commit_timer: Optional[Any] = None
         self._deb_route: Optional[
-            Tuple[List[Tuple[float, float]], str, bool]
+            Tuple[List[Tuple[float, float]], str, bool, str, str]
         ] = None
 
         self._mission_cancel_topic = mc_top.strip()
@@ -415,14 +454,11 @@ class MissionBridgeNode(Node):
         self._srv_pause = self.create_service(
             SetPause, 'mission_bridge/set_pause',
             self._cb_set_pause, callback_group=self._srv_cg)
-        self._srv_emerg = self.create_service(
-            EmergencyStop, 'mission_bridge/emergency_stop',
-            self._cb_emergency_stop, callback_group=self._srv_cg)
         self._srv_cancel = self.create_service(
             CancelMission, 'mission_bridge/cancel_mission',
             self._cb_cancel_mission, callback_group=self._srv_cg)
         self.get_logger().info(
-            "Service servers ready: send_waypoints, set_pause, emergency_stop, cancel_mission")
+            "Service servers ready: send_waypoints, set_pause, cancel_mission")
         self._publish_status_detail()
 
         # ------------------------------------------------------------------ #
@@ -441,12 +477,6 @@ class MissionBridgeNode(Node):
         self._nt_phase: int = NavigateTask.Feedback.PHASE_VALIDATING
         self._nt_nav2_feedback_seen = False
         self._nt_feedback_timer: Optional[Any] = None
-        # 越界原因挂起：safety_event 与 emergency_stop 竞速时优先报 GEOFENCE
-        self._nt_geofence_pending = False
-        # 最近一次越界事件的围栏类型( exclusion/inclusion )与进出( ENTER/EXIT )，
-        # 用于把 GEOFENCE 细分写进 NavigateTask Result.error_code，供上层区分 2001/2002。
-        self._nt_geofence_type = ""
-        self._nt_geofence_transition = ""
         self._nav_action_server = ActionServer(
             self,
             NavigateTask,
@@ -454,14 +484,6 @@ class MissionBridgeNode(Node):
             execute_callback=self._nt_execute,
             goal_callback=self._nt_goal_cb,
             cancel_callback=self._nt_cancel_cb,
-            callback_group=self._nt_cb_group,
-        )
-        _safety_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE)
-        self.create_subscription(
-            NavSafetyEvent,
-            "/mission_bridge/safety_event",
-            self._cb_safety_event,
-            _safety_qos,
             callback_group=self._nt_cb_group,
         )
         self.get_logger().info(
@@ -636,9 +658,10 @@ class MissionBridgeNode(Node):
             bundle = getattr(self, "_deb_route", None)
             if bundle is None:
                 return
-            bwps, bmh, bexplicit = bundle
+            bwps, bmh, bexplicit, bmid, bcid = bundle
             self._consume_waypoint_command(
-                bwps, bmh, explicit_replan=bexplicit
+                bwps, bmh, explicit_replan=bexplicit,
+                mission_id=bmid, command_id=bcid,
             )
 
         self._waypoint_commit_timer = self.create_timer(
@@ -647,7 +670,7 @@ class MissionBridgeNode(Node):
         )
 
     def _apply_mission_cancel(self) -> Tuple[bool, str]:
-        """Cancel mission / clear EMERGENCY.
+        """Cancel mission.
 
         Shared by upper-layer ``cancel_mission`` Service and GCS ``mission_cancel_topic``
         (default ``/gcs_mission/cancel``).
@@ -672,24 +695,6 @@ class MissionBridgeNode(Node):
                 pass
             self._delayed_mission_timer = None
         self._delayed_mission = None
-
-        if state == MissionState.EMERGENCY:
-            self._suppress_passive_waypoints = False
-            self._paused_nav_xy = []
-            self._paused_index = 0
-            with self._sm_lock:
-                self._nav_xy = []
-                self.current_index = 0
-                self._running_mission_hash = None
-                self._transition_state(MissionState.IDLE, transition_reason="cancel")
-            self._nt_terminate(
-                NavigateTask.Result.RESULT_CANCELED,
-                "CANCELED",
-                "mission cleared via cancel_mission",
-                "abort",
-            )
-            self.get_logger().info("EMERGENCY cleared via cancel → IDLE")
-            return True, "Emergency cleared, state IDLE"
 
         if state == MissionState.PAUSED:
             self._paused_nav_xy = []
@@ -735,6 +740,8 @@ class MissionBridgeNode(Node):
         mh: str,
         *,
         explicit_replan: bool = False,
+        mission_id: str = "",
+        command_id: str = "",
     ) -> None:
         operator_explicit = bool(explicit_replan)
         if operator_explicit:
@@ -766,12 +773,6 @@ class MissionBridgeNode(Node):
             if self._state == MissionState.WAITING_SYSTEM:
                 self.get_logger().warning(
                     "System not ready (WAITING_SYSTEM); waypoint ignored."
-                )
-                return
-
-            if self._state == MissionState.EMERGENCY:
-                self.get_logger().warning(
-                    "EMERGENCY active — waypoint ignored (send cancel to clear)"
                 )
                 return
 
@@ -826,6 +827,11 @@ class MissionBridgeNode(Node):
                         "same mission as last successful run ignored (waiting for new plan)"
                     )
                 return
+
+        # 已通过全部拒绝/去重检查，任务确定会被执行——此时才更新状态上报用的 id，
+        # 避免被丢弃的被动/重复 /waypoint 消息覆盖正在上报的 task_id/command_id。
+        self._current_mission_id = mission_id if mission_id else None
+        self._current_command_id = command_id if command_id else None
 
         if preempt:
             self._preempt_running_mission_for_new_waypoints(for_replace=True)
@@ -914,9 +920,6 @@ class MissionBridgeNode(Node):
         except Exception:
             pass
 
-        self._current_mission_id = mission_id if mission_id else None
-        self._current_command_id = command_id if command_id else None
-
         mh = waypoint_mission_hash(wps, mission_id)
 
         if mission_id:
@@ -938,7 +941,7 @@ class MissionBridgeNode(Node):
                 )
             return
 
-        self._deb_route = (wps, mh, explicit)
+        self._deb_route = (wps, mh, explicit, mission_id or "", command_id)
         self._reschedule_waypoint_commit_timer()
 
     def _preempt_running_mission_for_new_waypoints(self, *, for_replace: bool = False) -> None:
@@ -1061,6 +1064,49 @@ class MissionBridgeNode(Node):
         with self._pose_lock:
             return self._current_pose_xy
 
+    def _resolve_waypoint_tolerance(self, map_path: Path) -> float:
+        """航点容差：显式参数优先；<=0 时自动读 Nav2 的 xy_goal_tolerance。
+
+        两者必须同源，否则短航段（示教碎点）会被 Nav2 判到达、又不会被这里跳过。
+        """
+        explicit = float(self.get_parameter("waypoint_tolerance_m").value)
+        if explicit > 0.0:
+            self.get_logger().info(f"waypoint_tolerance_m: {explicit:.2f} m (显式参数)")
+            return explicit
+
+        cand = (
+            self.get_parameter("nav2_params_path")
+            .get_parameter_value()
+            .string_value.strip()
+        )
+        if cand:
+            nav2_path = Path(cand).expanduser().resolve()
+        else:
+            nav2_path = (map_path.parent / NAV2_PARAMS_DEFAULT_NAME).resolve()
+            if not nav2_path.is_file():
+                try:
+                    share = Path(get_package_share_directory("workspace_nav"))
+                    alt = (share / "config" / NAV2_PARAMS_DEFAULT_NAME).resolve()
+                    if alt.is_file():
+                        nav2_path = alt
+                except Exception:
+                    pass
+
+        tol = read_nav2_xy_goal_tolerance(nav2_path)
+        if tol is None or tol <= 0.0:
+            fallback = 1.5
+            self.get_logger().warning(
+                f"waypoint_tolerance_m 自动读取失败（{nav2_path}），回退 {fallback:.2f} m；"
+                "如需固定值请显式设置 waypoint_tolerance_m"
+            )
+            return fallback
+
+        self.get_logger().info(
+            f"waypoint_tolerance_m: {tol:.2f} m "
+            f"(自动 ← {nav2_path} 的 goal checker xy_goal_tolerance)"
+        )
+        return tol
+
     def create_pose_msg(self, x: float, y: float, z: float = 0.0, yaw: float = 0.0) -> PoseStamped:
         # yaw 为度（接口统一）；Nav2/tf2 位姿四元数用弧度，这里才转。
         yaw_rad = math.radians(float(yaw))
@@ -1091,6 +1137,9 @@ class MissionBridgeNode(Node):
 
         rx, ry = self._robot_xy()
         dist = math.hypot(x - rx, y - ry)
+        # 过近静默跳过：不对外发"单点到达/跳过"事件，仅心跳 /mission_bridge/status_detail、
+        # /nav_status 与 NavigateTask feedback 的 seq 计数间接 +1；跳过最后一个航点时
+        # 由 _finalize_if_done 走正常完成路径（COMPLETED / RESULT_SUCCESS）。
         if dist <= self._tolerance:
             self.get_logger().info(
                 f"Waypoint {self.current_index + 1} within tolerance; skipping."
@@ -1366,7 +1415,7 @@ class MissionBridgeNode(Node):
         with self._sm_lock:
             if self._state in (MissionState.COMPLETED, MissionState.FAILED):
                 self._transition_state(MissionState.IDLE, transition_reason="complete")
-            # PAUSED and EMERGENCY do NOT auto-transition to IDLE
+            # PAUSED does NOT auto-transition to IDLE
 
 
     # ----------------------------------------------------------------------- #
@@ -1500,17 +1549,16 @@ class MissionBridgeNode(Node):
             self.get_logger().warning(response.message)
             return response
 
-        if current_state == MissionState.EMERGENCY:
-            response.success = False
-            response.message = "In EMERGENCY — call cancel_mission before sending waypoints"
-            self.get_logger().warning(response.message)
-            return response
-
         ll: List[Tuple[float, float]] = []
         yaws: List[float] = []
         for wp in wps:
             lat = float(wp.latitude)
             lon = float(wp.longitude)
+            if not (math.isfinite(lat) and math.isfinite(lon)):
+                response.success = False
+                response.message = f"Waypoint lat/lon not finite: ({lat}, {lon})"
+                self.get_logger().warning(response.message)
+                return response
             if lat == 0.0 and lon == 0.0:
                 response.success = False
                 response.message = "Invalid waypoint (0, 0)"
@@ -1619,11 +1667,6 @@ class MissionBridgeNode(Node):
             response.message = "System not ready (WAITING_SYSTEM)"
             return response
 
-        if current_state == MissionState.EMERGENCY:
-            response.success = False
-            response.message = "In EMERGENCY — call cancel_mission first"
-            return response
-
         if pause:
             if current_state == MissionState.RUNNING:
                 self._pause_mission()
@@ -1658,7 +1701,7 @@ class MissionBridgeNode(Node):
 
     def _cb_cancel_mission(self, _request: CancelMission.Request,
                            response: CancelMission.Response) -> CancelMission.Response:
-        """Service: 取消任务 / 退出急停 (CancelMission)."""
+        """Service: 取消任务 (CancelMission)."""
         self.get_logger().info("[service] cancel_mission")
         success, message = self._apply_mission_cancel()
         response.success = success
@@ -1669,25 +1712,8 @@ class MissionBridgeNode(Node):
             self.get_logger().warning(f"[service] cancel_mission: {message}")
         return response
 
-    def _cb_emergency_stop(self, request: EmergencyStop.Request,
-                           response: EmergencyStop.Response) -> EmergencyStop.Response:
-        """Service: 急停 (EmergencyStop)."""
-        with self._sm_lock:
-            current_state = self._state
-
-        if current_state == MissionState.EMERGENCY:
-            response.success = True
-            response.message = "Already in EMERGENCY (idempotent)"
-            return response
-
-        self._emergency_stop()
-        response.success = True
-        response.message = "Emergency stop executed"
-        self.get_logger().error("[service] emergency_stop → EMERGENCY")
-        return response
-
     # ----------------------------------------------------------------------- #
-    # PAUSED / EMERGENCY internal logic
+    # PAUSED internal logic
     # ----------------------------------------------------------------------- #
 
     def _pause_mission(self) -> None:
@@ -1718,57 +1744,6 @@ class MissionBridgeNode(Node):
         self.get_logger().info(
             f"RESUMED — continuing from waypoint {self.current_index + 1}/{len(self._nav_xy)}"
         )
-
-    def _emergency_stop(self) -> None:
-        """Cancel everything, clear state, enter EMERGENCY. No auto-IDLE."""
-        for tmr_attr in ("_waypoint_commit_timer", "_delayed_mission_timer"):
-            tmr = getattr(self, tmr_attr, None)
-            if tmr is not None:
-                try:
-                    tmr.cancel()
-                except Exception:
-                    pass
-                setattr(self, tmr_attr, None)
-
-        self._mission_token += 1
-        self._cancel_active_nav2_goal()
-
-        with self._sm_lock:
-            self._nav_xy = []
-            self.current_index = 0
-            self._paused_nav_xy = []
-            self._paused_index = 0
-            self._running_mission_hash = None
-            self._transition_state(MissionState.EMERGENCY)
-
-        self._suppress_passive_waypoints = True
-        self._deb_route = None
-        self._startpulse_route = None
-        self._delayed_mission = None
-        self._clear_waypoint_file()
-
-        # zone_monitor 越界与急停竞速时优先报 GEOFENCE_VIOLATION
-        with self._nt_lock:
-            geofence_pending = self._nt_geofence_pending
-            geofence_type = self._nt_geofence_type
-            geofence_transition = self._nt_geofence_transition
-        if geofence_pending:
-            self._nt_terminate(
-                NavigateTask.Result.RESULT_GEOFENCE_VIOLATION,
-                self._geofence_error_code(geofence_type, geofence_transition),
-                "electronic geofence violation",
-                "abort",
-            )
-        else:
-            self._nt_terminate(
-                NavigateTask.Result.RESULT_EMERGENCY_STOP,
-                "EMERGENCY_STOP",
-                "emergency stop during mission",
-                "abort",
-            )
-
-        self._publish_status_detail(error_code="EMERGENCY_STOP")
-        self.get_logger().error("EMERGENCY STOP — all state cleared")
 
     # ----------------------------------------------------------------------- #
     # NavigateTask action server（Decision 对接）
@@ -1803,9 +1778,6 @@ class MissionBridgeNode(Node):
         if state == MissionState.WAITING_SYSTEM:
             self.get_logger().warning("[navigate] reject: system not ready (WAITING_SYSTEM)")
             return GoalResponse.REJECT
-        if state == MissionState.EMERGENCY:
-            self.get_logger().warning("[navigate] reject: EMERGENCY active")
-            return GoalResponse.REJECT
         if state in (MissionState.RUNNING, MissionState.PAUSED):
             # 不自动抢占（含 NavigateTask 自身任务与老通道任务），由 Decision 先 Cancel
             self.get_logger().warning(
@@ -1837,7 +1809,7 @@ class MissionBridgeNode(Node):
     def _nt_execute(self, goal_handle: Any) -> NavigateTask.Result:
         """阻塞式执行（依赖 MultiThreadedExecutor + ReentrantCallbackGroup）。
 
-        启动任务后等待终止事件；终止由成功/失败/取消/急停/越界各路径通过
+        启动任务后等待终止事件；终止由成功/失败/取消各路径通过
         _nt_terminate 触发（先发先赢），此处保证被接受的 goal 恰好返回一次 Result。
         """
         R = NavigateTask.Result
@@ -1854,9 +1826,6 @@ class MissionBridgeNode(Node):
                 self._nt_result_info = None
                 self._nt_phase = NavigateTask.Feedback.PHASE_VALIDATING
                 self._nt_nav2_feedback_seen = False
-                self._nt_geofence_pending = False
-                self._nt_geofence_type = ""
-                self._nt_geofence_transition = ""
         if slot_taken:
             # 与另一 goal 的极端竞态：后到者直接终止
             self.get_logger().warning("[navigate] abort: another goal registered first")
@@ -1898,7 +1867,7 @@ class MissionBridgeNode(Node):
                 # goal_cb 之后状态发生变化的竞态兜底
                 code = (
                     R.RESULT_NOT_READY
-                    if state in (MissionState.WAITING_SYSTEM, MissionState.EMERGENCY)
+                    if state == MissionState.WAITING_SYSTEM
                     else R.RESULT_BUSY
                 )
                 self._nt_terminate(code, "STATE_" + state.value,
@@ -1946,7 +1915,7 @@ class MissionBridgeNode(Node):
                       message: str, how: str) -> None:
         """终止当前 NavigateTask goal（幂等，先发先赢）。
 
-        由所有任务终止路径（成功/失败/取消/抢占/急停/越界/失联）调用；
+        由所有任务终止路径（成功/失败/取消/抢占/失联）调用；
         无活动 goal 时为空操作，不影响老通道行为。
         """
         with self._sm_lock:
@@ -1972,24 +1941,6 @@ class MissionBridgeNode(Node):
         except Exception as ex:
             self.get_logger().warning(f"[navigate] terminal transition ({how}): {ex}")
         self._nt_done.set()
-
-    @staticmethod
-    def _geofence_error_code(fence_type: str, transition: str) -> str:
-        """把越界原因细分写进 Result.error_code，供上层区分禁航区(exclusion)与作业区(inclusion)。
-
-        保持 ``GEOFENCE_VIOLATION`` 前缀（兼容只看前缀的调用方），再追加
-        ``围栏类型:进出方向``。例如：
-            GEOFENCE_VIOLATION:EXCLUSION:ENTER   （闯入禁航区 → 2001）
-            GEOFENCE_VIOLATION:INCLUSION:EXIT    （驶出作业区 → 2002）
-        上层 decision 按 error_code 是否包含 ``INCLUSION`` 区分即可，无需改嵌软。
-        """
-        t = (fence_type or "").upper()
-        d = (transition or "").upper()
-        if t and d:
-            return "GEOFENCE_VIOLATION:{}:{}".format(t, d)
-        if t:
-            return "GEOFENCE_VIOLATION:{}".format(t)
-        return "GEOFENCE_VIOLATION"
 
     @staticmethod
     def _map_nav2_failure(nav2_error_code: int, nav2_error_msg: str) -> int:
@@ -2070,34 +2021,6 @@ class MissionBridgeNode(Node):
             gh.publish_feedback(fb)
         except Exception:
             pass
-
-    def _cb_safety_event(self, msg: NavSafetyEvent) -> None:
-        """zone_monitor 异步安全事件：越界时终止活动 NavigateTask goal。"""
-        if msg.event_code != "GEOFENCE_VIOLATION":
-            return
-        if msg.enabled:
-            with self._nt_lock:
-                self._nt_geofence_pending = True
-                self._nt_geofence_type = msg.fence_type
-                self._nt_geofence_transition = msg.transition
-                active = self._nt_goal_handle is not None
-            if active:
-                self.get_logger().error(
-                    f"[navigate] geofence violation: fence={msg.fence_id} "
-                    f"type={msg.fence_type} transition={msg.transition}"
-                )
-                self._nt_terminate(
-                    NavigateTask.Result.RESULT_GEOFENCE_VIOLATION,
-                    self._geofence_error_code(msg.fence_type, msg.transition),
-                    "electronic geofence violation (fence={} {} {})".format(
-                        msg.fence_id, msg.fence_type, msg.transition),
-                    "abort",
-                )
-        else:
-            with self._nt_lock:
-                self._nt_geofence_pending = False
-                self._nt_geofence_type = ""
-                self._nt_geofence_transition = ""
 
 
 def main(args: Optional[list] = None) -> None:

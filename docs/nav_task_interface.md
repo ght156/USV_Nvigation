@@ -6,7 +6,7 @@
 > 本文只写**对外契约**：Service 名、反馈 Topic、JSON 格式、状态机行为。  
 > **上层控制一律走 Service**；**上层反馈一律订 Topic**（`/nav_status`、`/task_event`）。  
 > 船端 launch 参数、里程计/GPS 话题名、YAML 配置属**船端集成**，不在本文。  
-> **srv 源文件**：`src/m_common/srv/`（`SendWaypoints`、`SetPause`、`EmergencyStop`、`CancelMission`）
+> **srv 源文件**：`src/m_common/srv/`（`SendWaypoints`、`SetPause`、`CancelMission`）
 
 ---
 
@@ -16,7 +16,7 @@
 
 | 角色 | 控制方式 | 反馈方式 |
 |------|----------|----------|
-| **第三方上层**（竞赛主控等） | 四个 **Service**（§5.1） | 订 **`/nav_status`**、**`/task_event`** |
+| **第三方上层**（竞赛主控等） | 三个 **Service**（§5.1） | 订 **`/nav_status`**、**`/task_event`** |
 | **地面站 GCS**（船东自用） | **Topic**（§5.2，经纬度 JSON 等） | 可订 `/nav_status`；可选 `/mission_bridge/state` |
 
 ```
@@ -24,14 +24,13 @@
 ──────────────────────              ────────
 /mission_bridge/send_waypoints  ──►  map 坐标航线
 /mission_bridge/set_pause       ──►  暂停 / 继续
-/mission_bridge/emergency_stop  ──►  急停
-/mission_bridge/cancel_mission  ──►  取消 / 退出急停
+/mission_bridge/cancel_mission  ──►  取消
 
 地面站 GCS（Topic 下发，保留）          mission_bridge
 ──────────────────────              ────────
 /waypoint（可配）                 ──►  WGS84 JSON 航线（debounce/immediate/start_pulse）
 /color_code（可配）               ──►  目标色 → target_buoy.json
-/gcs_mission/cancel（可配）       ──►  取消 / 退出急停（与 cancel_mission 同逻辑）
+/gcs_mission/cancel（可配）       ──►  取消（与 cancel_mission 同逻辑）
 /gcs_mission/start（可配）        ──►  仅 start_pulse 模式下的「开始」脉冲
 
 上层 + GCS（Topic 订阅反馈）            nav_status_aggregator
@@ -42,7 +41,7 @@
 ```
 
 - **上层请勿使用 GCS Topic 发任务**；**GCS 请勿依赖上层 Service**（各用各的入口即可）。
-- **`cancel_mission` Service 与 `/gcs_mission/cancel` Topic 等效**，共用同一套取消/清急停逻辑；地面站继续用 Topic 即可，无需改 Service。
+- **`cancel_mission` Service 与 `/gcs_mission/cancel` Topic 等效**，共用同一套取消逻辑；地面站继续用 Topic 即可，无需改 Service。
 - 飞控解锁、OFFBOARD、速度桥等由**飞控/船端其它模块**处理，**不属于**本文导航对接范围。
 
 ### 1.1 内部架构（上层无需关心，仅供理解数据来源）
@@ -111,7 +110,7 @@ TF: odom → base_link           ──►  local_costmap (global_frame: odom)
 | 项目 | 说明 |
 |------|------|
 | 类型 | `nav_msgs/Odometry` |
-| QoS | BEST_EFFORT, depth≥10 |
+| QoS | **RELIABLE**, depth ≥ 10（导航侧订阅端为 RELIABLE；RELIABLE 发布端也兼容 BEST_EFFORT 订阅端，反向不兼容） |
 | 频率 | ≥ 20 Hz（低于此频率会被判 DEGRADED） |
 | `header.frame_id` | `"odom"` |
 | `child_frame_id` | `"base_link"` |
@@ -149,6 +148,12 @@ TF: odom → base_link           ──►  local_costmap (global_frame: odom)
 - Nav2 通过 `map → odom → base_link` 链得到全局无漂移位姿
 
 **SLAM 直接输出 `map → base_link`** 也可以工作，但需要将 Nav2 local_costmap 的 `global_frame` 改为 `map`，且失去里程计与全局位姿的解耦能力。推荐使用标准两层结构。
+
+**TF 时间戳约定**：两条 TF 都用**定位源 odom 消息的时间戳**（与 `/slam/localization` 的 `header.stamp` 同源），
+无有效时间戳时回退 `now()`。`map→odom` 虽是准静态量，但**不再**使用"打 `now()+0.2s` 未来时间戳"的旧做法
+（`usv_map_odom_tf` 的 `tf_future_offset_sec` 已废弃移除）。
+
+**`/tf`、`/tf_static` 的 QoS 无需修改**：由 tf2_ros 统一管理（RELIABLE，depth 100）。
 
 ### 2.3 坐标系对齐（SLAM 与导航栅格地图的关系）
 
@@ -206,12 +211,10 @@ SLAM 融合 GNSS 初始化即可输出 map 系位姿，无需 `/initialpose`。
 
 | 配置文件 | 参数路径 | 当前值 | 改为 SLAM 后 |
 |----------|----------|--------|-------------|
-| `nav2_params_real_mavros.yaml` | `bt_navigator.odom_topic` | `/mavros/local_position/odom` | `/slam/localization` |
-| `nav2_params_real_mavros.yaml` | `velocity_smoother.odom_topic` | `/mavros/local_position/odom` | `/slam/localization` |
-| `nav2_mavros_odom_overlay.yaml` | `bt_navigator.odom_topic` | `/mavros/local_position/odom` | `/slam/localization` |
-| `nav2_mavros_odom_overlay.yaml` | `velocity_smoother.odom_topic` | `/mavros/local_position/odom` | `/slam/localization` |
-| `mission_stack.real_boat.yaml` | `mission_bridge.odom_topic` | `/mavros/local_position/odom` | `/slam/localization` |
-| `mission_bridge.launch.py` | `odom_topic` 参数默认值 | `/mavros/local_position/odom` | `/slam/localization` |
+| `nav2_params_chengfeng.yaml` | `bt_navigator.odom_topic` | `/mavros/gps_input/local` | `/slam/localization` |
+| `nav2_params_chengfeng.yaml` | `velocity_smoother.odom_topic` | `/mavros/gps_input/local` | `/slam/localization` |
+| `mission_stack.chengfeng.yaml` | `mission_bridge.odom_topic` | `/mavros/gps_input/local` | `/slam/localization` |
+| `mission_bridge.launch.py` | `odom_topic` 参数默认值 | `/mavros/gps_input/local` | `/slam/localization` |
 
 ### 2.6 SLAM 侧需暴露的参数
 
@@ -294,24 +297,22 @@ SLAM 融合 GNSS 初始化即可输出 map 系位姿，无需 `/initialpose`。
 |---------|------|------|--------------------------|---------------|
 | `set_pause` | `pause: true` | 仅 **`RUNNING`**：cancel 当前 goal，**保存**剩余航点与 index | → `PAUSED` | `TASK_PAUSED` |
 | `set_pause` | `pause: false` | 仅 **`PAUSED`**：从断点恢复导航 | → `RUNNING` | `TASK_RESUMED` |
-| `emergency_stop` | （空） | 任意非 `EMERGENCY`：清空航点/缓冲，cancel goal | → `EMERGENCY` | `EMERGENCY_STOP` |
 | `send_waypoints` | 新航线 | **`RUNNING`/`PAUSED` 时自动抢占**旧任务（不触发 `TASK_CANCELLED`） | → `RUNNING` | `TASK_STARTED` |
-| `cancel_mission` | （空） | `RUNNING`：停止并清航线；`PAUSED`：丢弃暂停进度；`EMERGENCY`：退出急停 | → `IDLE` | `TASK_CANCELLED` |
+| `cancel_mission` | （空） | `RUNNING`：停止并清航线；`PAUSED`：丢弃暂停进度 | → `IDLE` | `TASK_CANCELLED` |
 
 - 用 **`/nav_status`** 看 `progress_percent`、`planner.status`、`alerts`（**勿**解析 `recent_logs` 做分支）。
 - 用 **`/task_event`** 的 `ALARM_RAISED` 处理中途规划/定位/卡住告警；**任务成败**以 `TASK_COMPLETED` / `TASK_FAILED` 为准。
 - **`task.state` 仍为 `RUNNING` 时 `planner.status` 可能为 `FAILED`**（Nav2 内部重试），勿仅凭 planner 失败判任务结束。
 
-### 5.4 取消与急停恢复
+### 5.4 取消与恢复
 
 调 **`/mission_bridge/cancel_mission`**（`m_common/srv/CancelMission`）：
 
 - **`RUNNING`**：取消 Nav2 goal，清空当前航线 → `IDLE`
 - **`PAUSED`**：丢弃已保存断点 → `IDLE`
-- **`EMERGENCY`**：清除急停标志 → `IDLE`（之后可再 `send_waypoints`）
 - **`IDLE`**：幂等 `success=true`
 
-### 5.5 取消 / 急停后再次出发
+### 5.5 取消后再次出发
 
 直接调 **`send_waypoints`**（无需 `explicit_replan`；Service 等价于强制换线）。
 
@@ -323,10 +324,9 @@ SLAM 融合 GNSS 初始化即可输出 map 系位姿，无需 `/initialpose`。
 | 失败 | `FAILED`（随后约 0.05s 变 `IDLE`） | `TASK_FAILED`，看 `detail.error_code` |
 | 取消 | `IDLE` | `TASK_CANCELLED` |
 | 暂停 | `PAUSED`（**不会自动回 IDLE**） | `TASK_PAUSED` |
-| 急停 | `EMERGENCY`（**不会自动回 IDLE**） | `EMERGENCY_STOP` |
 
 失败瞬间请以 **`TASK_FAILED`** 或当时 `/nav_status` 快照为准（`FAILED` 会很快回到 `IDLE`）。  
-**PAUSED/EMERGENCY 不会自动恢复**，需显式操作（resume / cancel）。
+**PAUSED 不会自动恢复**，需显式操作（resume / cancel）。
 
 ---
 
@@ -346,7 +346,6 @@ SLAM 融合 GNSS 初始化即可输出 map 系位姿，无需 `/initialpose`。
 
 **行为**：
 - `WAITING_SYSTEM` → `success=false`（系统未就绪）
-- `EMERGENCY` → `success=false`（须先 `cancel_mission`）
 - `IDLE` / 刚结束的 `COMPLETED`/`FAILED`（已回 `IDLE`）→ 立即开始
 - **`RUNNING` / `PAUSED` → 自动抢占**当前任务并执行新航线（**不**发 `TASK_CANCELLED`，仅 `TASK_STARTED`）
 - `mission_id` / `command_id` 原样出现在 `/nav_status.task` 与 `/task_event`
@@ -375,25 +374,7 @@ ros2 service call /mission_bridge/set_pause m_common/srv/SetPause "{pause: true}
 ros2 service call /mission_bridge/set_pause m_common/srv/SetPause "{pause: false}"
 ```
 
-#### 6.1.3 `/mission_bridge/emergency_stop` — 急停
-
-| 项目 | 说明 |
-|------|------|
-| 类型 | `m_common/srv/EmergencyStop` |
-| 请求 | 无 |
-| 响应 | `bool success` + `string message` |
-
-- 任意非 `EMERGENCY` 状态 → cancel goal，清空所有航点/缓冲/timer，切 `EMERGENCY`
-- 已 `EMERGENCY` → 幂等返回 `success=true`
-- **`WAITING_SYSTEM` 也可急停**（进入 `EMERGENCY`，便于统一拉闸）
-- **退出 EMERGENCY**：调 **`/mission_bridge/cancel_mission`**
-
-**调用示例**：
-```bash
-ros2 service call /mission_bridge/emergency_stop m_common/srv/EmergencyStop
-```
-
-#### 6.1.4 `/mission_bridge/cancel_mission` — 取消 / 退出急停
+#### 6.1.3 `/mission_bridge/cancel_mission` — 取消
 
 | 项目 | 说明 |
 |------|------|
@@ -401,7 +382,7 @@ ros2 service call /mission_bridge/emergency_stop m_common/srv/EmergencyStop
 | 请求 | 无 |
 | 响应 | `bool success` + `string message` |
 
-见 §4.4。
+见 §5.4。
 
 **调用示例**：
 ```bash
@@ -423,7 +404,7 @@ ros2 service call /mission_bridge/cancel_mission m_common/srv/CancelMission
 |------|------|------|
 | `/waypoint` | `std_msgs/String` | 下发 WGS84 航线 JSON |
 | `/color_code` | `std_msgs/String` | 目标色 |
-| `/gcs_mission/cancel` | `std_msgs/Empty` | 取消 / 退出急停 |
+| `/gcs_mission/cancel` | `std_msgs/Empty` | 取消 |
 | `/gcs_mission/start` | `std_msgs/Empty` | 仅 `start_pulse` 时开始已缓存航线 |
 
 #### 6.2.1 `/waypoint` — 下发航线（GCS）
@@ -488,12 +469,12 @@ ros2 service call /mission_bridge/cancel_mission m_common/srv/CancelMission
 
 与航线独立；不发不影响导航执行。仅语义色变化时写 `target_buoy.json`（可配强制写入）。
 
-#### 6.2.3 `/gcs_mission/cancel` — 取消 / 清除急停（GCS）
+#### 6.2.3 `/gcs_mission/cancel` — 取消（GCS）
 
 | 项目 | 说明 |
 |------|------|
 | 类型 | `std_msgs/Empty` |
-| 作用 | RUNNING/PAUSED：停止任务、清缓冲；EMERGENCY：清除急停标志→IDLE；抑制后续被动航点（若 `suppress_passive_waypoints_after_cancel=true`） |
+| 作用 | RUNNING/PAUSED：停止任务、清缓冲；抑制后续被动航点（若 `suppress_passive_waypoints_after_cancel=true`） |
 
 #### 6.2.4 `/gcs_mission/start` — 开始（仅 `start_pulse`）
 
@@ -594,10 +575,10 @@ ros2 service call /mission_bridge/cancel_mission m_common/srv/CancelMission
 
 | 路径 | 类型 | 说明 |
 |------|------|------|
-| `task.state` | string | `WAITING_SYSTEM` / `IDLE` / `RUNNING` / `PAUSED` / `COMPLETED` / `FAILED` / `EMERGENCY`（§6.1） |
+| `task.state` | string | `WAITING_SYSTEM` / `IDLE` / `RUNNING` / `PAUSED` / `COMPLETED` / `FAILED`（§6.1） |
 | `task.task_id` | string\|null | 与 `/waypoint` 下发的 `mission_id` 对应 |
 | `task.command_id` | string\|null | 与 `/waypoint` 下发的 `command_id` 对应 |
-| `task.nav_phase` | string | `IDLE` / `TRACKING` / `STUCK` / `RECOVERY` / `PAUSED` / `EMERGENCY`（辅助显示，§6.2） |
+| `task.nav_phase` | string | `IDLE` / `TRACKING` / `STUCK` / `RECOVERY` / `PAUSED`（辅助显示，§6.2） |
 | `task.current_waypoint` | int | 已完成的航点数 |
 | `task.total_waypoints` | int | 总航点数 |
 | `task.progress_percent` | float | 0.0 ~ 100.0 |
@@ -619,7 +600,7 @@ ros2 service call /mission_bridge/cancel_mission m_common/srv/CancelMission
 | 路径 | 值 | 含义 |
 |------|-----|------|
 | `controller.status` | `"OK"` | 正常 |
-| | `"STUCK"` | 超过 12s（默认）无位移进展 |
+| | `"STUCK"` | 位移不足超时（默认跟随 Nav2 progress_checker，当前 2.0m/30.0s） |
 | `controller.last_error` | string\|null | `"CTRL_STUCK"` 等 |
 
 **`localization` — 定位健康**：
@@ -652,8 +633,10 @@ ros2 service call /mission_bridge/cancel_mission m_common/srv/CancelMission
 | `alerts.mission_bridge_alive` | mission_bridge 心跳正常 |
 | `alerts.planner_error` | 等同于 `planner.status == "FAILED"` |
 | `alerts.controller_error` | 等同于 `controller.status == "STUCK"` |
-| `alerts.emergency_active` | 急停激活中（`task.state == "EMERGENCY"`） |
+| `alerts.emergency_active` | **字段保留，恒为 `false`**（急停机制已删除，仅兼容旧解析） |
 | `alerts.mission_paused` | 任务暂停中（`task.state == "PAUSED"`） |
+
+> 同理，`flags.emergency_stop` 字段保留但恒为 `false`。
 
 **`recent_logs[]` — 日志（仅展示）**：
 
@@ -713,7 +696,6 @@ ros2 service call /mission_bridge/cancel_mission m_common/srv/CancelMission
 | `TASK_CANCELLED` | RUNNING → IDLE（外部取消） | `task_id`, `source` |
 | `TASK_PAUSED` | → PAUSED | `task_id`, `waypoint_index` |
 | `TASK_RESUMED` | PAUSED → RUNNING | `task_id`, `waypoint_index` |
-| `EMERGENCY_STOP` | → EMERGENCY | `task_id` |
 | `ALARM_RAISED` | 告警触发 | `alarm_code`, `level` (`WARN`/`ERROR`), `message`, `suggested_action` |
 | `ALARM_CLEARED` | 告警解除 | `alarm_code` |
 
@@ -747,7 +729,7 @@ ros2 service call /mission_bridge/cancel_mission m_common/srv/CancelMission
 | 项目 | 说明 |
 |------|------|
 | 类型 | `std_msgs/String` |
-| 值 | `IDLE` / `RUNNING` / `PAUSED` / `COMPLETED` / `FAILED` / `EMERGENCY` / `WAITING_SYSTEM` |
+| 值 | `IDLE` / `RUNNING` / `PAUSED` / `COMPLETED` / `FAILED` / `WAITING_SYSTEM` |
 
 仅当 **`/nav_status` 超过约 5s 无更新** 时作粗粒度回退；正常勿用其做主逻辑。
 
@@ -755,7 +737,7 @@ ros2 service call /mission_bridge/cancel_mission m_common/srv/CancelMission
 
 ## 7. 状态、错误码与 Nav2 错误链路
 
-### 7.1 `task.state` — 7 值状态机
+### 7.1 `task.state` — 6 值状态机
 
 | 值 | 含义 | 典型触发 |
 |----|------|----------|
@@ -765,7 +747,6 @@ ros2 service call /mission_bridge/cancel_mission m_common/srv/CancelMission
 | `PAUSED` | 已暂停 | 上层调 `set_pause` {pause: true}；保存进度，可恢复 |
 | `COMPLETED` | 全部到达 | 所有航点成功到达 |
 | `FAILED` | 任务失败 | Nav2 FollowWaypoints 返回非 SUCCEEDED 或 missed_waypoints |
-| `EMERGENCY` | 急停 | 上层调 `emergency_stop`；清空一切，需显式取消退出 |
 
 **状态转换图**：
 
@@ -778,8 +759,6 @@ RUNNING ──(外部取消)──► IDLE
 RUNNING ──(pause)──► PAUSED ──(resume)──► RUNNING
 PAUSED  ──(外部取消)──► IDLE
 PAUSED  ──(新航点+explicit_replan)──► RUNNING
-任意非EMERGENCY ──(emergency_stop)──► EMERGENCY
-EMERGENCY ──(cancel topic)──► IDLE
 IDLE/RUNNING/PAUSED ──(TF或action丢失)──► WAITING_SYSTEM ──(恢复)──► IDLE
 ```
 
@@ -793,7 +772,7 @@ IDLE/RUNNING/PAUSED ──(TF或action丢失)──► WAITING_SYSTEM ──(恢
 | 错误码 | 触发来源 | 含义 | 上层可做什么 |
 |--------|----------|------|--------------|
 | `PLAN_FAILED` | planner_server action ABORTED | 全局规划失败，目标可能在障碍物内或不在地图范围内 | 调整航点坐标 |
-| `CTRL_STUCK` | 控制器超 12s（可配）无位移 | 机器人被卡住或无法跟踪路径 | 告警、人工介入 |
+| `CTRL_STUCK` | 位移不足超时（跟随 Nav2 progress_checker） | 机器人被卡住或无法跟踪路径 | 告警、人工介入 |
 | `LOC_LOST` | TF 丢失 / odom 超时 / cov 超阈值 | 定位丢失 | 暂缓发新任务，等待恢复 |
 | `LOC_DEGRADED` | cov 偏高 / GPS fix < 3 / odom 频率低 | 定位精度下降 | 暂缓发新任务 |
 | `MISSION_FAILED` | FollowWaypoints 非 SUCCEEDED 或 missed_waypoints | 任务级失败 | 读 `TASK_FAILED.detail` 获取详情 |
@@ -881,16 +860,13 @@ FollowWaypoints result (missed_waypoints + error_code + error_msg)
 导航 ──► /nav_status  task.state="RUNNING"
 导航 ──► /task_event  TASK_RESUMED { task_id:"m001", waypoint_index:2 }
 
-        … 急停 …
-
-上层 ──Service──► /mission_bridge/emergency_stop
-        Response: {success: true, message: "Emergency stop executed"}
-
-导航 ──► /nav_status  task.state="EMERGENCY", flags.emergency_stop=true
-导航 ──► /task_event  EMERGENCY_STOP { task_id:"m001" }
+        … 逐点执行 …
 
 上层 ──Service──► /mission_bridge/cancel_mission
+        Response: {success: true, message: "Mission cancelled"}
+
 导航 ──► /nav_status  task.state="IDLE"
+导航 ──► /task_event  TASK_CANCELLED { task_id:"m001" }
 ```
 
 ### 9.2 Topic 方式 debounce（默认：只发航点）
@@ -954,12 +930,11 @@ FollowWaypoints result (missed_waypoints + error_code + error_msg)
 | 1 | 已向船端确认 `waypoint_command_mode`（debounce / immediate / start_pulse）— 仅 Topic 方式需要，Service 方式无需 |
 | 2 | 已订阅 `/nav_status`，QoS = TRANSIENT_LOCAL + RELIABLE |
 | 3 | 已订阅 `/task_event`（建议） |
-| 4 | 控制仅用四个 Service；反馈订 `/nav_status` + `/task_event` |
+| 4 | 控制仅用三个 Service；反馈订 `/nav_status` + `/task_event` |
 | 5 | 新任务在 `IDLE` 下发；`RUNNING` 换线用 `send_waypoints` 抢占 |
-| 6 | 急停后须 `cancel_mission` 再 `send_waypoints` |
-| 7 | 取消用 `cancel_mission`，勿依赖 GCS Topic |
-| 8 | 业务逻辑用 `task.state`、`planner.status`、`error_code`，不用 `recent_logs` 原文 |
-| 9 | Topic 方式坐标使用 WGS84 经纬度；Service 方式使用 map 坐标系 PoseStamped |
+| 6 | 取消用 `cancel_mission`，勿依赖 GCS Topic |
+| 7 | 业务逻辑用 `task.state`、`planner.status`、`error_code`，不用 `recent_logs` 原文 |
+| 8 | Topic 方式坐标使用 WGS84 经纬度；Service 方式使用 map 坐标系 PoseStamped |
 
 ---
 
@@ -972,7 +947,7 @@ FollowWaypoints result (missed_waypoints + error_code + error_msg)
 - Nav2 参数与 `/plan`、`/cmd_vel_nav` 的 remap
 - 坐标转换（经纬度 → ENU → map 坐标系）
 
-集成说明见仓库内 `mission_bridge.launch.py`、`config/mission_stack.example.yaml`（**不发给上层厂商**）。
+集成说明见仓库内 `mission_bridge.launch.py`、`config/mission_stack.chengfeng.yaml`（**不发给上层厂商**）。
 
 ---
 
@@ -997,4 +972,3 @@ FollowWaypoints result (missed_waypoints + error_code + error_msg)
 | 依赖 `/mission_bridge/state` 做主逻辑 | 优先 `/nav_status`，仅在其陈旧（>5s）时回退 |
 | 用「是否有 `/plan`」或「planner.status==FAILED」直接判定任务失败 | 等 `task.state==FAILED` 或 `TASK_FAILED` 事件 |
 | 用 Topic 发航点后轮询确认是否被接受 | **用 Service 接口，直接读 Response success/message** |
-| 在 EMERGENCY 状态下发新航点 | 先 `cancel_mission` 退出 EMERGENCY → IDLE |

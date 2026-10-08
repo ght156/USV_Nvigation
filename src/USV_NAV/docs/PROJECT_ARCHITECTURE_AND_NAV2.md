@@ -12,7 +12,7 @@
 | 包 | 职责 |
 |----|------|
 | **`workspace_ros`** | `robot_state_publisher`（URDF TF）、`gnss_odom_map_tf`、`nav2_cmd_vel_to_mavros`、感知/任务脚本 |
-| **`workspace_nav`** | `nav2_real_mavros.launch.py`、`nav2_params_real_mavros.yaml`、地图 yaml、**`mission_bridge` / `nav_status_aggregator`**、legacy `waypoint_transform` |
+| **`workspace_nav`** | `nav2_boat.launch.py`、`nav2_params_chengfeng.yaml`、地图 yaml、**`mission_bridge` / `nav_status_aggregator`**、legacy `waypoint_transform` |
 
 ---
 
@@ -20,7 +20,7 @@
 
 1. MAVROS（嵌软启动）— `odom→base_link` TF  
 2. `real_boat_bringup.launch.py` — `robot_state_publisher`（URDF 传感器 TF）+ `gnss_odom_map_tf` +（可选）速度桥  
-3. `nav2_real_mavros.launch.py` — Nav2 + RViz +（默认）**mission_bridge + nav_status_aggregator**  
+3. `nav2_boat.launch.py` — Nav2 + RViz +（默认）**mission_bridge + nav_status_aggregator**  
 
 ---
 
@@ -76,7 +76,7 @@
 
 ---
 
-## 6. Nav2 要点（`nav2_params_real_mavros.yaml`）
+## 6. Nav2 要点（`nav2_params_chengfeng.yaml`）
 
 - **里程计**：`/mavros/local_position/odom`  
 - **全局帧 / 局部帧**：`map` / `odom`，`robot_base_frame: base_link`  
@@ -126,7 +126,7 @@ nav_status_aggregator ──► /nav_status、/task_event
 
 | 目标 | 文件 |
 |------|------|
-| 避障话题/高度 | `nav2_params_real_mavros.yaml` |
+| 避障话题/高度 | `nav2_params_chengfeng.yaml` |
 | 控制/到点容差 | 同上 `controller_server` |
 | 速度桥限幅 | `nav2_cmd_vel_to_mavros.py` / launch |
 | 地图锚点 | map yaml、`real_boat_bringup` 的 `map_config_yaml` |

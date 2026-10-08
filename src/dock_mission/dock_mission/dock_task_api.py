@@ -40,6 +40,13 @@ class GcsCommand:
     （MissionWaypoint.yaw 同为度；Nav2 位姿时才转弧度）。仅给经纬度不带 yaw 时，
     yaw 取 DOCK_YAW_UNSPECIFIED（导航按行进方向）。dock_yaw 超范围（如 65536.0）同样
     被视为"不指定朝向"。
+
+    dock_yaw 语义（已对照仿真仓与 mission_bridge 核实）：**预泊点处船艏航向**，
+    ENU/map 系、逆时针为正、0°=东，直接作为 Nav2 goal 的 base_link 朝向
+    （mission_bridge 不做额外旋转/取反）。归港要求"船尾朝坞"（后向相机看 Tag、
+    倒船入坞），所以该值 = **船艏朝坞外**的航向；仿真泊位 map_staging
+    (3.5, 0, yaw=0) 即船艏 +x 朝外、船尾朝 -x 码头。嵌软若量的是
+    "船尾→船坞"方向角，须 +180° 后再下发。
     """
 
     command: DockCommand
@@ -87,17 +94,13 @@ def run_state_from_mission(state: MissionState, *, dock_active: bool) -> str:
 def phase_from_mission(state: MissionState, mode: Optional[str]) -> str:
     if state in (MissionState.IDLE, MissionState.SUCCEEDED, MissionState.FAILED, MissionState.CANCELLED):
         return "IDLE"
+    # 出泊会话的任意活动态都算 UNDOCKING（ARMED 也会瞬过，无单独出泊阶段值）
     if mode == "undock":
-        if state in (MissionState.UNDOCK_HANDOFF, MissionState.MONITOR_UNDOCK):
-            return "UNDOCKING"
-        if state == MissionState.COMPLETE_SETTLE:
-            return "UNDOCKING"
         return "UNDOCKING"
     if state in (
         MissionState.ARMED,
         MissionState.NAV_TO_STAGING,
         MissionState.SETTLE,
-        MissionState.ENTRY_VALIDATE,
     ):
         return "STAGING"
     if state in (MissionState.DOCK_HANDOFF, MissionState.MONITOR_DOCK, MissionState.COMPLETE_SETTLE):

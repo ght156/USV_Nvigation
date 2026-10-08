@@ -6,12 +6,9 @@
 # 订阅船位里程计 + zone_manager 的 /nav_zones/current（带 fence_id 的围栏快照），持续检查船位：
 #   - 存在 inclusion（作业区）围栏且船位驶出 → 违规（EXIT）
 #   - 船位闯入任一 exclusion（禁航区） → 违规（ENTER）
-# 连续 violation_threshold 次违规后：
-#   - 发布 /mission_bridge/safety_event（NavSafetyEvent, enabled=true）——无论有无
-#     活动任务都发：mission_bridge 靠它把活动任务终态判成 GEOFENCE_VIOLATION
-#     （EXCLUSION:ENTER→2001 / INCLUSION:EXIT→2002），否则越界会被误报成急停(2010)
-#   - 调用 mission_bridge/emergency_stop 急停（锁存，回到合法区或区域更新后解除，
-#     解除后再次越界会重新告警+急停）
+# 连续 violation_threshold 次违规后发布 /mission_bridge/safety_event（NavSafetyEvent,
+# enabled=true）告警——无论有无活动任务都发，是否暂停任务由上层 Decision 状态机自行决定
+# （调用 set_pause），导航侧不自动终止任务。
 # 违规条件消失且告警曾触发时，再发一条 enabled=false 表示告警解除；解除事件的
 # fence_id/fence_type/transition 固定取触发告警那一刻的违规快照，保证告警/解除一一配对。
 # 未设置任何围栏时节点空转。
@@ -35,7 +32,6 @@ from tf2_ros.buffer import Buffer
 from tf2_ros.transform_listener import TransformListener
 
 from m_common.msg import NavSafetyEvent
-from m_common.srv import EmergencyStop
 
 from workspace_nav.gps_map_conversion import (
     datum_lat_lon_from_cfg,
@@ -92,7 +88,6 @@ class ZoneMonitorNode(Node):
         self.declare_parameter("safety_event_topic", "/mission_bridge/safety_event")
         self.declare_parameter("check_period_sec", 0.5)
         self.declare_parameter("violation_threshold", 5)
-        self.declare_parameter("emergency_stop_service", "mission_bridge/emergency_stop")
 
         self._enabled = bool(self.get_parameter("enabled").value)
         self._global_frame = (
@@ -128,7 +123,6 @@ class ZoneMonitorNode(Node):
         self._fences: List[Dict[str, Any]] = []
         self._odom: Optional[Odometry] = None
         self._violation_streak = 0
-        self._triggered = False        # 急停锁存（回到合法区或围栏更新时解除）
         self._event_active = False     # 是否已发 enabled=true 告警
         self._last_violation: Optional[Tuple[Dict[str, Any], str]] = None
         # 触发告警那一刻的违规快照：解除事件（enabled=false）一律用它填充
@@ -149,10 +143,6 @@ class ZoneMonitorNode(Node):
         )
         self._safety_pub = self.create_publisher(
             NavSafetyEvent, self.get_parameter("safety_event_topic").value, 1
-        )
-
-        self._emerg_client = self.create_client(
-            EmergencyStop, self.get_parameter("emergency_stop_service").value
         )
 
         period = max(0.1, float(self.get_parameter("check_period_sec").value))
@@ -216,8 +206,7 @@ class ZoneMonitorNode(Node):
             except (TypeError, ValueError, IndexError):
                 continue
         self._fences = fences
-        # 区域更新解除急停锁存与违规计数
-        self._triggered = False
+        # 区域更新复位违规计数；若告警曾触发则发 enabled=false 解除
         self._violation_streak = 0
         if self._event_active:
             self._publish_clear_event()
@@ -261,9 +250,7 @@ class ZoneMonitorNode(Node):
             if self._violation_streak > 0:
                 self.get_logger().info("违规条件消失，计数清零")
             self._violation_streak = 0
-            # 回到合法区即解除急停锁存：cancel_mission 清 EMERGENCY 后继续航行，
-            # 再次越界仍能重新告警+急停（旧逻辑只在围栏更新时复位，二次越界会裸奔）
-            self._triggered = False
+            # 违规条件消失：若告警曾触发则发 enabled=false 解除
             if self._event_active:
                 self._publish_clear_event(pose)
             return
@@ -276,22 +263,13 @@ class ZoneMonitorNode(Node):
         )
         if self._violation_streak < self._threshold:
             return
-        if not self._triggered:
-            self._triggered = True
+        if not self._event_active:
+            self._alarmed_violation = violation
+            self._publish_safety_event(fence, transition, enabled=True, pose=pose)
+            self._event_active = True
             self.get_logger().error(
-                f"越界确认，触发急停: 围栏 {fence['fence_id']} ({fence['type']}, {transition})"
+                f"越界确认，触发告警: 围栏 {fence['fence_id']} ({fence['type']}, {transition})"
             )
-            # 先发 safety_event 再急停，且无论有无活动任务都发：
-            # mission_bridge 的 _cb_safety_event 靠它置 _nt_geofence_pending，
-            # 活动任务越界才能判成 GEOFENCE_VIOLATION（EXCLUSION:ENTER→2001 /
-            # INCLUSION:EXIT→2002）；不发则急停收尾只能给 RESULT_EMERGENCY_STOP(2010)。
-            # 先发布后急停的顺序保证急停收尾时 pending 已置位，规避竞态。
-            # 重复上报由 _event_active 锁存防抖（围栏解除/更新时发 enabled=False 复位）。
-            if not self._event_active:
-                self._alarmed_violation = violation
-                self._publish_safety_event(fence, transition, enabled=True, pose=pose)
-                self._event_active = True
-            self._call_emergency_stop()
 
     def _publish_clear_event(self, pose: Optional[Tuple[float, float]] = None) -> None:
         """发 enabled=false 解除告警并复位告警状态。
@@ -333,23 +311,6 @@ class ZoneMonitorNode(Node):
         self.get_logger().info(
             f"safety_event: enabled={enabled} fence={msg.fence_id} transition={msg.transition}"
         )
-
-    def _call_emergency_stop(self) -> None:
-        if not self._emerg_client.service_is_ready():
-            self.get_logger().error("emergency_stop 服务不可用，无法急停！")
-            return
-        future = self._emerg_client.call_async(EmergencyStop.Request())
-        future.add_done_callback(self._emerg_done)
-
-    def _emerg_done(self, future) -> None:
-        try:
-            resp = future.result()
-            if resp.success:
-                self.get_logger().info(f"急停已执行: {resp.message}")
-            else:
-                self.get_logger().error(f"急停调用被拒绝: {resp.message}")
-        except Exception as e:
-            self.get_logger().error(f"急停调用异常: {e}")
 
 
 def main(args=None) -> None:

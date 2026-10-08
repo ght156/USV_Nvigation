@@ -1,46 +1,68 @@
 #!/usr/bin/env bash
 # --------------------------------------------------------------------------------------- #
-# record_field_data.sh — 现场数据录制（AGX / NX 通用）：点云 + IMU + RTK
+# record_field_data.sh — 导航复盘数据录制（建议在 NX 船端本地录，主机/船端通用）
 #
-# 录制话题（要改话题名/增删，直接改下面 TOPICS 数组即可）：
-#   /livox/lidar   sensor_msgs/msg/PointCloud2   Mid360 点云
-#   /livox/imu     sensor_msgs/msg/Imu           Mid360 内置 IMU（若用外部 IMU 改成实际话题）
-#   /rtk/odom      nav_msgs/msg/Odometry         RTK 暂定标准里程计类型；话题名定了以后改这里
+# 用途：录全导航复盘所需的链路数据——原始点云(障碍物)、代价地图、规划/控制、定位、TF、
+#       任务状态、rosout 日志。录完拷回主机用 rviz2 + ros2 bag play 复盘，比在主机直接
+#       订阅船端话题流畅得多（点云走 WiFi 是 rviz 卡顿的主因）。
+#
+# 录制话题（要增删直接改下面 TOPICS 数组）：
+#   感知/障碍物：/livox/lidar(PointCloud2 原始点云，唯一障碍物源) /livox/imu
+#   定位：      /mavros/gps_input/local /mavros/global_position/global
+#               /mavros/gps_input/raw/fix /gi320/gngga /gi320/inspvaa /usv_localization/map_odom
+#   TF：        /tf /tf_static
+#   Nav2：      /local_costmap/costmap /local_costmap/published_footprint
+#               /global_costmap/costmap /map /plan /local_plan
+#               /lookahead_point /lookahead_collision_arc
+#               /keepout_filter/costmap_filter_info /keepout_filter/keepout_filter_mask
+#   控制链：    /cmd_vel_nav /cmd_vel_teleop /cmd_vel
+#               /mavros/setpoint_velocity/cmd_vel_unstamped /goal_pose /waypoint
+#   任务状态：  /nav_status /mission_bridge/state /mission_bridge/status_detail
+#               /task_event /nav_zones/current
+#   日志：      /rosout
 #
 # 说明：
-#   - 三个话题都是标准消息类型，本脚本只依赖 /opt/ros，不需要 source 工作空间。
-#   - QoS：点云/IMU 发布端一般是 best_effort，rosbag2 默认用 reliable 订阅会一条都收不到，
-#     所以 start 时自动生成 QoS override 文件（对三话题 best_effort 订阅，兼容 reliable 发布端）。
-#   - Humble 的 ros2 bag record 不支持 topic:type 写法，消息类型由发布端自动发现。
-#   - 后台 setsid 运行，SSH 断连不影响；stop 发 SIGINT 优雅收尾（正常写完 metadata.yaml），
+#   - QoS 自动适配：start 时逐话题查询发布端的 reliability/durability 并原样镜像到订阅端
+#     （best_effort 点云不会漏；/map、/tf_static、costmap 这类 transient_local latched
+#     话题也能录到录制前已发布的那一帧）。查询失败的话题退回 best_effort+volatile。
+#   - 自定义消息（m_common/msg/NavStatus 等）需要工作空间，脚本自动 source
+#     /home/ght/USV_NAV/install（主机）或 /home/jetson/usv_nav_ws/install（船端）。
+#   - 后台 setsid 运行，SSH 断连不影响；stop 发 SIGINT 优雅收尾（写完 metadata.yaml），
 #     不要 kill -9，强杀会导致最后一个分片没有 metadata。
+#   - 体积参考：Mid360 点云约占 20+ GB/h；costmap 5Hz 全图约 0.7 GB/h。留意磁盘。
 #
 # 用法：
-#   ./record_field_data.sh check           # 只检查话题是否在线 + QoS，不录制（上场前先跑一遍）
-#   ./record_field_data.sh start [标签]    # 开始录制，如 ./record_field_data.sh start dock_run1
+#   ./record_field_data.sh check           # 只检查话题在线情况 + QoS，不录制（上场前先跑）
+#   ./record_field_data.sh start [标签]    # 开始录制，如 ./record_field_data.sh start nav_run1
 #   ./record_field_data.sh status          # 是否在录 / 存到哪 / 多大 / 磁盘剩余
 #   ./record_field_data.sh stop            # 停止并打印各话题消息数（为 0 的会标红提醒）
 #
-# 配置：不用环境变量，直接改下方「配置区」里的 BAG_DIR / SPLIT_SEC / COMPRESS /
-#       EXTRA_TOPICS / DOMAIN_ID 几个变量（脚本顶部，一眼能看到）。
+# 复盘：
+#   scp -r nx:~/usv_bags/<目录名> ~/usv_bags/   # 拷回主机
+#   ros2 bag play <目录名>                       # 主机上播放，rviz2 里看点云/costmap/plan
 #
-# 产物：$BAG_DIR/usv_<时间>[_标签]/（*.db3 分片 + metadata.yaml + record.log + qos.yaml）
-# 拷回：scp -r nx@<ip>:~/usv_bags/<目录名> .
+# 配置：不用环境变量，直接改下方「配置区」（脚本顶部，一眼能看到）。
 # --------------------------------------------------------------------------------------- #
 
 set -u
 
 TAG="${2:-}"
 ROSETUP="/opt/ros/humble/setup.bash"
+# 主机/船双机通用：自动选本机工作空间（m_common 等自定义消息需要）
+WSSETUP=""
+for ws in /home/ght/USV_NAV/install/setup.bash /home/jetson/usv_nav_ws/install/setup.bash; do
+  [[ -f "$ws" ]] && WSSETUP="$ws" && break
+done
 
 # ======================================================================= #
 # 配置区：上场前直接改这里（改完保存即可，不用环境变量）
 # ======================================================================= #
-BAG_DIR="$HOME/usv_bags"   # 录制根目录（AGX 的 SD/eMMC 空间小的话指到 NVMe/优盘）
-SPLIT_SEC=1800              # 单个 bag 分片时长（秒），0=不分片。分片方便拷回和回放定位
-COMPRESS=0                 # 置 1 开 zstd 压缩（体积约省一半，但吃 AGX CPU，点云大时慎用）
-EXTRA_TOPICS=""            # 追加话题，如 "/tf /tf_static"（默认 QoS，发布端若为 best_effort 则收不到）
-DOMAIN_ID=5                # ROS_DOMAIN_ID，与车端保持一致
+BAG_DIR="$HOME/usv_bags"   # 录制根目录（NX 上 NVMe 约 160G 可用；主机在 ~/usv_bags）
+SPLIT_SEC=1800             # 单个 bag 分片时长（秒），0=不分片。分片方便拷回和回放定位
+COMPRESS=0                 # 置 1 开 zstd 压缩（体积约省一半，但吃 CPU，点云大时慎用）
+EXTRA_TOPICS=""            # 追加话题，如 "/local_costmap/voxel_grid"（体素可视化，体积大）
+DOMAIN_ID=5                # ROS_DOMAIN_ID，与船端一致
+RMW=rmw_cyclonedds_cpp     # 船端用 cyclonedds；主机若用 fastdds 改成 rmw_fastrtps_cpp
 # ======================================================================= #
 
 PID_FILE="$BAG_DIR/.recording.pid"
@@ -48,9 +70,27 @@ INFO_FILE="$BAG_DIR/.recording.info"   # 格式：bag目录|起始epoch|话题�
 
 # —— 话题清单（name 不带类型；类型由发布端决定，bag 里如实记录）——
 TOPICS=(
-  "/livox/lidar"
-  "/livox/imu"
-  "/rtk/odom"
+  # 感知/障碍物（原始点云 = 复盘避障的关键证据）
+  "/livox/lidar" "/livox/imu"
+  # 定位
+  "/mavros/gps_input/local" "/mavros/global_position/global" "/mavros/gps_input/raw/fix"
+  "/gi320/gngga" "/gi320/inspvaa" "/usv_localization/map_odom"
+  # TF
+  "/tf" "/tf_static"
+  # Nav2 代价地图 / 规划 / 调试可视化
+  "/local_costmap/costmap" "/local_costmap/published_footprint"
+  "/global_costmap/costmap" "/map"
+  "/plan" "/local_plan" "/lookahead_point" "/lookahead_collision_arc"
+  "/keepout_filter/costmap_filter_info" "/keepout_filter/keepout_filter_mask"
+  # 控制链
+  "/cmd_vel_nav" "/cmd_vel_teleop" "/cmd_vel"
+  "/mavros/setpoint_velocity/cmd_vel_unstamped"
+  "/goal_pose" "/waypoint"
+  # 任务/状态
+  "/nav_status" "/mission_bridge/state" "/mission_bridge/status_detail"
+  "/task_event" "/nav_zones/current"
+  # 日志（复盘报错/告警）
+  "/rosout"
 )
 
 log()  { echo -e "\033[1;36m[record]\033[0m $*"; }
@@ -60,9 +100,11 @@ ok()   { echo -e "\033[1;32m[record]\033[0m $*"; }
 
 ensure_ros() {
   export ROS_DOMAIN_ID="$DOMAIN_ID"
-  if ! command -v ros2 >/dev/null 2>&1; then
-    [[ -f "$ROSETUP" ]] && source "$ROSETUP"
-  fi
+  export RMW_IMPLEMENTATION="$RMW"
+  set +u   # ROS setup.bash 引用未定义变量，与 set -u 冲突
+  [[ -f "$ROSETUP" ]] && source "$ROSETUP"
+  [[ -n "$WSSETUP" ]] && source "$WSSETUP"
+  set -u
   command -v ros2 >/dev/null 2>&1 || { err "找不到 ros2，且 $ROSETUP 不存在"; exit 1; }
 }
 
@@ -85,51 +127,57 @@ disk_avail_gb() {  # 目录不存在时向上找到第一个存在的祖先目�
   df -BG --output=avail "$d" 2>/dev/null | tail -1 | tr -dc '0-9'
 }
 
+# 查询话题首个发布端的 QoS，输出 "reliability durability"（小写）。
+# 订阅端原样镜像发布端 QoS 一定兼容；查不到（话题未上线/CLI 超时）退回 best_effort+volatile
+# —— best_effort 订阅兼容 reliable/best_effort 发布，volatile 只是收不到 latched 历史帧。
+query_pub_qos() {
+  local out rel dur
+  out="$(timeout 8 ros2 topic info -v "$1" 2>/dev/null)"
+  rel="$(grep -m1 'Reliability:' <<<"$out" | awk '{print tolower($NF)}')"
+  dur="$(grep -m1 'Durability:' <<<"$out" | awk '{print tolower($NF)}')"
+  echo "${rel:-best_effort} ${dur:-volatile}"
+}
+
 cmd_check() {
   ensure_ros
-  log "ROS_DOMAIN_ID=$ROS_DOMAIN_ID，检查话题（需发布端已启动）…"
-  local missing=0 t info pcount ptype
+  log "ROS_DOMAIN_ID=$ROS_DOMAIN_ID RMW=$RMW_IMPLEMENTATION，检查话题（需发布端已启动）…"
+  local missing=0 t info pcount ptype qos
   for t in "${TOPICS[@]}"; do
-    info="$(ros2 topic info "$t" 2>&1)"
+    info="$(timeout 8 ros2 topic info "$t" 2>&1)"
     if [[ "$info" == *"Unknown topic"* || "$info" == *"not found"* ]]; then
-      err "  ✗ $t  —— 不存在（发布端没起？话题名对不上？）"
+      warn "  △ $t —— 不存在（发布端没起则录不上，可先录后补）"
       missing=1
       continue
     fi
     ptype="$(grep -m1 '^Type:' <<<"$info" | awk '{print $2}')"
     pcount="$(grep -m1 'Publisher count:' <<<"$info" | awk '{print $3}')"
+    qos="$(query_pub_qos "$t")"
     if [[ "${pcount:-0}" -eq 0 ]]; then
-      warn "  △ $t  类型=$ptype  发布者=0（暂无发布端，录上也是空）"
+      warn "  △ $t  类型=$ptype  发布者=0"
       missing=1
     else
-      ok "  ✓ $t  类型=$ptype  发布者=$pcount"
+      ok "  ✓ $t  类型=$ptype  发布者=$pcount  QoS=$qos"
     fi
   done
-  # QoS 是否 best_effort（reliable 发布端没问题，best_effort 发布端必须 best_effort 订阅）
-  for t in "${TOPICS[@]}"; do
-    ros2 topic info "$t" 2>/dev/null | grep -q "Unknown topic" && continue
-    if ros2 topic info -v "$t" 2>/dev/null | grep -q "Reliability: BEST_EFFORT"; then
-      log "  i $t 发布端为 BEST_EFFORT（脚本会用 best_effort 订阅，兼容）"
-    fi
-  done
-  local av; av="$(disk_avail_gb "$BAG_DIR" || true)"
-  log "磁盘可用：${av:-?} GB（$BAG_DIR 所在分区；Mid360 满速约 23 GB/h，按录像时长估算够不够）"
-  [[ $missing -eq 0 ]] && ok "全部话题在线，可以 start" || { warn "有话题缺失，确认后再 start"; return 1; }
+  log "磁盘可用：$(disk_avail_gb "$BAG_DIR" || echo '?') GB（$BAG_DIR；点云约 20+ GB/h，按录像时长估算）"
+  [[ $missing -eq 0 ]] && ok "全部话题在线，可以 start" || warn "有话题暂不在线（见上），不影响 start，stop 时会复查消息数"
 }
 
-write_qos_yaml() {  # $1 = 目标文件，其余参数 = 话题名
+write_qos_yaml() {  # $1 = 目标文件；逐话题查询发布端 QoS 并镜像
   local target="$1"; shift
   {
-    echo "# 由 record_field_data.sh 自动生成：对录制话题统一 best_effort 订阅。"
-    echo "# best_effort 订阅可同时兼容 reliable / best_effort 发布端（反过来则一条都收不到）。"
-    local t
+    echo "# 由 record_field_data.sh 自动生成：订阅端 QoS 镜像各话题发布端，保证兼容且能拿到 latched 帧。"
+    local t rd rel dur
     for t in "$@"; do
+      rd="$(query_pub_qos "$t")"
+      rel="${rd% *}"; dur="${rd#* }"
+      printf '  订阅 QoS 镜像：%-46s %s/%s\n' "$t" "$rel" "$dur" > /dev/stderr
       cat <<EOF
 $t:
   history: keep_last
-  depth: 10
-  reliability: best_effort
-  durability: volatile
+  depth: 50
+  reliability: $rel
+  durability: $dur
   deadline:
     sec: 0
     nsec: 0
@@ -157,7 +205,7 @@ cmd_start() {
   mkdir -p "$BAG_DIR"
   local name bag ts
   ts="$(date +%Y%m%d_%H%M%S)"
-  name="usv_${ts}"
+  name="nav_${ts}"
   [[ -n "$TAG" ]] && name="${name}_${TAG}"
   bag="$BAG_DIR/$name"
   [[ -e "$bag" ]] && { err "输出目录已存在：$bag"; exit 1; }
@@ -165,9 +213,10 @@ cmd_start() {
 
   local av; av="$(disk_avail_gb "$BAG_DIR" || true)"
   if [[ -n "${av:-}" && "$av" -lt 50 ]]; then
-    warn "磁盘仅剩 ${av} GB —— Mid360 满速约 23 GB/h，录几小时会不够，检查 BAG_DIR 是否在大盘上！"
+    warn "磁盘仅剩 ${av} GB —— 点云约 20+ GB/h，录几小时会不够，检查 BAG_DIR 是否在大盘上！"
   fi
 
+  log "查询各话题发布端 QoS 并生成订阅配置（约 $((${#TOPICS[@]} * 2)) 秒）…"
   local qos="$BAG_DIR/qos_override.yaml"
   write_qos_yaml "$qos" "${TOPICS[@]}"
 
@@ -185,7 +234,7 @@ cmd_start() {
   fi
 
   log "开始录制：$bag"
-  log "话题：${TOPICS[*]} ${EXTRA_TOPICS:-} | 分片=${SPLIT_SEC}s | 压缩=$COMPRESS | DOMAIN_ID=$ROS_DOMAIN_ID"
+  log "话题数：${#TOPICS[@]}${EXTRA_TOPICS:+（+$EXTRA_TOPICS）} | 分片=${SPLIT_SEC}s | 压缩=$COMPRESS | DOMAIN_ID=$ROS_DOMAIN_ID"
 
   # setsid 脱离终端（SSH 断开不停录）；$! 即录制进程 pid（同时是进程组长）
   # 日志先放根目录（bag 目录由 recorder 自建），stop 时再归档进 bag
@@ -225,7 +274,7 @@ cmd_status() {
   else
     log "当前没有录制任务。"
     local last
-    last="$(ls -1dt "$BAG_DIR"/usv_* 2>/dev/null | head -1)"
+    last="$(ls -1dt "$BAG_DIR"/nav_* 2>/dev/null | head -1)"
     [[ -n "$last" ]] && log "最近一次录制：$last（$(du -sh "$last" 2>/dev/null | awk '{print $1}')）"
   fi
   return 0
@@ -256,7 +305,7 @@ cmd_stop() {
     sleep 0.5
   done
   if kill -0 "$pid" 2>/dev/null; then
-    warn "3 秒内未退出，再等 5 秒…"
+    warn "15 秒内未退出，再等 5 秒…"
     kill -INT "$pid" 2>/dev/null
     for i in $(seq 1 10); do
       kill -0 "$pid" 2>/dev/null || break
@@ -280,7 +329,7 @@ import sys, subprocess
 try:
     import yaml
 except ImportError:
-    print("  （AGX 上没有 pyyaml，跳过统计；用 ros2 bag info <目录> 查看）")
+    print("  （本机没有 pyyaml，跳过统计；用 ros2 bag info <目录> 查看）")
     sys.exit(0)
 meta = yaml.safe_load(open(sys.argv[1]))["rosbag2_bagfile_information"]
 want = list(sys.argv[2:])
@@ -289,14 +338,14 @@ rows = {r["topic_metadata"]["name"]: (r["topic_metadata"]["type"], r.get("messag
 print("  各话题消息数：")
 for t in want:
     if t not in rows:
-        print(f"    {t:<28} {'-':<35} {'从未出现':>8}  ← 发布端全程没起来！")
+        print(f"    {t:<46} {'-':<40} {'从未出现':>8}  ← 发布端全程没起来！")
         continue
     ptype, n = rows[t]
     flag = "  ← 0 条，没录到！" if n == 0 else ""
-    print(f"    {t:<28} {ptype:<35} {n:>10}{flag}")
+    print(f"    {t:<46} {ptype:<40} {n:>10}{flag}")
 for t, (ptype, n) in rows.items():
     if t not in want:
-        print(f"    {t:<28} {ptype:<35} {n:>10}（额外录到的）")
+        print(f"    {t:<46} {ptype:<40} {n:>10}（额外录到的）")
 files = meta.get("relative_file_paths") or []
 print(f"  分片数：{len(files)}，总大小：", end="", flush=True)
 subprocess.run(["du", "-sh", sys.argv[1].rsplit("/", 1)[0]])
@@ -304,34 +353,28 @@ PY
   else
     warn "未找到 metadata.yaml —— 可能是上次异常退出，试试: ros2 bag info \"$bag\""
   fi
-  log "拷回开发机：scp -r nx@<AGX_IP>:\"$bag\" ."
+  log "拷回主机复盘：scp -r nx:\"$bag\" ~/usv_bags/ && ros2 bag play <目录名>（rviz2 看点云/costmap/plan）"
 }
 
 usage() {
   cat <<'EOF'
-现场数据录制：点云 + IMU + RTK
-  录制话题（改脚本顶部 TOPICS 数组）：
-    /livox/lidar  sensor_msgs/msg/PointCloud2
-    /livox/imu    sensor_msgs/msg/Imu
-    /rtk/odom     nav_msgs/msg/Odometry   ← RTK 暂定标准里程计，话题名定了改 TOPICS
-
-用法:
-  ./record_field_data.sh check          # 上场前检查话题是否在线（不录制）
+导航复盘数据录制（话题清单见脚本顶部 TOPICS，建议在 NX 船端本地录）
+  ./record_field_data.sh check          # 上场前检查话题在线情况 + QoS（不录制）
   ./record_field_data.sh start [标签]   # 开始录制（后台运行，断 SSH 不停）
   ./record_field_data.sh status         # 是否在录 / 存到哪 / 磁盘剩余
-  ./record_field_data.sh stop           # 优雅停止，打印各话题消息数（0 条=没录到）
+  ./record_field_data.sh stop           # 优雅停止 + 各话题消息数自检（0 条=没录到）
 
 配置（在脚本顶部「配置区」直接改，不用环境变量）:
-  BAG_DIR="$HOME/usv_bags"  存储根目录（建议指到 NVMe/SSD）
+  BAG_DIR="$HOME/usv_bags"  存储根目录（NX 上 NVMe 约 160G）
   SPLIT_SEC=1800            单分片时长(秒)，0=不分片
   COMPRESS=0                置 1 开 zstd 压缩（吃 CPU，慎用）
-  EXTRA_TOPICS=""           追加话题，如 "/tf"
-  DOMAIN_ID=5               ROS_DOMAIN_ID，与车端一致
+  EXTRA_TOPICS=""           追加话题，如 "/local_costmap/voxel_grid"（体积大）
+  DOMAIN_ID=5               ROS_DOMAIN_ID，与船端一致
+  RMW=rmw_cyclonedds_cpp    船端 RMW
 
-示例:
-  ./record_field_data.sh start dock_run1
-  ./record_field_data.sh stop
-  scp -r nx@<AGX_IP>:~/usv_bags/usv_20260831_101500_dock_run1 .
+复盘:
+  scp -r nx:~/usv_bags/nav_2026xxxx_xxxxxx_标签 ~/usv_bags/
+  ros2 bag play ~/usv_bags/nav_2026xxxx_xxxxxx_标签   # rviz2 里看点云/costmap/plan
 EOF
 }
 

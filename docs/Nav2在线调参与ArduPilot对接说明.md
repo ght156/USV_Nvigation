@@ -20,16 +20,16 @@
 | 判定 | 条件 |
 | --- | --- |
 | LOST | TF `map→base_link` 不可用，或 odom 超过 `odom_timeout`（2s），或位置协方差 x/y/z 最大值 > `cov_lost_threshold`（10 m²） |
-| DEGRADED | 位置协方差 > `cov_degraded_threshold`（1 m²），或 GPS 超过 `gps_timeout`（5s），或 odom 频率 < 20Hz，或 GPS status < 3 |
+| DEGRADED | 位置协方差 > `cov_degraded_threshold`（1 m²），或 GPS 超过 `gps_timeout`（5s），或 odom 频率 < 8Hz，或 GPS status < 3 |
 | GOOD | 以上均不满足 |
 
-阈值参数见 `workspace_nav/config/mission_stack.real_boat.yaml` 与 aggregator 参数声明。
+阈值参数见 `workspace_nav/config/mission_stack.chengfeng.yaml` 与 aggregator 参数声明。
 
 结果通过 `/nav_status`（2Hz）的 `localization.overall` 上报，状态跳变时发 `/task_event` 告警（`LOC_LOST` / `LOC_DEGRADED`）。
 
 ### 2.2 现状：只上报，不干预
 
-- `nav_status_aggregator` 是 pure observer，不发送任何速度/取消/急停指令。
+- `nav_status_aggregator` 是 pure observer，不发送任何速度/取消等控制指令。
 - `mission_bridge` 发任务前只检查 TF、FollowWaypoints action server，发点时等 odom；**不检查定位质量**。
 - 因此“定位质量差就不走/降速”目前没有硬门禁，只有告警。
 
@@ -87,7 +87,7 @@ ros2 topic pub --once /speed_limit nav2_msgs/msg/SpeedLimit \
 
 这是“运行时按障碍物动态限速”的正规通道，控制器内部调用 RPP 的 `setSpeedLimit()`，不经过速度平滑器、不经过飞控桥。
 
-**注意**：当前 `nav2_params_real_mavros.yaml` 未配置 `speed_limit_topic`，controller_server 默认订阅相对名 `speed_limit`（实际为 `/controller_server/speed_limit`）。要用 `/speed_limit`，需在 yaml 的 `controller_server.ros__parameters` 增加：
+**注意**：当前 `nav2_params_chengfeng.yaml` 未配置 `speed_limit_topic`，controller_server 默认订阅相对名 `speed_limit`（实际为 `/controller_server/speed_limit`）。要用 `/speed_limit`，需在 yaml 的 `controller_server.ros__parameters` 增加：
 
 ```yaml
 speed_limit_topic: "/speed_limit"
@@ -144,7 +144,7 @@ ros2 param set /controller_server FollowPath.inflation_radius 2.5
 
 ### 4.3 持久化
 
-在线修改只对当前进程生效，重启回到 yaml。长期生效需同步修改 `nav2_params_real_mavros.yaml`。
+在线修改只对当前进程生效，重启回到 yaml。长期生效需同步修改 `nav2_params_chengfeng.yaml`。
 
 ## 5. 按船与代价图距离动态降速
 
@@ -270,7 +270,7 @@ ros2 run usv_ardupilot_velocity_bridge ardupilot_velocity_bridge --ros-args \
 ## 8. 待办建议
 
 - [ ] 修复 `nav_status_aggregator` 的 GPS status 判断（`< 3` → `>= STATUS_FIX`），避免一直报 DEGRADED。
-- [ ] `nav2_params_real_mavros.yaml` 增加 `controller_server.speed_limit_topic: "/speed_limit"`。
+- [ ] `nav2_params_chengfeng.yaml` 增加 `controller_server.speed_limit_topic: "/speed_limit"`。
 - [ ] 标定 RPP 代价降速参数（`cost_scaling_dist` / `cost_scaling_gain` / `inflation_radius`）。
 - [ ] 给 `src/usv_ardupilot_velocity_bridge/ardupilot_velocity_bridge` 补 `forbid_reverse`（当前允许负 `linear.x`）；QoS 与 launch 集成已完成。
 - [ ] 如需精确“前方最近障碍距离 → 速度”曲线，实现并接入 `/speed_limit` 发布节点。

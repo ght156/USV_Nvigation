@@ -2,6 +2,18 @@
 
 > 日期：2026-09-04
 > 结论：**保持 mavros 不动，把所有 odom 订阅端统一为 BEST_EFFORT**（因为高频里程计用 RELIABLE 会在 DDS 层因背压丢数据/卡顿）。
+>
+> ⚠️ **2026-09-15 更新：上面的结论已作废，本文只作过程记录保留。**
+> 发布端已经改成 RELIABLE，本文"方案 B（把订阅端全改 BEST_EFFORT）"不再采用，Nav2 **不需要**打 §4.1 的源码补丁：
+>
+> | 环节 | 现状（2026-09-15 实船实测/源码确认） |
+> |------|--------------------------------------|
+> | 发布端 `gps_input` | `~/mavros_ws/src/mavros/mavros_extras/src/plugins/gps_input.cpp` → `rclcpp::SensorDataQoS().reliable()`；`ros2 topic info /mavros/gps_input/local -v` 实测 PUBLISHER = **RELIABLE**，KEEP_LAST(5) |
+> | Nav2 订阅端 | 保持源码默认 `rclcpp::SystemDefaultsQoS()`（**RELIABLE**），`nav2_util`/`nav_2d_utils` 均未打补丁 |
+> | 自定义节点 | `mission_bridge` / `nav_status_aggregator` 仍用 rclpy 默认（**RELIABLE**）；只有 GPS(`/mavros/gps_input/raw/fix`) 订阅是 BEST_EFFORT |
+> | 结论 | **全链路统一 RELIABLE**：RELIABLE 发布端兼容 BEST_EFFORT 订阅端，反之不兼容；/tf、/tf_static 由 tf2_ros 管理（RELIABLE, depth 100），无需改动 |
+>
+> 注意：`~/usv/src/mavros` 那份 `gps_input.cpp` 仍是 `SensorDataQoS()`（BEST_EFFORT），与 `mavros_ws` 那份分叉，别编错。
 
 ---
 
@@ -57,7 +69,7 @@ ROS 2 规则：**BEST_EFFORT 的发布方不能喂给 RELIABLE 的订阅方** �
 - `src/USV_NAV/workspace_nav/workspace_nav/zone_monitor.py`
 - `src/USV_NAV/workspace_nav/workspace_nav/nav_status_aggregator.py`
 - `src/USV_NAV/workspace_nav/workspace_nav/waypoint_with_state.py`
-- `src/dock_mission/dock_mission/entry_validator_node.py`（dock 入泊校验，`odom_topic` 实船为 `/mavros/gps_input/local`）
+- ~~`src/dock_mission/dock_mission/entry_validator_node.py`~~（入口验收节点已于 2026-09 移除）
 - `src/usv_docking/usv_docking/docking_fsm.py`（仅 odom 订阅单独用 best_effort，其余 topic 的共享 `qos` 保持不变）
 - `src/USV_NAV/workspace_nav/workspace_nav/waypoint_transform.py`（**原本已是** BEST_EFFORT，无需改动）
 

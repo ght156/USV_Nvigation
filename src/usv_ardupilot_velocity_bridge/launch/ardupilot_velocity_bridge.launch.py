@@ -66,6 +66,28 @@ def _setup(context, *_args, **_kwargs):
                 "max_linear_accel": pf("max_linear_accel"),
                 "max_linear_decel": pf("max_linear_decel"),
                 "max_angular_accel": pf("max_angular_accel"),
+                "min_in_place_angular_z": pf("min_in_place_angular_z"),
+                "in_place_floor_trigger": pf("in_place_floor_trigger"),
+                "pose_topic": ps("pose_topic"),
+                "enable_in_place_hold": pb("enable_in_place_hold"),
+                "hold_linear_deadband": pf("hold_linear_deadband"),
+                "hold_angular_min": pf("hold_angular_min"),
+                "hold_kp": pf("hold_kp"),
+                "hold_max_correction": pf("hold_max_correction"),
+                "hold_error_deadband": pf("hold_error_deadband"),
+                "hold_max_error": pf("hold_max_error"),
+                "pose_timeout_sec": pf("pose_timeout_sec"),
+                "hold_decay_start_sec": pf("hold_decay_start_sec"),
+                "hold_decay_full_sec": pf("hold_decay_full_sec"),
+                "hold_min_correction": pf("hold_min_correction"),
+                "imu_topic": ps("imu_topic"),
+                "enable_yaw_brake": pb("enable_yaw_brake"),
+                "yaw_brake_kd": pf("yaw_brake_kd"),
+                "yaw_brake_max": pf("yaw_brake_max"),
+                "yaw_brake_engage_rate": pf("yaw_brake_engage_rate"),
+                "yaw_brake_release_rate": pf("yaw_brake_release_rate"),
+                "yaw_brake_cmd_deadband": pf("yaw_brake_cmd_deadband"),
+                "imu_timeout_sec": pf("imu_timeout_sec"),
             }],
         ),
     ]
@@ -104,6 +126,36 @@ def generate_launch_description():
         DeclareLaunchArgument("max_linear_accel", default_value="0.40"),
         DeclareLaunchArgument("max_linear_decel", default_value="0.70"),
         DeclareLaunchArgument("max_angular_accel", default_value="0.35"),
+
+        # In-place rotation yaw-rate floor; 0 disables.
+        DeclareLaunchArgument("min_in_place_angular_z", default_value="0.0"), #原地旋转角速度下限
+        # 微调豁免：|wz| 低于此值的指令视为闭环微调（如归港对角度），原样透传不抬升
+        DeclareLaunchArgument("in_place_floor_trigger", default_value="0.08"),
+
+        # In-place rotation position hold (ROS-side P loop on /mavros/local_position/odom).
+        DeclareLaunchArgument("pose_topic", default_value="/mavros/local_position/odom"),
+        DeclareLaunchArgument("enable_in_place_hold", default_value="false"), #纯旋转位置保持开关
+        DeclareLaunchArgument("hold_linear_deadband", default_value="0.02"), #|vx|低于此值视为原地旋转
+        DeclareLaunchArgument("hold_angular_min", default_value="0.05"), #|wz|高于此值才触发保持
+        DeclareLaunchArgument("hold_kp", default_value="0.5"), #位置保持P增益(m/s每m误差)
+        DeclareLaunchArgument("hold_max_correction", default_value="0.3"), #保持修正速度上限m/s
+        DeclareLaunchArgument("hold_error_deadband", default_value="0.10"), #误差死区m
+        DeclareLaunchArgument("hold_max_error", default_value="2.0"), #误差钳制m(防GPS跳变)
+        DeclareLaunchArgument("pose_timeout_sec", default_value="1.0"), #位姿超时s
+        # 修正随持续旋转时长衰减（防极限环画圈）
+        DeclareLaunchArgument("hold_decay_start_sec", default_value="5.0"),
+        DeclareLaunchArgument("hold_decay_full_sec", default_value="15.0"),
+        DeclareLaunchArgument("hold_min_correction", default_value="0.05"),
+
+        # Yaw brake（角速度阻尼刹车）：默认关，兴飞 launch 里开
+        DeclareLaunchArgument("imu_topic", default_value="/mavros/imu/data"),
+        DeclareLaunchArgument("enable_yaw_brake", default_value="false"), #旋转刹车开关
+        DeclareLaunchArgument("yaw_brake_kd", default_value="1.0"), #阻尼增益 wz=-kd*w_meas
+        DeclareLaunchArgument("yaw_brake_max", default_value="0.2"), #刹车角速度上限rad/s
+        DeclareLaunchArgument("yaw_brake_engage_rate", default_value="0.03"), #残转超过此值触发
+        DeclareLaunchArgument("yaw_brake_release_rate", default_value="0.02"), #低于此值退出
+        DeclareLaunchArgument("yaw_brake_cmd_deadband", default_value="0.01"), #|wz指令|低于此值算空闲
+        DeclareLaunchArgument("imu_timeout_sec", default_value="0.5"), #IMU超时s
 
         OpaqueFunction(function=_setup),
     ])

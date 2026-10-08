@@ -2,17 +2,14 @@
 
 from __future__ import annotations
 
-import math
 import textwrap
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import pytest
 import rclpy
 import yaml
 
 from dock_mission.bay_loader import BayRecord, GnssStaging, MapStaging
-from dock_mission.dock_enu import BayDefinition, DockEnuTransform, EntryCorridor, Pose2D
 
 
 @pytest.fixture(scope="session")
@@ -43,23 +40,6 @@ def sample_dock_database(tmp_path: Path) -> Path:
                   latitude: 31.48618175
                   longitude: 120.36797148
                   yaw_deg: 0.0
-                origin_map:
-                  x: -0.5
-                  y: 0.0
-                  x_axis_yaw: 3.141592653589793
-                staging_dock_enu:
-                  x: -4.0
-                  y: 0.0
-                  yaw: 3.141592653589793
-                entry_point_dock_enu:
-                  x: -2.0
-                  y: 0.0
-                  yaw: 3.141592653589793
-                entry_corridor:
-                  x_min: -6.0
-                  x_max: 0.0
-                  y_max: 1.0
-                  yaw_max: 0.15
               bay_missing_gnss:
                 name: "No GNSS"
                 map_staging:
@@ -103,30 +83,6 @@ def bay_record() -> BayRecord:
 
 
 @pytest.fixture
-def bay_definition() -> BayDefinition:
-    return BayDefinition(
-        bay_id="bay2",
-        origin_map_x=-0.5,
-        origin_map_y=0.0,
-        x_axis_yaw_map=math.pi,
-        staging=Pose2D(x=-4.0, y=0.0, yaw=math.pi),
-        entry_point=Pose2D(x=-2.0, y=0.0, yaw=math.pi),
-        corridor=EntryCorridor(
-            x_min=-6.0,
-            x_max=0.0,
-            y_max=1.0,
-            yaw_max=0.15,
-        ),
-        standoff_m=4.0,
-    )
-
-
-@pytest.fixture
-def dock_transform(bay_definition: BayDefinition) -> DockEnuTransform:
-    return DockEnuTransform(bay_definition)
-
-
-@pytest.fixture
 def mock_ros_node(ros_context):
     """Minimal rclpy Node with dock_mission parameters declared."""
     node = rclpy.create_node("dock_mission_test")
@@ -151,13 +107,6 @@ def mock_ros_node(ros_context):
         "dock_mission_id": "dock_staging",
     }
     for name, value in defaults.items():
-        if isinstance(value, bool):
-            node.declare_parameter(name, value)
-        elif isinstance(value, int):
-            node.declare_parameter(name, value)
-        elif isinstance(value, float):
-            node.declare_parameter(name, value)
-        else:
-            node.declare_parameter(name, value)
+        node.declare_parameter(name, value)
     yield node
     node.destroy_node()

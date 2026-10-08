@@ -10,6 +10,8 @@
 
 #include <geometry_msgs/msg/twist.hpp>
 #include <mavros_msgs/msg/state.hpp>
+#include <nav_msgs/msg/odometry.hpp>
+#include <sensor_msgs/msg/imu.hpp>
 #include <rclcpp/rclcpp.hpp>
 
 using namespace std::chrono_literals;
@@ -59,7 +61,10 @@ public:
   OffboardController()
   : Node("ardupilot_velocity_bridge"),
     last_cmd_time_(this->now()),
-    last_output_time_(this->now())
+    last_output_time_(this->now()),
+    last_pose_time_(this->now()),
+    last_imu_time_(this->now()),
+    hold_engage_time_(this->now())
   {
     state_topic_ = this->declare_parameter<std::string>("state_topic", "/mavros/state");
     // Legacy single-topic parameter, kept for backward compatibility.
@@ -101,7 +106,70 @@ public:
     max_linear_decel_ = this->declare_parameter<double>("max_linear_decel", 0.70);
     max_angular_accel_ = this->declare_parameter<double>("max_angular_accel", 0.35);
 
-    // Conservative LUTs derived from the 100-point sea-trial dataset.
+    // In-place rotation floor. On this hull a small |wz| pivot command makes
+    // the boat drift backwards while turning; only a large enough yaw-rate
+    // command produces a clean pivot. In-place rotation commands always carry
+    // vx=0, so raise |wz| to at least min_in_place_angular_z then (never above
+    // the hard angular caps). 0 disables the floor.
+    min_in_place_angular_z_ =
+      this->declare_parameter<double>("min_in_place_angular_z", 0.0);
+    // Only commands with |wz| >= this are considered intentional pivots and
+    // get boosted to the floor; smaller ones pass through untouched.
+    in_place_floor_trigger_ =
+      this->declare_parameter<double>("in_place_floor_trigger", 0.08);
+
+    // In-place rotation position hold (P loop). ArduRover GUIDED
+    // turn-rate-and-speed has no position loop, so the hull drifts while
+    // pivoting. When the command is a pure rotation (|vx| ~ 0, |wz| large),
+    // anchor the current position and add a small forward/backward correction
+    // along body-x from the world-frame position error. Lateral (body-y)
+    // correction is impossible on this hull; the rotating heading lets the
+    // body-x correction cover the drift over time.
+    pose_topic_ =
+      this->declare_parameter<std::string>("pose_topic", "/mavros/local_position/odom");
+    enable_in_place_hold_ =
+      this->declare_parameter<bool>("enable_in_place_hold", false);
+    hold_linear_deadband_ =
+      this->declare_parameter<double>("hold_linear_deadband", 0.02);
+    hold_angular_min_ =
+      this->declare_parameter<double>("hold_angular_min", 0.05);
+    hold_kp_ = this->declare_parameter<double>("hold_kp", 0.5);
+    hold_max_correction_ =
+      this->declare_parameter<double>("hold_max_correction", 0.3);
+    hold_error_deadband_ =
+      this->declare_parameter<double>("hold_error_deadband", 0.10);
+    hold_max_error_ = this->declare_parameter<double>("hold_max_error", 2.0);
+    pose_timeout_sec_ = this->declare_parameter<double>("pose_timeout_sec", 1.0);
+    // Correction decay over a sustained rotation episode (anti limit-cycle).
+    hold_decay_start_sec_ =
+      this->declare_parameter<double>("hold_decay_start_sec", 5.0);
+    hold_decay_full_sec_ =
+      this->declare_parameter<double>("hold_decay_full_sec", 15.0);
+    hold_min_correction_ =
+      this->declare_parameter<double>("hold_min_correction", 0.05);
+
+    // Yaw brake (rate damper). The hull keeps rotating 25-35 deg for ~10s
+    // after the yaw-rate command returns to zero (measured 2026-10-05). When
+    // the upstream command is idle (|vx|~0, |wz|~0) but the IMU still reports
+    // rotation, actively counter-command wz = -kd*w_meas to kill the residual
+    // spin. Never fights upstream: any real motion command disables it.
+    imu_topic_ = this->declare_parameter<std::string>("imu_topic", "/mavros/imu/data");
+    enable_yaw_brake_ = this->declare_parameter<bool>("enable_yaw_brake", false);
+    yaw_brake_kd_ = this->declare_parameter<double>("yaw_brake_kd", 1.0);
+    yaw_brake_max_ = this->declare_parameter<double>("yaw_brake_max", 0.2);
+    yaw_brake_engage_rate_ = this->declare_parameter<double>("yaw_brake_engage_rate", 0.03);
+    yaw_brake_release_rate_ =
+      this->declare_parameter<double>("yaw_brake_release_rate", 0.02);
+    yaw_brake_cmd_deadband_ =
+      this->declare_parameter<double>("yaw_brake_cmd_deadband", 0.01);
+    imu_timeout_sec_ = this->declare_parameter<double>("imu_timeout_sec", 0.5);
+
+    // Conservative LUTs derived from the 100-point sea-trial dataset, updated
+    // with the 2026-10-05 on-water bridge calibration (env_probe phase):
+    // measured max forward speed is ~1.0 m/s with no PWM saturation.
+    // Low-yaw-rate entries sit slightly above the measured edge so that after
+    // the 0.90 safety factor the straight-line output limit is ~1.0 m/s
+    // (1.11*0.9=0.999, requirement); mid/high wz entries stay conservative.
     // PWM/servo data were used as a calibration aid:
     //   common  = (SERVO1 + SERVO3) / 2  tracks longitudinal effort strongly;
     //   diff    = (SERVO1 - SERVO3) / 2  tracks yaw effort very strongly.
@@ -109,28 +177,36 @@ public:
     // showing actuator saturation. Therefore the LUT is intentionally inside the
     // raw Pareto edge, and a separate safety factor is applied at runtime.
     positive_envelope_ = {
-      {0.00, 1.10},
-      {0.05, 1.04},
+      {0.00, 1.11},
+      {0.05, 1.05},
       {0.10, 0.91},
       {0.15, 0.84},
       {0.20, 0.74},
-      {0.25, 0.65},
-      {0.30, 0.60},
+      {0.25, 0.66},
+      {0.30, 0.58},
       {0.35, 0.54},
     };
 
     negative_envelope_ = {
-      {0.00, 1.03},
-      {0.05, 0.92},
+      {0.00, 1.11},
+      {0.05, 0.95},
       {0.10, 0.88},
-      {0.15, 0.75},
-      {0.20, 0.67},
-      {0.25, 0.59},
-      {0.28, 0.47},
+      {0.15, 0.78},
+      {0.20, 0.68},
+      {0.25, 0.60},
+      {0.28, 0.50},
     };
 
     state_sub_ = this->create_subscription<mavros_msgs::msg::State>(
       state_topic_, 10, std::bind(&OffboardController::state_cb, this, std::placeholders::_1));
+
+    pose_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
+      pose_topic_, rclcpp::SensorDataQoS(),
+      std::bind(&OffboardController::pose_cb, this, std::placeholders::_1));
+
+    imu_sub_ = this->create_subscription<sensor_msgs::msg::Imu>(
+      imu_topic_, rclcpp::SensorDataQoS(),
+      std::bind(&OffboardController::imu_cb, this, std::placeholders::_1));
 
     rclcpp::QoS input_qos = rclcpp::QoS(rclcpp::KeepLast(10)).best_effort();
     if (input_cmd_qos_ == "reliable") {
@@ -170,15 +246,36 @@ public:
 
     RCLCPP_INFO(
       this->get_logger(),
-      "ardupilot_velocity_bridge ready, input=[%s] qos=%s output=%s envelope=%s safety=%.2f",
+      "ardupilot_velocity_bridge ready, input=[%s] qos=%s output=%s envelope=%s safety=%.2f in_place_hold=%s yaw_brake=%s",
       topics_oss.str().c_str(), input_cmd_qos_.c_str(), output_cmd_topic_.c_str(),
-      enable_velocity_envelope_ ? "ON" : "OFF", envelope_safety_factor_);
+      enable_velocity_envelope_ ? "ON" : "OFF", envelope_safety_factor_,
+      enable_in_place_hold_ ? "ON" : "OFF",
+      enable_yaw_brake_ ? "ON" : "OFF");
   }
 
 private:
   void state_cb(const mavros_msgs::msg::State::SharedPtr msg)
   {
     current_state_ = *msg;
+  }
+
+  void pose_cb(const nav_msgs::msg::Odometry::SharedPtr msg)
+  {
+    pose_x_ = msg->pose.pose.position.x;
+    pose_y_ = msg->pose.pose.position.y;
+    const auto & q = msg->pose.pose.orientation;
+    pose_yaw_ = std::atan2(
+      2.0 * (q.w * q.z + q.x * q.y),
+      1.0 - 2.0 * (q.y * q.y + q.z * q.z));
+    last_pose_time_ = this->now();
+    has_pose_ = true;
+  }
+
+  void imu_cb(const sensor_msgs::msg::Imu::SharedPtr msg)
+  {
+    imu_wz_ = msg->angular_velocity.z;
+    last_imu_time_ = this->now();
+    has_imu_ = true;
   }
 
   void cmd_cb(const geometry_msgs::msg::Twist::SharedPtr msg)
@@ -227,6 +324,25 @@ private:
     cmd.angular.z = clamp_value(
       cmd.angular.z, -max_negative_angular_z_, max_positive_angular_z_);
 
+    // In-place rotation floor: boost small pivot commands up to the minimum
+    // yaw rate, capped by the hard per-direction angular limits. Only kicks in
+    // for commands above in_place_floor_trigger: smaller |wz| requests are
+    // closed-loop fine adjustments (e.g. docking) and must pass through
+    // unchanged, otherwise the floor turns them into bang-bang oscillation.
+    if (min_in_place_angular_z_ > 0.0 && std::abs(cmd.linear.x) <= 1e-3) {
+      const double cap = cmd.angular.z >= 0.0 ?
+        max_positive_angular_z_ : max_negative_angular_z_;
+      const double floor_mag = std::min(min_in_place_angular_z_, cap);
+      if (std::abs(cmd.angular.z) >= in_place_floor_trigger_ &&
+          std::abs(cmd.angular.z) < floor_mag) {
+        RCLCPP_DEBUG_THROTTLE(
+          this->get_logger(), *this->get_clock(), 500,
+          "In-place rotation floor: wz %.3f -> %.3f",
+          cmd.angular.z, std::copysign(floor_mag, cmd.angular.z));
+        cmd.angular.z = std::copysign(floor_mag, cmd.angular.z);
+      }
+    }
+
     if (!enable_velocity_envelope_ || cmd.linear.x <= 0.0) {
       return cmd;
     }
@@ -251,6 +367,126 @@ private:
     }
 
     return cmd;
+  }
+
+  void apply_in_place_hold(geometry_msgs::msg::Twist & target, bool command_fresh)
+  {
+    if (!enable_in_place_hold_) {
+      return;
+    }
+
+    const bool pose_fresh = has_pose_ &&
+      (this->now() - last_pose_time_).seconds() <= pose_timeout_sec_;
+
+    const bool in_place = command_fresh &&
+      std::abs(target.linear.x) <= hold_linear_deadband_ &&
+      std::abs(target.angular.z) >= hold_angular_min_;
+
+    if (!in_place || !pose_fresh) {
+      if (hold_active_) {
+        hold_active_ = false;
+        RCLCPP_INFO(this->get_logger(), "In-place position hold released");
+      }
+      return;
+    }
+
+    if (!hold_active_) {
+      hold_active_ = true;
+      anchor_x_ = pose_x_;
+      anchor_y_ = pose_y_;
+      hold_engage_time_ = this->now();
+      RCLCPP_INFO(
+        this->get_logger(), "In-place position hold engaged at (%.2f, %.2f)",
+        anchor_x_, anchor_y_);
+      return;
+    }
+
+    double ex = anchor_x_ - pose_x_;
+    double ey = anchor_y_ - pose_y_;
+    const double mag = std::hypot(ex, ey);
+    if (mag <= hold_error_deadband_) {
+      return;
+    }
+    if (mag > hold_max_error_) {
+      ex *= hold_max_error_ / mag;
+      ey *= hold_max_error_ / mag;
+    }
+
+    // Project the world-frame (ENU) error onto body-x; only forward/backward
+    // thrust is available on this hull.
+    //
+    // Correction magnitude decays with sustained-rotation time (2026-10-05
+    // field finding): a body-x-only correction inside a continuously rotating
+    // frame cannot converge — it forms a limit cycle (the boat spirals around
+    // the anchor with radius correction/|wz|, measured 2 m at 0.30/0.15).
+    // Short rotations (nav2 rotate-to-heading, a few seconds) keep the full
+    // correction; long ones (docking search) fade to hold_min_correction so
+    // the residual circle stays small (0.05/0.15 ≈ 0.33 m).
+    const double episode = (this->now() - hold_engage_time_).seconds();
+    double eff_max = hold_min_correction_;
+    if (episode <= hold_decay_start_sec_) {
+      eff_max = hold_max_correction_;
+    } else if (episode < hold_decay_full_sec_) {
+      const double t =
+        (episode - hold_decay_start_sec_) /
+        std::max(hold_decay_full_sec_ - hold_decay_start_sec_, 1e-6);
+      eff_max = hold_max_correction_ +
+        t * (hold_min_correction_ - hold_max_correction_);
+    }
+
+    const double ex_body = std::cos(pose_yaw_) * ex + std::sin(pose_yaw_) * ey;
+    const double correction = clamp_value(hold_kp_ * ex_body, -eff_max, eff_max);
+    target.linear.x += correction;
+
+    RCLCPP_DEBUG_THROTTLE(
+      this->get_logger(), *this->get_clock(), 500,
+      "In-place hold: err %.2f m, body-x %.2f m, vx correction %.3f (max %.2f)",
+      mag, ex_body, correction, eff_max);
+  }
+
+  void apply_yaw_brake(geometry_msgs::msg::Twist & target)
+  {
+    if (!enable_yaw_brake_) {
+      return;
+    }
+
+    const bool imu_fresh = has_imu_ &&
+      (this->now() - last_imu_time_).seconds() <= imu_timeout_sec_;
+
+    // Only when upstream is idle: no translation and no rotation requested.
+    const bool idle = std::abs(target.linear.x) <= hold_linear_deadband_ &&
+      std::abs(target.angular.z) <= yaw_brake_cmd_deadband_;
+
+    if (!idle || !imu_fresh) {
+      if (brake_active_) {
+        brake_active_ = false;
+        RCLCPP_INFO(this->get_logger(), "Yaw brake released");
+      }
+      return;
+    }
+
+    if (!brake_active_) {
+      if (std::abs(imu_wz_) >= yaw_brake_engage_rate_) {
+        brake_active_ = true;
+        RCLCPP_INFO(
+          this->get_logger(), "Yaw brake engaged at w_meas %.3f rad/s", imu_wz_);
+      } else {
+        return;
+      }
+    }
+
+    if (std::abs(imu_wz_) < yaw_brake_release_rate_) {
+      brake_active_ = false;
+      RCLCPP_INFO(this->get_logger(), "Yaw brake released (stopped)");
+      return;
+    }
+
+    target.angular.z = clamp_value(
+      -yaw_brake_kd_ * imu_wz_, -yaw_brake_max_, yaw_brake_max_);
+
+    RCLCPP_DEBUG_THROTTLE(
+      this->get_logger(), *this->get_clock(), 500,
+      "Yaw brake: w_meas %.3f -> wz %.3f", imu_wz_, target.angular.z);
   }
 
   geometry_msgs::msg::Twist apply_slew_limits(
@@ -301,12 +537,17 @@ private:
 
     const bool fresh = command_is_fresh();
     geometry_msgs::msg::Twist target = apply_static_limits(requested_command());
+    apply_in_place_hold(target, fresh);
 
     // Timeout / stop must win immediately. Do not slowly ramp through a stale-command stop.
+    // The yaw brake still applies on the stale path: after the command stops it is
+    // exactly when the residual spin needs killing.
     geometry_msgs::msg::Twist final_cmd;
     if (!fresh) {
       final_cmd = geometry_msgs::msg::Twist();
+      apply_yaw_brake(final_cmd);
     } else {
+      apply_yaw_brake(target);
       final_cmd = apply_slew_limits(target, dt);
     }
 
@@ -339,6 +580,43 @@ private:
   double max_linear_decel_{0.70};
   double max_angular_accel_{0.35};
 
+  double min_in_place_angular_z_{0.0};
+  double in_place_floor_trigger_{0.08};
+
+  std::string imu_topic_;
+  bool enable_yaw_brake_{false};
+  double yaw_brake_kd_{1.0};
+  double yaw_brake_max_{0.2};
+  double yaw_brake_engage_rate_{0.03};
+  double yaw_brake_release_rate_{0.02};
+  double yaw_brake_cmd_deadband_{0.01};
+  double imu_timeout_sec_{0.5};
+
+  bool has_imu_{false};
+  double imu_wz_{0.0};
+  bool brake_active_{false};
+
+  std::string pose_topic_;
+  bool enable_in_place_hold_{false};
+  double hold_linear_deadband_{0.02};
+  double hold_angular_min_{0.05};
+  double hold_kp_{0.5};
+  double hold_max_correction_{0.3};
+  double hold_error_deadband_{0.10};
+  double hold_max_error_{2.0};
+  double pose_timeout_sec_{1.0};
+  double hold_decay_start_sec_{5.0};
+  double hold_decay_full_sec_{15.0};
+  double hold_min_correction_{0.05};
+
+  bool has_pose_{false};
+  double pose_x_{0.0};
+  double pose_y_{0.0};
+  double pose_yaw_{0.0};
+  bool hold_active_{false};
+  double anchor_x_{0.0};
+  double anchor_y_{0.0};
+
   std::vector<std::pair<double, double>> positive_envelope_;
   std::vector<std::pair<double, double>> negative_envelope_;
 
@@ -351,8 +629,13 @@ private:
   mavros_msgs::msg::State current_state_;
   rclcpp::Time last_cmd_time_;
   rclcpp::Time last_output_time_;
+  rclcpp::Time last_pose_time_;
+  rclcpp::Time last_imu_time_;
+  rclcpp::Time hold_engage_time_;
 
   rclcpp::Subscription<mavros_msgs::msg::State>::SharedPtr state_sub_;
+  rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr pose_sub_;
+  rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub_;
   std::vector<rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr> cmd_subs_;
   rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_pub_;
   rclcpp::TimerBase::SharedPtr timer_;

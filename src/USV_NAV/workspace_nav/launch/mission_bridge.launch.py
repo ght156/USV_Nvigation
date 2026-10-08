@@ -15,7 +15,8 @@ def _decl(name: str, default_value, description: str) -> DeclareLaunchArgument:
 def _setup_nodes(context, *args, **kwargs):
     lc = LaunchConfiguration
     use_sim_time = lc("use_sim_time")
-    odom_topic = lc("odom_topic")
+    # odom_topic：空 = 不注入（尊重 mission_stack yaml / 代码默认）；非空 = 三节点统一覆盖
+    odom_topic = lc("odom_topic").perform(context).strip()
 
     mission_stack_params_file = lc("mission_stack_params_file").perform(context).strip()
 
@@ -46,7 +47,6 @@ def _setup_nodes(context, *args, **kwargs):
                 "target_buoy_json_path": ParameterValue(
                     lc("target_buoy_json_path"), value_type=str
                 ),
-                "odom_topic": ParameterValue(odom_topic, value_type=str),
                 "datum_source": ParameterValue(lc("datum_source"), value_type=str),
                 "projection": ParameterValue(lc("projection"), value_type=str),
                 "tf_check_period_sec": ParameterValue(
@@ -54,6 +54,9 @@ def _setup_nodes(context, *args, **kwargs):
                 ),
                 "waypoint_tolerance_m": ParameterValue(
                     lc("waypoint_tolerance_m"), value_type=float
+                ),
+                "nav2_params_path": ParameterValue(
+                    lc("nav2_params_path"), value_type=str
                 ),
                 "debug_mode": ParameterValue(lc("debug_mode"), value_type=bool),
                 "allow_replace_running_mission": ParameterValue(
@@ -71,9 +74,6 @@ def _setup_nodes(context, *args, **kwargs):
                 "mission_cancel_topic": ParameterValue(
                     lc("mission_cancel_topic"), value_type=str
                 ),
-                "discard_watchdog_sec": ParameterValue(
-                    lc("discard_watchdog_sec"), value_type=float
-                ),
                 "suppress_passive_waypoints_after_cancel": ParameterValue(
                     lc("suppress_passive_waypoints_after_cancel"), value_type=bool
                 ),
@@ -84,7 +84,6 @@ def _setup_nodes(context, *args, **kwargs):
         ]
     )
 
-    # aggregator odom_topic 始终与 mission_bridge 的 odom_topic launch 参数绑定
     aggregator_params.extend(
         [
             {"use_sim_time": ParameterValue(use_sim_time, value_type=bool)},
@@ -98,7 +97,6 @@ def _setup_nodes(context, *args, **kwargs):
                 "gps_topic": ParameterValue(
                     lc("aggregator_gps_topic"), value_type=str
                 ),
-                "odom_topic": ParameterValue(odom_topic, value_type=str),
                 "global_frame": ParameterValue(lc("global_frame"), value_type=str),
                 "robot_frame": ParameterValue(lc("robot_frame"), value_type=str),
             },
@@ -132,10 +130,16 @@ def _setup_nodes(context, *args, **kwargs):
                     lc("map_datum_ref_key"), value_type=str
                 ),
                 "global_frame": ParameterValue(lc("global_frame"), value_type=str),
-                "odom_topic": ParameterValue(odom_topic, value_type=str),
             },
         ]
     )
+
+    # odom_topic 非空时统一覆盖 mission_bridge / nav_status_aggregator / zone_monitor；
+    # 空则尊重 mission_stack yaml 或代码默认值（ parameters 列表后者覆盖前者）
+    if odom_topic:
+        mission_bridge_params.append({"odom_topic": odom_topic})
+        aggregator_params.append({"odom_topic": odom_topic})
+        zone_monitor_params.append({"odom_topic": odom_topic})
 
     return [
         Node(
@@ -174,7 +178,7 @@ def generate_launch_description():
     pkg = FindPackageShare("workspace_nav")
     default_map_yaml = PathJoinSubstitution([pkg, "config", "map.yaml"])
     default_mission_params = PathJoinSubstitution(
-        [pkg, "config", "mission_stack.real_boat.yaml"]
+        [pkg, "config", "mission_stack.chengfeng.yaml"]
     )
 
     return LaunchDescription(
@@ -184,7 +188,7 @@ def generate_launch_description():
                 "mission_stack_params_file",
                 default_mission_params,
                 "mission_bridge / nav_status_aggregator 参数 YAML；"
-                "默认 mission_stack.real_boat.yaml。"
+                "默认 mission_stack.chengfeng.yaml。"
                 "勿与 Nav2 的 params_file 同名，避免 launch 参数冲突。",
             ),
             _decl(
@@ -202,13 +206,24 @@ def generate_launch_description():
             _decl("target_buoy_json_path", "", "为空则用环境变量或默认路径"),
             _decl(
                 "odom_topic",
-                "/mavros/gps_input/local",
-                "实船 MAVROS 里程计（ArduPilot gps_input）；与 nav_status_aggregator 共用（launch 内绑定）",
+                "",
+                "统一定位源里程计话题：空 = 尊重 mission_stack yaml / 代码默认；"
+                "切 SLAM 用 /slam/localization，回 MAVROS 用 /mavros/gps_input/local。"
+                "非空时统一覆盖 mission_bridge / nav_status_aggregator / zone_monitor。",
             ),
             _decl("datum_source", "map_yaml", "datum 来源"),
             _decl("projection", "enu", "enu | utm"),
             _decl("tf_check_period_sec", "1.0", "WAITING_SYSTEM 检查周期 (s)"),
-            _decl("waypoint_tolerance_m", "1.5", "航点容差 (m)"),
+            _decl(
+                "waypoint_tolerance_m",
+                "0.0",
+                "航点容差 (m)；<=0 = 自动读 Nav2 参数文件的 xy_goal_tolerance（同源，免两处改）",
+            ),
+            _decl(
+                "nav2_params_path",
+                "",
+                "Nav2 参数 YAML；空 = 取 map.yaml 同目录的 nav2_params_chengfeng.yaml",
+            ),
             _decl("debug_mode", "false", "打印原始 waypoint/color"),
             _decl(
                 "allow_replace_running_mission",
@@ -235,7 +250,6 @@ def generate_launch_description():
                 "/gcs_mission/cancel",
                 "Cancel 话题 (std_msgs/Empty)",
             ),
-            _decl("discard_watchdog_sec", "4.0", "抢占丢弃 goal 看门狗 (s)"),
             _decl(
                 "suppress_passive_waypoints_after_cancel",
                 "true",

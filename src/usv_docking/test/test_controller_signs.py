@@ -76,11 +76,13 @@ def test_back_in_final_settle_kills_yaw(ctrl):
 def test_approach_bidirectional_by_side(ctrl):
     """APPROACH 双向就位：船在预备点外侧倒退（v<0），内侧前进倒出（v>0）。"""
     import math as m
-    # 外侧（x=-5.0 < staging_x=-2.5）：倒退入位
+    # 外侧（x=-5.0 < staging_x=-2.0）：倒退入位
     v, _ = ctrl._compute_approach(-5.0, 0.0, 0.0, m.pi)
     assert v < 0.0
-    # 内侧（x=-2.0 > staging_x=-2.5）：前进倒出（不再要求 180° 调头）
-    v, _ = ctrl._compute_approach(-2.0, 0.0, 0.0, m.pi)
+    # 内侧（x=-1.0 > staging_x=-2.0）：前进倒出（不再要求 180° 调头）
+    # 注意：不要取 x 恰等于 staging_x 的点——分支判据是 dx<0 的严格比较，
+    # 等号会落到外侧分支（2026-10-07 staging_x 由 -2.5 对齐为 -2.0 后修正）
+    v, _ = ctrl._compute_approach(-1.0, 0.0, 0.0, m.pi)
     assert v > 0.0
 
 
@@ -88,8 +90,8 @@ def test_approach_forward_crab_capped(ctrl):
     """前进倒出蟹行角限幅：大 e_y 下艏向角速度有界（防横移过冲荡秋千）。"""
     import math as m
     crab = m.radians(8.0)
-    _, w_small = ctrl._compute_approach(-2.0, 0.05, 0.0, m.pi)
-    _, w_large = ctrl._compute_approach(-2.0, 0.50, 0.0, m.pi)
+    _, w_small = ctrl._compute_approach(-1.0, 0.05, 0.0, m.pi)
+    _, w_large = ctrl._compute_approach(-1.0, 0.50, 0.0, m.pi)
     # e_y=0.5 时 ky*e_y=0.2rad 超 8° 上限：w 应与限幅值相当而非 0.2rad 满输出
     assert abs(w_large) <= 1.0 * crab + 1e-6
     # 小 e_y 未触限幅，保持比例
@@ -97,34 +99,54 @@ def test_approach_forward_crab_capped(ctrl):
 
 
 def test_approach_speed_tapers_near_axis(ctrl):
-    """锥形降速：|e_y| 或距预备点越小 v 越低，下限 min_speed 蠕行不停。"""
+    """锥形降速 + 先上轴 + 近坞口限速（2026-10-06 外八坞两轮现场迭代）：
+
+    - 大横偏（|e_y|>0.8）：进入上轴模式，前进弧线向外拉出收横偏（v>0）；
+    - 上轴模式回到 |e_y|<0.55 退出，恢复倒入；
+    - 中小横偏远场（<0.8）：锥形正常给速。
+    """
     import math as m
-    # 外侧倒入（船在预备点外）：远场全速，y 进锥形区降速，接近 0 蠕行
-    v_far, _ = ctrl._compute_approach(-6.0, 1.5, 0.0, m.pi)
-    v_mid, _ = ctrl._compute_approach(-6.0, 0.6, 0.0, m.pi)
-    v_low, _ = ctrl._compute_approach(-6.0, 0.05, 0.0, m.pi)
-    assert abs(v_far - (-0.45)) < 1e-6  # 全速 = approach_speed 默认值（与 yaml 一致）
-    assert abs(v_mid) < abs(v_far)
-    assert abs(v_low) >= 0.08 - 1e-6
-    assert v_far < 0.0 and v_mid < 0.0 and v_low < 0.0
+    # 大横偏：前进拉出（上轴模式），v>0 且带转向
+    v_far, w_far = ctrl._compute_approach(-6.0, 1.5, 0.0, m.pi)
+    assert v_far > 0.0 and abs(w_far) > 0.05
+    # 上轴模式滞回：回到 |e_y|<0.55 退出，恢复倒入（v<0）
+    ctrl._compute_approach(-6.0, 1.5, 0.0, m.pi)   # 进上轴
+    v_back, _ = ctrl._compute_approach(-6.0, 0.3, 0.0, m.pi)
+    assert v_back < 0.0
+    # 中小横偏远场：锥形正常给速（非全速，0.15 地板之上）
+    v_mid, _ = ctrl._compute_approach(-6.0, 0.7, 0.0, m.pi)
+    assert v_mid < -0.15
     # 前进倒出分支：距预备点越近（dist<slow_dist）速度越低
-    v_in_near, _ = ctrl._compute_approach(-1.5, 0.7, 0.0, m.pi)  # dist≈1.22m
-    v_in_far, _ = ctrl._compute_approach(-1.1, 0.7, 0.0, m.pi)   # dist≈1.57m
+    v_in_near, _ = ctrl._compute_approach(-1.5, 0.45, 0.0, m.pi)  # dist≈0.64m
+    v_in_far, _ = ctrl._compute_approach(-1.1, 0.45, 0.0, m.pi)   # dist≈0.98m
     assert v_in_near < v_in_far
 
 
 def test_approach_decelerates_before_half_boat_length(ctrl):
-    """减速提前（08-10 实测）：|e_y|<1.0 即降速，而非旧 0.5m 阈值。"""
+    """减速提前（08-10 实测）：|e_y| 越小 v 越低（锥形语义）。"""
     import math as m
-    # 远场 y=1.5（>=slow_y）且距离>slow_dist：全速
-    v_far, _ = ctrl._compute_approach(-6.0, 1.5, 0.0, m.pi)
-    # 旧阈值 0.5m 处（y=0.6）现在必须已经降速
-    v_old_threshold, _ = ctrl._compute_approach(-6.0, 0.6, 0.0, m.pi)
-    # y=0.9 已进入 slow_y=1.0 锥形区：速度低于全速
-    v_y, _ = ctrl._compute_approach(-6.0, 0.9, 0.0, m.pi)
-    assert abs(v_far - (-0.45)) < 1e-6  # 全速 = approach_speed 默认值（与 yaml 一致）
-    assert abs(v_old_threshold) < abs(v_far)
-    assert abs(v_y) < abs(v_far)
+    # 远场中小横偏（不进上轴）做参照
+    v_ref, _ = ctrl._compute_approach(-6.0, 0.7, 0.0, m.pi)
+    # y 越小越慢
+    v_slow, _ = ctrl._compute_approach(-6.0, 0.4, 0.0, m.pi)
+    assert abs(v_slow) < abs(v_ref)
+
+
+def test_axis_mode_pullout_capped(ctrl):
+    """上轴外边界（2026-10-07 现场实锤）：上轴目标原为 `min(x,-4.5)-2.0`，
+    会随 x 一起后退 → 永远差 2m 追不到，船被一路带到 x≈-13m（超出后视相机
+    9~10m 二维码检测极限，河道也没空间，丢 Tag 后还转成盲驾）。
+    加 approach_axis_max_out_x(-8.0) 封底后：界内正常前进拉出，到界/出界不再前进。"""
+    import math as m
+    ctrl._axis_mode = True
+    v_in, _ = ctrl._compute_approach(-6.0, 1.5, 0.0, m.pi)
+    assert v_in > 0.0, "界内应继续前进拉出"
+    ctrl._axis_mode = True
+    v_at, _ = ctrl._compute_approach(-8.0, 1.5, 0.0, m.pi)
+    assert v_at <= 0.0, "到边界不应再前进"
+    ctrl._axis_mode = True
+    v_out, _ = ctrl._compute_approach(-9.5, 1.5, 0.0, m.pi)
+    assert v_out <= 0.0, "已出界不应再前进（不得继续朝远处开）"
 
 
 def test_back_in_gate2_stops_translation(ctrl):
@@ -285,6 +307,56 @@ def test_back_in_creeps_for_lateral_when_x_done(ctrl):
     v, w = ctrl._compute_back_in(0.05, 0.05, 0.05, 0.15, 0.18)
     assert v == 0.0
     assert w < 0.0
+
+
+# ══════════════ FINAL_DOCK 压紧段（2026-10-05）══════════════
+
+
+def test_final_push_keeps_reversing_at_dead_position(ctrl):
+    """压紧段（FINAL_DOCK，push=True）：x/y 到达死位置不再停车，
+    以 final_push_speed 低速继续倒船压向夹爪/充电板；BACK_IN（push=False）
+    行为不变（到位即停）。"""
+    # BACK_IN：到位即停（回归保护）
+    v, w = ctrl._compute_back_in(0.05, 0.05, 0.05, 0.15, 0.35)
+    assert v == 0.0
+    assert w < 0.0
+    # FINAL_DOCK：继续低速倒船，w 保持消艏偏阻尼逻辑
+    v, w = ctrl._compute_back_in(0.05, 0.05, 0.05, 0.15, 0.35, push=True)
+    assert v == -0.18  # final_push_speed 默认值（与 yaml 一致，2026-10-06 0.12→0.18）
+    assert w < 0.0
+    # 门控2 在压紧段继续生效：横向/艏向超限 v=0，不硬推
+    v, w = ctrl._compute_back_in(0.05, 0.40, 0.0, 0.15, 0.35, push=True)
+    assert v == 0.0
+    assert w != 0.0
+
+
+# ══════════════ APPROACH 预备点退化区去奇异化（2026-10-07）══════════════
+
+
+def test_approach_degenerate_zone_creeps_back_when_y_unconverged(ctrl):
+    """退化区（距预备点<0.6m）内横偏未收敛：弃用方位角跟踪（dx≈0 处 ±90°~±180°
+    整幅翻转致原地打转），改轴对准倒船律，恒定小倒速蠕行给横向律提供行程。"""
+    # 预备线 staging_x=-2.0 上（dx=0）带 0.4m 横偏：原逻辑 stern_bearing 奇异
+    v, w = ctrl._compute_approach(-2.0, 0.4, 0.0, math.pi)
+    assert v == pytest.approx(-0.12, abs=1e-9)  # approach_degenerate_speed
+    # 轴对准结构（同 BACK_IN）：e_y>0 -> ω<0（艏向左摆使船尾右移消横偏）
+    assert w < 0.0
+    _, w2 = ctrl._compute_approach(-2.0, -0.4, 0.0, math.pi)
+    assert w2 > 0.0
+
+
+def test_approach_degenerate_zone_stops_when_y_converged(ctrl):
+    """退化区内横偏已收敛（|e_y|<approach_y_near）：v=0 只修艏向，
+    让 FSM 到位判据接管（不再给横向律送行程）。"""
+    v, w = ctrl._compute_approach(-2.0, 0.1, 0.1, math.pi)
+    assert v == 0.0
+    assert w != 0.0  # 艏向偏差仍在修
+
+
+def test_approach_outside_degenerate_zone_unchanged(ctrl):
+    """退化区外行为不变：远离预备点仍走方位角倒入。"""
+    v, _ = ctrl._compute_approach(-4.0, 0.4, 0.0, math.pi)  # dist≈2.0 > 0.6
+    assert v < 0.0
 
 
 # ══════════════ 保持态静默（停稳后让出 cmd_vel，2026-09-01）══════════════

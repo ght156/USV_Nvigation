@@ -43,13 +43,11 @@ setup(
     zip_safe=True,
     maintainer="YILDIZ USV",
     maintainer_email="yildiz.usv@outlook.com",
-    description="USV dock mission FSM, entry validator, speed arbitrator (Phase 2 skeleton).",
+    description="USV dock mission FSM (Phase 2).",
     license="Apache-2.0",
     entry_points={
         "console_scripts": [
             "dock_mission_node = dock_mission.dock_mission_node:main",
-            "dock_entry_validator = dock_mission.entry_validator_node:main",
-            "speed_arbitrator = dock_mission.speed_arbitrator_node:main",
         ],
     },
 )

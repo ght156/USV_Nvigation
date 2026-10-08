@@ -24,4 +24,4 @@ python3 scripts/costmap_diag/align_diag.py
 ```
 
 注意：`align_diag.py`/`ghost_diag.py` 里的滤波链阈值（`R_MIN/R_MAX/Z_OBS_MIN/...`）是脚本内常量，
-改了 `nav2_params_real_mavros.yaml` 的避障参数后要同步改脚本顶部常量。
+改了 `nav2_params_chengfeng.yaml` 的避障参数后要同步改脚本顶部常量。

@@ -6,7 +6,7 @@
 #   1) rtk      : bw_gi320_driver                              (~/usv install/arm)
 #   2) mavros   : mavros apm.launch fcu_url:=/dev/ttyTHS1:921600 (~/mavros_ws)
 #   3) localize : usv_localization usv_map_odom_tf.launch.py    (map→odom, ~/usv install/arm)
-#   4) nav      : workspace_nav nav2_real_mavros.launch.py      (use_rviz:=false, NX 无显示)
+#   4) nav      : workspace_nav nav2_boat.launch.py      (use_rviz:=false, NX 无显示)
 #   5) bridge   : usv_ardupilot_velocity_bridge ardupilot_velocity_bridge.launch.py
 #   —— 等 Nav2 就绪（bt_navigator 出现）后——
 #   6) patrol   : scripts/rviz_waypoint_patrol.py（自动加载已保存点；需 attach 后手动 go）
@@ -89,7 +89,9 @@ cleanup_stale() {
 win() {
   # win <名称> <命令>
   local name="$1"; shift
-  tmux new-window -t "$SESSION" -n "$name" "export ROS_DOMAIN_ID=$DOMAIN_ID; $*"
+  # RMW 必须与 mavros 一致（cyclonedds），否则跨 RMW 的 service 调用会丢响应
+  tmux new-window -t "$SESSION" -n "$name" \
+    "export ROS_DOMAIN_ID=$DOMAIN_ID; export RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-rmw_cyclonedds_cpp}; $*"
   log "窗口 [$name] 已启动"
 }
 
@@ -122,11 +124,14 @@ start() {
   sleep 3
   win mavros "source $ROSETUP && source $MAVROS_SETUP && ros2 launch mavros apm.launch fcu_url:=/dev/ttyTHS1:921600"
   sleep 3
-  win localize "source $ROSETUP && source $USV_SETUP && ros2 launch usv_localization usv_map_odom_tf.launch.py"
+  # localize 需要 ~/mavros_ws 里的自定义 mavros_msgs/srv/GetMapOrigin，
+  # 否则节点内部 `ros2 service call` 报 "service type is invalid"，map→odom 永远不发布
+  win localize "source $ROSETUP && source $MAVROS_SETUP && source $USV_SETUP && ros2 launch usv_localization usv_map_odom_tf.launch.py"
   sleep 3
 
   # —— 第 2 步：导航（关 rviz）+ ArduPilot 速度桥 ——
-  win nav "source $ROSETUP && source $NAV_SETUP && ros2 launch workspace_nav nav2_real_mavros.launch.py use_sim_time:=false use_rviz:=false"
+  # nav 必须显式 enable_mission_bridge:=true（launch 默认 false，不起 mission_bridge 上层任务进不来）
+  win nav "source $ROSETUP && source $NAV_SETUP && ros2 launch workspace_nav nav2_boat.launch.py use_sim_time:=false use_rviz:=false enable_mission_bridge:=true"
   win bridge "source $ROSETUP && source $MAVROS_SETUP && source $NAV_SETUP && ros2 launch usv_ardupilot_velocity_bridge ardupilot_velocity_bridge.launch.py"
 
   # —— 第 3 步：不自动起巡逻。等导航就绪提示，巡逻由你在独立终端单独启动 ——

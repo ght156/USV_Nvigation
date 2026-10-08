@@ -1,4 +1,4 @@
-"""Shared enums and reason codes for dock_mission (Phase 2 skeleton)."""
+"""Shared enums for dock_mission."""
 
 from __future__ import annotations
 
@@ -9,15 +9,12 @@ class MissionState(str, Enum):
     IDLE = "DOCK_MISSION_IDLE"
     ARMED = "DOCK_ARMED"
     NAV_TO_STAGING = "NAV_TO_STAGING"
-    WAIT_NAV = "WAIT_NAV_OUTCOME"
     SETTLE = "SETTLE"
-    ENTRY_VALIDATE = "ENTRY_VALIDATE"
     DOCK_HANDOFF = "DOCK_HANDOFF"
     MONITOR_DOCK = "MONITOR_DOCK"
     UNDOCK_HANDOFF = "UNDOCK_HANDOFF"
     MONITOR_UNDOCK = "MONITOR_UNDOCK"
     COMPLETE_SETTLE = "COMPLETE_SETTLE"
-    BACKOFF = "DOCK_BACKOFF"
     SUCCEEDED = "DOCK_SUCCEEDED"
     FAILED = "DOCK_FAILED"
     CANCELLED = "DOCK_CANCELLED"
@@ -27,33 +24,7 @@ class SpeedAuthority(str, Enum):
     NAVIGATION = "NAVIGATION"
     STAGING_VERIFY = "STAGING_VERIFY"
     DOCKING = "DOCKING"
-    BACKOFF = "BACKOFF"
+    # 任务正常收尾（成功/取消/关闭）后的让权信号：会话已结束，速度通道交还
+    RELEASE = "RELEASE"
+    # 真失败：任务以 FAILED 收场，需人工/上层介入
     FAILED = "FAILED"
-
-
-class EntryAction(str, Enum):
-    PROCEED = "PROCEED"
-    REPLAN_STAGING = "REPLAN_STAGING"
-    BACKOFF = "BACKOFF"
-    REJECT = "REJECT"
-
-
-class EntryReason(str, Enum):
-    OK = "OK"
-    EX_BEYOND_ENTRY = "EX_BEYOND_ENTRY"
-    EX_TOO_DEEP = "EX_TOO_DEEP"
-    EY_TOO_LARGE = "EY_TOO_LARGE"
-    EYAW_TOO_LARGE = "EYAW_TOO_LARGE"
-    RTK_NOT_FIX = "RTK_NOT_FIX"
-    FRAME_MISMATCH = "FRAME_MISMATCH"
-    TAG_NOT_VISIBLE = "TAG_NOT_VISIBLE"
-    POSE_UNAVAILABLE = "POSE_UNAVAILABLE"
-
-
-class MissionFailReason(str, Enum):
-    STAGING_NAV_FAILED = "DOCK_STAGING_NAV_FAILED"
-    STAGING_RETRY_EXHAUSTED = "DOCK_STAGING_RETRY_EXHAUSTED"
-    ENTRY_INVALID = "DOCK_INVALID_ENTRY"
-    DOCK_CONTROLLER_FAILED = "DOCK_CONTROLLER_FAILED"
-    CHARGE_TIMEOUT = "DOCK_CHARGE_TIMEOUT"
-    HANDOFF_FAILED = "DOCK_HANDOFF_FAILED"

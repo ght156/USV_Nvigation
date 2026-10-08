@@ -1,4 +1,4 @@
-# 上层 → 导航：取消任务 / 退出急停
+# 上层 → 导航：取消任务
 ---
 bool success
 string message

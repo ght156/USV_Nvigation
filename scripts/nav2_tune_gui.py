@@ -9,7 +9,7 @@ Nav2 在线调参 + 取消任务小工具（tkinter + rclpy）。
 说明：
   - 滑块只通过 set_parameters 服务写到【运行中的节点】，不修改任何参数文件；
     重启 launch 后恢复参数文件里的值。
-  - 滑块初始值默认读取 nav2_params_real_mavros.yaml 对应参数；节点在线时，
+  - 滑块初始值默认读取 nav2_params_chengfeng.yaml 对应参数；节点在线时，
     启动后会用节点当前值再覆盖一次。
   - 滑块范围围绕参数文件里的值 ±50% 自适应（不再用写死的全局范围），
     数值框可直接键入精确值，键入超出滑块范围时会自动扩展范围。
@@ -32,6 +32,7 @@ from action_msgs.msg import GoalInfo
 from action_msgs.srv import CancelGoal
 from rcl_interfaces.msg import ParameterType
 from rcl_interfaces.srv import GetParameters, SetParameters
+from rclpy.executors import ExternalShutdownException
 from rclpy.parameter import Parameter
 from rclpy.node import Node
 from unique_identifier_msgs.msg import UUID
@@ -81,7 +82,7 @@ PARAMS = [
 CANCEL_ACTIONS = ["navigate_to_pose", "follow_waypoints", "navigate_through_poses"]
 DEFAULT_PARAMS_FILE = (
     Path(__file__).resolve().parents[1]
-    / "src/USV_NAV/workspace_nav/config/nav2_params_real_mavros.yaml"
+    / "src/USV_NAV/workspace_nav/config/nav2_params_chengfeng.yaml"
 )
 
 
@@ -112,7 +113,7 @@ class TuneApp:
         self.root = root
         self._defaults = defaults
         self.node = Node("nav2_tune_gui")
-        self._spinner = threading.Thread(target=rclpy.spin, args=(self.node,), daemon=True)
+        self._spinner = threading.Thread(target=self._spin_guard, daemon=True)
         self._spinner.start()
 
         self._clients = {}          # node -> SetParameters client
@@ -379,6 +380,13 @@ class TuneApp:
     def ui_after(self, fn):
         self.root.after(0, fn)
 
+    def _spin_guard(self):
+        """rclpy.spin 包装：吞掉退出时的 ExternalShutdownException 竞态打印。"""
+        try:
+            rclpy.spin(self.node)
+        except (ExternalShutdownException, KeyboardInterrupt):
+            pass
+
     def log(self, msg):
         self._log.config(state="normal")
         self._log.insert("end", msg + "\n")
@@ -397,7 +405,7 @@ def main():
     parser.add_argument(
         "--params-file",
         default=str(DEFAULT_PARAMS_FILE),
-        help="nav2 参数 YAML 路径（读取滑块初始值），默认取 nav2_params_real_mavros.yaml",
+        help="nav2 参数 YAML 路径（读取滑块初始值），默认取 nav2_params_chengfeng.yaml",
     )
     args = parser.parse_args()
 

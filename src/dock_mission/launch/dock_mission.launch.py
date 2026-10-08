@@ -3,10 +3,10 @@
 与仿真仓差异：
 - use_sim_time 默认 false；
 - profile 默认 real（overlay 缺失时不回退 sim）；
-- speed_arbitrator 默认不启动——实船速度链是 Nav2/docking 直发 /cmd_vel_nav
-  经 usv_ardupilot_velocity_bridge（无 /cmd_vel_nav_raw 中间话题），
-  互斥由本 FSM 的交接时序 + 速度桥 1s 看门狗保证；确需仲裁器时
-  enable_speed_arbitrator:=true 并自行重接 Nav2 输出到 /cmd_vel_nav_raw。
+- dock_entry_validator（入口验收）已于 2026-09 移除：其 origin_map 吃飞控
+  odom 系坐标、飞控每次重启原点都变需人工重填，而现有门控已放得很宽，
+  防错价值抵不过维护成本；交接前的到点把关由 Nav2 docking_goal_checker
+  （0.6m/0.15rad）承担。
 """
 
 import os
@@ -33,9 +33,6 @@ def _launch_setup(context, *args, **kwargs):
     pkg = get_package_share_directory("dock_mission")
     profile = LaunchConfiguration("profile").perform(context)
     use_sim = LaunchConfiguration("use_sim_time").perform(context) == "true"
-    enable_arbitrator = (
-        LaunchConfiguration("enable_speed_arbitrator").perform(context) == "true"
-    )
 
     base = os.path.join(pkg, "config", "dock_mission.yaml")
     overlay = os.path.join(pkg, "config", f"dock_mission_{profile}.yaml")
@@ -55,10 +52,7 @@ def _launch_setup(context, *args, **kwargs):
     nodes = []
     entries = [
         ("dock_mission_node", "dock_mission_node"),
-        ("dock_entry_validator", "dock_entry_validator"),
     ]
-    if enable_arbitrator:
-        entries.append(("speed_arbitrator", "speed_arbitrator"))
     for exe, key in entries:
         nodes.append(
             Node(
@@ -77,7 +71,6 @@ def generate_launch_description() -> LaunchDescription:
         [
             DeclareLaunchArgument("profile", default_value="real"),
             DeclareLaunchArgument("use_sim_time", default_value="false"),
-            DeclareLaunchArgument("enable_speed_arbitrator", default_value="false"),
             OpaqueFunction(function=_launch_setup),
         ]
     )

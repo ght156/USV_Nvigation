@@ -1,0 +1,187 @@
+<?xml version="1.0"?>
+<!--
+  【兴飞船 xingfei】整车模型（usv_transforms）。
+
+  供 robot_state_publisher 发布静态 TF：base_link → 各传感器（单根树）。
+  odom→base_link / map→odom 由 mapping_bridge 发布，勿写入本 URDF。
+
+  本文件与澄丰的 cleaning_boat.xacro 独立维护；publish_tf.launch.py 默认加载本文件，
+  澄丰船须显式指定：
+    ros2 launch usv_transforms publish_tf.launch.py \
+      robot_description_file:=<share>/usv_transforms/urdf/cleaning_boat.xacro
+
+  ── 外参来源 / 基准（2026-09-28 现场口述，单位 m）───────────────────────────────
+  base_link = RTK/GI320 报告点（即现场量的“GPS 天线”位置），并取船体中线（y=0）、
+  与天线同高（z=0）。为什么把基准放在这儿：
+    NX 侧 odom→base_link 由 mavros gps_input 插件发布，它把 INS 报的位置**零杆臂**
+    直接写成 base_link（gps_input.cpp:430 / 459-466）；而 SLAM（lightning-lm）是运行时
+    用 TF 查 base←lidar / base←imu 再把结果换算到 base。两边都发布“同一个物理点”的
+    base_link，切换定位源时才不会整体跳一个杆臂。所以基准就取 RTK 报告点。
+
+    传感器               相对基准的偏移 (x y z)    rpy
+    ────────────────────────────────────────────────────────────
+    GPS/GNSS（基准点）    0.00  0.00  0.00         0 0 0
+    海康 HIK（前）         1.70  0.00  0.58         0 0 0
+    双目 Gemini 330（前）  1.71  0.00  0.49         0 0 0
+    后视 UVC              1.58  0.00  0.46         0 0 180°（朝后装）
+    livox（Mid360）       2.05  0.00  0.28         (-0.0004, -0.7654, π)（斜向后上方，
+                                                   X 轴仰起约 43.9°，2026-09-28 实船标定）
+    livox 内置 IMU        挂在 livox_frame 下（硬件杆臂，随 livox_frame 一起转）
+    （仅参考）飞控基座     1.67  0.00  0.31         是量取基准，不是 TF 帧
+
+  换算过程：现场量的是“相对飞控”的偏移 —— 海康 0.03 0 0.27、双目 0.04 0 0.18、
+  livox 0.38 0 −0.03、后视 −0.09 0 0.15，以及“GPS 到海康 = 1.7 0 0.58”。
+  把基准从飞控挪到 GPS 点后整体平移，得到上表：GPS 点做原点，飞控在 +1.67。
+  除 livox 外 rpy 一律 0，即与 base_link 同向的标准 ENU 姿态。
+
+  livox 姿态标定（2026-09-28，船漂浮水面静止 30 s）：
+    Mid360 内置 IMU 重力方向得 roll≈-0.02°、pitch≈-43.86°；点云主平面（水面）法线
+    与 IMU 重力方向夹角 1.8°，两法互证。yaw=π 按现场确认“斜向后上方”。
+    工具：scripts/mid360s_ship_calibration.py（IMU）+ 点云主平面拟合验证。
+
+  ⚠ 换船后待现场复核（4 条）：
+    1) “GPS → 海康相机 = (1.7, 0, 0.58)” 的**方向**按“GPS 为原点、指向海康”取，
+       故海康在基准点前方 1.70 m、上方 0.58 m（与澄丰“相机在船头、天线在船尾”一致）。
+       若现场实测是反过来（相机在天线后方/下方），全表 x、z 反号。
+    2) 口述里有一处互相矛盾：说“飞控在 base_link 前 1.00 m”，但按 GPS↔海康 1.7 m 推
+       出来飞控在 +1.67 m。现场量一下“GPS 天线 ↔ 飞控”的实际距离：若是 1.67 则本文件
+       正确；若确实只有 1.0，则 GPS↔海康 应为 1.03 m，本表整体再平移 0.67 m。
+    3) GI320 报的是天线相位中心还是机器内部参考点？若报的是“飞控盒上那点”，则基准应
+       移到飞控（本表整体 −1.67 m，gps_xyz 相应变成 −1.67）。
+    4) 船体外形尺寸只影响 RViz 可视化（占位值），兴飞实测后覆盖。
+       （mapping/lightning-lm 的 slam.h 里 `gnss_base_gps_xy_` 是澄丰值 (−0.03, −0.1)；
+       本文件 base_link 与 gps_link 重合 → 该常量应改成 (0.0, 0.0)，由 SLAM 侧同事处理。）
+
+  相机命名与驱动前缀一致：
+    - 海康 RTSP（rtsp_camera / ai_detector）：camera_front_hik_*（URDF 挂 link→optical）
+    - Gemini 330（orbbec_camera）：camera_front_gemini_*（URDF 只挂 *_link，
+      color/depth/optical/imu 各系由驱动 publish_tf 发布）
+    - 后视 UVC（video_camera）：camera_back_video_*（URDF 提供 link→optical；
+      图像 header 用 optical，apriltag 的 TF parent 用 link）
+    - Astra dabai DCW 已停用（前端 RGBD 数据源改为 Gemini 330），兴飞不挂
+      camera_front_astra_link；若装回，用文末注释块恢复。
+
+  Mid360 内置 IMU 相对雷达的杆臂是硬件常量，不随安装位置变，随 livox_frame 一起转。
+-->
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="usv">
+
+  <!-- ======================= 可覆盖参数（外参，单位 m / rad） ======================= -->
+  <!-- base_link → livox_frame（基准点前方 2.05）：斜向后上方，X 轴仰起约 43.9°
+       （2026-09-28 实船标定：IMU 重力 + 点云水面法线交叉验证；roll≈0，pitch=-43.86°，yaw=π） -->
+  <xacro:arg name="livox_xyz" default="2.05 0.0 0.28"/>
+  <xacro:arg name="livox_rpy" default="-0.0004 -0.7654 ${pi}"/>
+  <!-- livox_frame → imu_link（Mid360 内置 IMU，与 fasterlio extrinsic_T 互为相反平移）：
+       yaml: lidar_in_imu T=[-0.011, -0.02329, 0.04412], R=I
+       → IMU 在雷达系 = -T；硬件常量，换船不用改 -->
+  <xacro:arg name="imu_xyz" default="0.011 0.02329 -0.04412"/>
+  <xacro:arg name="imu_rpy" default="0.0 0.0 0.0"/>
+  <!-- base_link → gps_link：base_link 就是 RTK/GI320 报告点，故为零 -->
+  <xacro:arg name="gps_xyz" default="0.0 0.0 0.0"/>
+  <xacro:arg name="gps_rpy" default="0.0 0.0 0.0"/>
+  <!-- base_link → camera_front_hik_link（海康 RTSP）= GPS + (1.7, 0, 0.58) -->
+  <xacro:arg name="camera_front_hik_xyz" default="1.70 0.0 0.58"/>
+  <xacro:arg name="camera_front_hik_rpy" default="0.0 0.0 0.0"/>
+  <!-- base_link → camera_front_gemini_link（双目 Gemini 330，海康 −0.01/+0.09） -->
+  <xacro:arg name="camera_front_gemini_xyz" default="1.71 0.0 0.49"/>
+  <xacro:arg name="camera_front_gemini_rpy" default="0.0 0.0 0.0"/>
+  <!-- base_link → camera_back_video_link（后视 UVC）
+       朝后安装：绕 Z 转 180°（镜头指向 −x） -->
+  <xacro:arg name="camera_back_video_xyz" default="1.58 0.0 0.46"/>
+  <xacro:arg name="camera_back_video_rpy" default="0.0 ${-17*pi/180} ${pi}"/>
+
+  <xacro:property name="livox_xyz" value="$(arg livox_xyz)"/>
+  <xacro:property name="livox_rpy" value="$(arg livox_rpy)"/>
+  <xacro:property name="imu_xyz" value="$(arg imu_xyz)"/>
+  <xacro:property name="imu_rpy" value="$(arg imu_rpy)"/>
+  <xacro:property name="gps_xyz" value="$(arg gps_xyz)"/>
+  <xacro:property name="gps_rpy" value="$(arg gps_rpy)"/>
+  <xacro:property name="camera_front_hik_xyz" value="$(arg camera_front_hik_xyz)"/>
+  <xacro:property name="camera_front_hik_rpy" value="$(arg camera_front_hik_rpy)"/>
+  <xacro:property name="camera_front_gemini_xyz" value="$(arg camera_front_gemini_xyz)"/>
+  <xacro:property name="camera_front_gemini_rpy" value="$(arg camera_front_gemini_rpy)"/>
+  <xacro:property name="camera_back_video_xyz" value="$(arg camera_back_video_xyz)"/>
+  <xacro:property name="camera_back_video_rpy" value="$(arg camera_back_video_rpy)"/>
+
+  <!-- 船体外形（仅 RViz 可视化；不影响 TF/导航）：暂沿用澄丰尺寸，兴飞实测后覆盖。
+       hull_center_x 是这只占位盒子的中心相对基准点的位置，船尾留 ~0.08 m、船头 ~2.80 m -->
+  <xacro:property name="hull_length" value="2.72"/>
+  <xacro:property name="hull_width"  value="1.30"/>
+  <xacro:property name="hull_height" value="1.07"/>
+  <xacro:property name="hull_center_x" value="1.44"/>
+
+  <material name="usv_hull_gray">
+    <color rgba="0.4 0.45 0.5 1.0"/>
+  </material>
+  <material name="usv_sensor_orange">
+    <color rgba="0.9 0.5 0.1 1.0"/>
+  </material>
+
+  <xacro:macro name="sensor_frame" params="name xyz rpy parent:=base_link">
+    <link name="${name}">
+      <visual>
+        <geometry>
+          <box size="0.06 0.06 0.06"/>
+        </geometry>
+        <material name="usv_sensor_orange"/>
+      </visual>
+    </link>
+    <joint name="${parent}_to_${name}" type="fixed">
+      <parent link="${parent}"/>
+      <child link="${name}"/>
+      <origin xyz="${xyz}" rpy="${rpy}"/>
+    </joint>
+  </xacro:macro>
+
+  <!-- REP-103：camera_link → optical（Z 前、X 右、Y 下） -->
+  <xacro:macro name="optical_frame" params="name parent">
+    <link name="${name}"/>
+    <joint name="${parent}_to_${name}" type="fixed">
+      <parent link="${parent}"/>
+      <child link="${name}"/>
+      <origin xyz="0 0 0" rpy="${-pi/2} 0 ${-pi/2}"/>
+    </joint>
+  </xacro:macro>
+
+  <link name="base_link">
+    <visual>
+      <origin xyz="${hull_center_x} 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="${hull_length} ${hull_width} ${hull_height}"/>
+      </geometry>
+      <material name="usv_hull_gray"/>
+    </visual>
+  </link>
+
+  <!-- Mid360：base → livox 见上方 livox_rpy（2026-09-28 标定，斜向后上方）；IMU 仍相对雷达系 -->
+  <xacro:sensor_frame name="livox_frame" xyz="${livox_xyz}" rpy="${livox_rpy}"/>
+  <xacro:sensor_frame name="imu_link" xyz="${imu_xyz}" rpy="${imu_rpy}" parent="livox_frame"/>
+  <xacro:sensor_frame name="gps_link" xyz="${gps_xyz}" rpy="${gps_rpy}"/>
+
+  <!-- 前向 Hikvision（RTSP 网络相机，正装）：link + optical；图像 header 用 optical -->
+  <xacro:sensor_frame name="camera_front_hik_link"
+                      xyz="${camera_front_hik_xyz}"
+                      rpy="${camera_front_hik_rpy}"/>
+  <xacro:optical_frame name="camera_front_hik_optical_frame"
+                       parent="camera_front_hik_link"/>
+
+  <!-- 前向 Gemini 330/335L（orbbec_camera）：仅挂 link；color/depth/optical/imu 各系由驱动 publish_tf 发布 -->
+  <xacro:sensor_frame name="camera_front_gemini_link"
+                      xyz="${camera_front_gemini_xyz}"
+                      rpy="${camera_front_gemini_rpy}"/>
+
+  <!-- 后向 UVC：link + optical；apriltag TF parent 用 link，图像 header 用 optical -->
+  <xacro:sensor_frame name="camera_back_video_link"
+                      xyz="${camera_back_video_xyz}"
+                      rpy="${camera_back_video_rpy}"/>
+  <xacro:optical_frame name="camera_back_video_optical_frame"
+                       parent="camera_back_video_link"/>
+
+  <!-- 停用的前向 Astra（dabai DCW）：如兴飞装回，取消下面注释即可
+  <xacro:arg name="camera_front_astra_xyz" default="1.71 0.0 0.49"/>
+  <xacro:arg name="camera_front_astra_rpy" default="0.0 0.0 0.0"/>
+  <xacro:sensor_frame name="camera_front_astra_link"
+                      xyz="$(arg camera_front_astra_xyz)"
+                      rpy="$(arg camera_front_astra_rpy)"/>
+  -->
+
+</robot>

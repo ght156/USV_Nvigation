@@ -63,7 +63,7 @@ Nav2 需要 **`global_frame`**（通常为 **`map`**）到 **`robot_base_frame`�
 |----|------|
 | **执行层** | 真船无 **`/usv/thrusters/...`**。需 **停用或替换 `converter.py`**：常见通路为 MAVROS **`/mavros/setpoint_raw/local`**（Offboard，PositionTarget）、**`/mavros/rc/override`**、**`/mavros/actuator_control`** 等，与队里 PX4 **机架/混控**一致。**本仓库实船默认**：**`nav2_cmd_vel_to_mavros`**（**`/cmd_vel_nav`→`/mavros/setpoint_raw/local`**）。仿真与真机 **不可混用同一套增益**。 |
 | **里程计话题** | Nav2 的 **`bt_navigator` / `velocity_smoother`** 的 **`odom_topic`** 必须指向真实可用源：本仓库可走 **`robot_localization`→`/odometry/filtered`** 或 **`/mavros/local_position/odom`**（见 **`nav2_mavros_odom_overlay.yaml`**）。**严禁**在未弄清 TF 的情况下 **EKF + MAVROS local_pose 同时向同一子帧发 `odom`→车体**。 |
-| **激光 / 避障** | **仿真**：**`nav2_params.yaml`** → **`ObstacleLayer`** + **`LaserScan`**，约定 **`/usv/sensors/lidar/scan`**。**实船（模式 B）**：**`nav2_params_real_mavros.yaml`** → **`VoxelLayer`** + **`PointCloud2`**，默认 **`/livox/lidar`**；须核对 **点云 `frame_id`→`base_link` TF**、**时间戳**、**`use_sim_time=false`**，并按现场标定 **高度/体素/距离** 参数。若坚持用二维激光，需改回 **`ObstacleLayer`** 配置或 **`pointcloud_to_laserscan`** + 原激光话题链（见 **`实船调试.md`**）。 |
+| **激光 / 避障** | **仿真**：**`nav2_params.yaml`** → **`ObstacleLayer`** + **`LaserScan`**，约定 **`/usv/sensors/lidar/scan`**。**实船（模式 B）**：**`nav2_params_chengfeng.yaml`** → **`VoxelLayer`** + **`PointCloud2`**，默认 **`/livox/lidar`**；须核对 **点云 `frame_id`→`base_link` TF**、**时间戳**、**`use_sim_time=false`**，并按现场标定 **高度/体素/距离** 参数。若坚持用二维激光，需改回 **`ObstacleLayer`** 配置或 **`pointcloud_to_laserscan`** + 原激光话题链（见 **`实船调试.md`**）。 |
 | **TF 树** | **`map`→`odom`→`base_link`→传感器**须连贯：**模式 B** 用 **MAVROS（嵌软）** + **`robot_state_publisher`（`usv_cf.xacro`）**；**仿真 / 模式 A** 用 **EKF** + **URDF `robot_state_publisher`**。**`map`→`odom` 恒等**与海图/Home 对齐见 [`实船调试.md`](./实船调试.md)。复盘：**[`实船调试.md`](./实船调试.md)**「TF 坐标系总览」、 **`PROJECT_ARCHITECTURE_AND_NAV2.md`** §4.0。 |
 | **`use_sim_time`** | Gazebo **`/clock` 关停**后，整条栈（Nav2、`robot_localization`、桥接节点）必须为 **系统时间**。 |
 
@@ -213,7 +213,7 @@ ros2 interface show <消息类型全名>
 |------|----------|
 | [`实船配置修改清单.md`](./实船配置修改清单.md) | **按文件列出** 要改的话题、YAML 键、launch 参数（速查表）。 |
 | [`船体与导航参数索引.md`](./船体与导航参数索引.md) | **船体几何、Gazebo 流体/推进、Nav2 footprint、地图文件（`boat_parameters_index.yaml` 的 `nav2_maps`）、converter** 等。 |
-| [`实船调试.md`](./实船调试.md) | MAVROS 启动、模式 A/B、**TF 树复盘**、`map`/`odom`/HOME（含 **`/mavros/cmd/set_home`/`CommandHome`**）、`nav2_real_mavros`、命令示例。 |
+| [`实船调试.md`](./实船调试.md) | MAVROS 启动、模式 A/B、**TF 树复盘**、`map`/`odom`/HOME（含 **`/mavros/cmd/set_home`/`CommandHome`**）、`nav2_boat`、命令示例。 |
 | [`PROJECT_ARCHITECTURE_AND_NAV2.md`](./PROJECT_ARCHITECTURE_AND_NAV2.md) | 仿真包分工、EKF/navsat、`nav2_params`、**§7 地图（仿真 / 实船 HK / 备份）**、航点与行为树–速度链。 |
 | **本文** | **迁移优先级**、**架构取舍**、**MAVROS 话题语义表**。 |
 

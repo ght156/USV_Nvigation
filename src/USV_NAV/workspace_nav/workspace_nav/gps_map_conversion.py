@@ -70,13 +70,18 @@ def parse_waypoint_message(data_str: str) -> Optional[WaypointParseResult]:
 
     parsed: List[Tuple[float, float]] = []
     for wp in waypoints_list:
-        if isinstance(wp, dict) and "latitude" in wp and "longitude" in wp:
-            lat = float(wp["latitude"])
-            lon = float(wp["longitude"])
-        elif isinstance(wp, (list, tuple)) and len(wp) >= 2:
-            lat = float(wp[0])
-            lon = float(wp[1])
-        else:
+        try:
+            if isinstance(wp, dict) and "latitude" in wp and "longitude" in wp:
+                lat = float(wp["latitude"])
+                lon = float(wp["longitude"])
+            elif isinstance(wp, (list, tuple)) and len(wp) >= 2:
+                lat = float(wp[0])
+                lon = float(wp[1])
+            else:
+                return None
+        except (TypeError, ValueError):
+            return None
+        if not (math.isfinite(lat) and math.isfinite(lon)):
             return None
         if lat == 0.0 and lon == 0.0:
             return None

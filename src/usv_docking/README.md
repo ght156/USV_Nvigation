@@ -115,9 +115,36 @@ python3 -m pytest src/usv_docking/test/ -q
 - 2026-08-05（GUI 仿真，偏轴位置起步：dock_est 初始 x≈−7.3、y≈−2.8、e_yaw≈−28°；16ms 步长 RTF≈0.5）：ACQUIRE→APPROACH 正常，**复现“靠近中轴线时横穿轴线、船 x 轴与坞轴偏差大”**。APPROACH 把 y 修到 −0.05 后即放行 ALIGN，但进 ALIGN 时 **e_yaw 仍 ≈+57°**（`_staging_reached` 只查 x/y，不查艏向）；ALIGN 原地转艏向时残余横向漂移使 y 冲过 0（−0.05→+0.35，过线瞬间 e_yaw≈53°），触发 `align_y_abort` 弹回 APPROACH；第二次 ALIGN 又以 e_yaw≈58° 进入，再次横穿轴线（+0.08→−0.14，过线瞬间 e_yaw≈−45°）；第二次转正后 BACK_IN→FINAL_DOCK→**DOCKED (x≈−0.02, y≈−0.04, e_yaw≈2.2°, success=true)**，总耗时约 116 仿真秒。**状态：现象已复现，待修复**；当日尝试“look-ahead 收艏向 + ALIGN 入口 e_yaw 门槛”（固定前伸与预备点停止逻辑冲突致 y 残留 −0.26m 缓慢微调、移动 pursuit 未验证即震荡），**已回退到快照 61e72a7**，试验详情与下次建议见 [归港冲线修复试验记录](../../docs/archive/归港冲线修复试验记录_20260805.md)。
 - 实测修复的设计缺陷：①估计器推算硬上限 3s→70s（否则撤离 3 秒即瘫）；②安全误差检查仅限坞内走廊 BACK_IN/FINAL_DOCK（APPROACH 远距离噪声、ALIGN 初始大艏偏都会误中止）；③搜索状态豁免安全 odom 时长检查（否则 REACQUIRE 活不过 3s）；④APPROACH→ALIGN 交接死区（approach_y_tol 0.5 > align_y_abort 0.35 → 两态高频抖动，approach_y_tol 收紧至 0.15 < align_y_tol 0.20）；⑤BACK_IN 横向收敛太慢（ky_back 0.2→0.8：收敛长度 5m→1.25m，否则 y 残差 >docked_y_tol 在 x 到点后形成 v=0 死锁）；⑥ALIGN 丢 Tag 零容忍与 REACQUIRE 看到 Tag 仍旋转导致两态互弹（加 5s 宽限 + 停车集帧 + 集帧 3→5）；⑦倒船律稳态 e_yaw=−ky·e_y 随横向残差必超 3° 判据形成终点死锁（新增终局消艏偏：x/y 达标后原地消 e_yaw）。
 - 联调注意事项：①`/dock/start`/`/dock/undock` 是 **Bool** 不是 String；②同一话题多套节点并存会互相打架（kill 时 pkill 模式须用 `[v]` 类字符类避免匹配自身 shell）；③2026-09-01 起控制器在 HOLD/DOCKED_HOLD 停稳 1s 后静默，teleop 可直接接管 cmd_vel_nav（运动态期间仍会互抢，手动接管前先 `/dock/cancel`）。
+- 2026-09-11（实船联调：归港一直刷 `odom TF 不可用（age=3.07s）`，`pose_source` 恒 INVALID）：**根因不在 odom，而在估计器自己把 /tf 订阅饿死了**。`_lookup_2d` 用 `tf_timeout_sec=0.1` 阻塞查询，目标帧不在缓存里时（未检测到 Tag 的 `base_link→dock_frame`）每周期干等满 0.1s → 20Hz 定时器永远追不上 → 单线程 executor 被定时器回调占满 → `/tf` 订阅回调被饿死 → 估计器自己的 tf buffer 落后实时流 2.4~4.3s → 超过 `odom_tf_timeout_sec`(3.0) 误判 INVALID（启动头 10s 的 `age=infs` 同因）。独立纯订阅监听同一时刻看到 odom 是 10Hz、时间戳略超前（新鲜），坐实误报；照抄该模式（20Hz 定时器 + 0.1s 阻塞查询）可 1:1 复现。修复双层：①`tf_timeout_sec` 默认改 **0（非阻塞）**，定时器 20Hz 重试本就够（实测恢复 20.0Hz、告警消失）；②`main()` 改 `MultiThreadedExecutor`（tf2_ros 的 /tf 订阅建在 ReentrantCallbackGroup，定时器在默认互斥组）兜底，即使有人再配回阻塞也不会饿死订阅（实测 0.1s 阻塞下 dock_pose 掉到 10Hz 但 odom 不再误判）；③新增周期超时看门狗，回调超过 2 个周期即告警（该类缺陷下次可直接看见）。回归测试 `test_lookup_missing_frame_does_not_block`。**注意：本次会话里根本没有 AprilTag 定位节点（节点列表无 tag/april 节点，/tf、/tf_static 均无 `base_link→dock_frame`），修好本缺陷后仍须先部署该节点才能归港。**
 - 备注：仿真机 gz 偶发崩溃（曾怀疑 WaveVisual 析构段错误并注释禁用，但禁用后出港崩溃仍复现，2026-09-01 已恢复该插件；其余为外部退出，疑似 OOM），与算法无关。
 - 2026-08-22（无头仿真基线对比）：治本项——**ALIGN 弧线化**（v=0 原地转 → 小倒速 `align_arc_speed`=0.08 弧线消艏向，x≥`align_arc_x_limit`=−1.5 回退 v=0 防卡死滑入坞）。根因：差速双推进在船尾（x=−0.3），v=0 旋转绕推进器中点、base_link 扫弧 Δy≈R_eff·sinθ（sim R_eff≈0.3~0.42m）；实船 MAVROS→ArduPilot Guided 链路 R_eff 未知且不同，故选**行为层修复**（不依赖执行链参数，横漂≈|v|·sin(e_yaw)，入口 e_yaw≤10° 下≈1.4cm/s），对仿真/实船通用。基线（含 08-10 三修复）同偏轴场景 DOCKED (x=0.087, y=0.029, e_yaw=−1.78°，验证记录见 logs/dock_baseline_run_20260822.log)；弧线化修复单元 50 项全过，但同场景无头复测两次均卡在 **APPROACH→REACQUIRE**（预备点附近 e_yaw≈70° 原地修艏向时后相机丢失 Tag、REACQUIRE 30s 超时）——该阶段与本修复无关（仅 ALIGN 分支改动，未进入 ALIGN），属既有 flaky 项，旧码基线恰巧 1.4s 重捕获成功，新码两次未捕获；非回归，须另立专项（见下条）。
 - 2026-08-31（代码评估 + 无头仿真端到端复测，详见仿真仓 docs/归港修复评估与仿真验证_20260831.md，日志 logs/dock_eval_run_20260831.log）：评估修复五项——⑬safety 推算超时按状态分档（ALIGN 新参数 `align_odom_prediction_timeout`=7.0s > FSM 宽限 5s，此前 3.5s 抢跑使 ALIGN 的 REACQUIRE 路径永远走不到）；⑭ABORT_EXIT 位姿 INVALID 超时不再假报可重试，改报 `ABORT_EXIT_UNCONFIRMED`+`needs_reapproach=false`+`needs_manual_takeover=true`，safety 新增 `EXIT_POSE_LOST` 纯告警（5s）；⑮`_enter()` 补复位 `_approach_tag_loss`/`_staging_hold`（残留计时致 REACQUIRE 返回后复弹）；⑯FINAL_DOCK 入口 y 门控 `final_dock_entry_y_tol`=0.15 + 控制器 x 到点 y 超差时蠕行续修（原干等 60s）；⑰FSM/控制器 16 项代码默认值与 yaml 对齐 + `test_param_defaults.py` 防漂移。单测 61/61。**无头复测**（同 08-22 偏轴位姿）：ACQUIRE 搜索 32.6s → APPROACH 收 y（−3.96→0.13）→ e_yaw≈73° 丢 Tag 触发 REACQUIRE **受控旋转 2.2s 重捕**（8ed8267 修复场景首次闭环验证，旧码此处 30s 超时死）→ ALIGN（入口 e_yaw=6.1°）→ BACK_IN → FINAL_DOCK → **DOCKED (x=0.095, y=0.026, e_yaw=−1.91°, success=true)**，全程 99.6 仿真秒，无冲线/无 abort/无互弹。遗留：cmd_vel 下游看门狗上实船前补（`test_only:=false` 前提）；`ABORT_EXIT_UNCONFIRMED` 场景 dock_mission 停 MONITOR_DOCK 待人工 `/dock/cancel`。
+
+- 2026-10-07（实船兴飞，两次现场会话；完整复盘见 `docs/bug_debug/2026-10-07_归港REACQUIRE盲驾把船带走与锚点1m乱跳.md`）：
+  ①**锚点远场重定位跳变 ~1m 引发"越走越远"**——远场观测把 `odom→dock` 锚点搬走 0.77~1.21m
+  （dyaw 仅 0.7~8.7° < `reloc_max_yaw_jump_deg`(10°) 门限 → 守卫放行），dock 系随之报出 5~7m **假横偏**；
+  ②**先上轴目标随船后退（根因）**——`staging = min(x, approach_axis_far_x) - approach_axis_pullout`
+  = `min(x,-4.5)-2.0` 永远比当前位置外 2m，永远追不到 → 以 0.45m/s 一路把船带到 **x≈-13m**
+  （超出后视相机 9~10m 检测极限）→ 丢 Tag。新增 `approach_axis_max_out_x`（默认 **-8.0**）封底
+  + 回归测试 `test_axis_mode_pullout_capped`；
+  ③**虚拟坞位盲驾**——`REACQUIRE + ODOM_PREDICTION → MODE_APPROACH` 在无 Tag 下驾驶，实测单段位移
+  3.4~4.5m、累计把船带走。新增 `reacquire_drive_max_dist_m`（默认 **5.0**）距离门：`|dock_x|>5m`
+  禁止驾驶、退回 HOLD + 回归测试 `test_reacquire_virtual_dock_gated_by_distance`；
+  ④**入口/廊道门槛收紧**（廊道单侧实测仅 5cm）——`approach_y_tol`/`align_y_tol` 0.25→**0.15**、
+  `align_yaw_tol_deg` 10→**7**、`back_in_speed_normal/slow` 0.40/0.20→**0.25/0.15**
+  （0.40 配 ~2s 转向滞后会"窜着进入"；实测入段横偏 0.236m 时艏偏被廊道壁推到 −15°、0.07m 时仅 −5.9°）；
+  `back_in_gate1/2_yaw_deg` **维持 5/15**（现场要求：既然进去了就别再被赶出来）；
+  ⑤**两天失败统计**（bag `/dock/status` 统计）：10-06 触发 18 / 成功 2（**11%**，主因
+  `ACQUIRE_TIMEOUT`×8 + 夹爪 `DOCK_OPEN_FAILED`×6）；10-07 触发 12 / 成功 5（**42%**，
+  主因 `REACQUIRE_TIMEOUT`×5 + 夹爪×5）；
+  ⑥**澄清 Nav2 兜底**——`dock_only` **永不**触发 Nav2 预泊（失败原地重试、船停哪算哪），
+  只有 `one_click`（`/dock/mission/start`、`/dock/home`、`{"action":"one_click_dock"}`）才在
+  `needs_reapproach=true` 时经 Nav2 回预泊点（≤`staging_retry_max`=5 次）；
+  ⑦**记录更正**——`/apriltag_node/detections` **本来就在**录包清单里（run8 bag 实测 Count 7287）；
+  该话题实测 **tag0 被重复检出**（`(0,0)`/`(0,0,1)` 占检出帧约 60%），是否带偏坞位姿待验证；
+  ⑧**部署路径教训**——ament_python 模块在
+  `install/arm/usv_docking/lib/python3.10/site-packages/usv_docking/`（**不是** `lib/usv_docking/`，
+  后者只有可执行入口脚本）；拷错位置时 `ros2 param get` 会显示新参数 "not set"。
 
 ---
 

@@ -17,29 +17,31 @@
 | `use_sim_time` 默认 | true | **false** |
 | launch `profile` 默认 | sim | **real**（`dock_mission_real.yaml` overlay） |
 | `speed_arbitrator` | 默认启动 | **默认不启动**（`enable_speed_arbitrator:=true` 才起；实船 Nav2/docking 都直发 `/cmd_vel_nav`，互斥由交接时序 + 速度桥 1s 看门狗保证） |
-| `dock_entry_validator` 里程计 | `/odometry/filtered`（代码默认/仿真） | `/mavros/gps_input/local`（`dock_mission_real.yaml` overlay） |
+| `dock_entry_validator` | 默认启动 | **已移除**（2026-09：origin_map 吃 FC-odom 系、飞控重启即失效需重填，门控又放得很宽，防错价值抵不过维护成本；交接前把关由 Nav2 docking_goal_checker 承担） |
 
 实船使用前**必须**：
 
-1. 用 RTK 标定泊位，覆盖 `config/dock_database.yaml`（现有 `bay2` 是仿真值）；
+1. 用 RTK 标定泊位，覆盖 `config/dock_database.yaml`（`gnss_staging`；`bay2` 已有 2026-09-12 实船标定值）；
 2. 确认 Nav2 预泊容差：本包默认向 `goal_checker_selector` topic 发切换并兜底改
-   `general_goal_checker` 参数——实船 `nav2_params_real_mavros.yaml` 若未定义这两个
+   `general_goal_checker` 参数——实船 `nav2_params_chengfeng.yaml` 若未定义这两个
    checker，切换会静默无效（仅日志告警），需自行添加或调 `controller_server` 默认容差；
 3. 视觉精定位依赖运行时 TF `base_link→dock_frame`（由 AprilTag 定位节点广播），
-   本仓暂未包含 AprilTag 节点，需另行部署；
-4. `dock_entry_validator` 的 bay 几何仍是硬编码占位值（`entry_validator_node.py` TODO），
-   且把 odom 系位姿当 map 系用——实船标定时需改从 `dock_database.yaml` 加载。
+   本仓暂未包含 AprilTag 节点，需另行部署。
+
+> 入口验收（`dock_entry_validator` / `dock_enu` / `origin_map` / `entry_corridor`）
+> 已于 2026-09 整体移除，泊位库只保留预泊点（gnss_staging / map_staging）；
+> 飞控重启后不再需要重填任何 dock 几何。
 
 
 ## 两个 dock 包分别干什么？
 
 | | **dock_mission**（本包） | **usv_docking**（精靠泊包） |
 |---|--------------------------|-----------------------------|
-| **职责** | 任务编排：预泊 Nav、入口验收、handoff、重试 | 最后几米：搜 Tag、对准、倒船入坞、充电确认 |
+| **职责** | 任务编排：预泊 Nav、停稳、handoff、重试 | 最后几米：搜 Tag、对准、倒船入坞、充电确认 |
 | **距离尺度** | 几十米 → 预泊点（约 4 m 外） | 预泊点 → 坞内（0~2 m） |
 | **主要传感器** | RTK/里程计 + map/GNSS | AprilTag + 里程计（+ 无线充电） |
 | **控制输出** | 调 Nav2（`send_waypoints`）+ 仲裁 cmd_vel | 直接发 `/cmd_vel_nav`（或经仲裁器） |
-| **你什么时候改它** | 预泊点坐标、Nav 容差、入口走廊、一键归港接口 | Tag 对准、倒船速度、通道门槛、充电判定 |
+| **你什么时候改它** | 预泊点坐标、Nav 容差、一键归港接口 | Tag 对准、倒船速度、通道门槛、充电判定 |
 | **典型启动** | `ros2 launch dock_mission dock_mission.launch.py` | `ros2 launch usv_docking docking.launch.py` |
 
 **一句话**：`dock_mission` = 「把船 Nav 到预泊点并检查能不能泊」；`usv_docking` = 「进了预泊点之后怎么倒进去」。
@@ -55,8 +57,7 @@ GCS / 上层
 │  1. 切换 Nav2 → docking_goal_checker（更紧的到点容差）        │
 │  2. mission_bridge.send_waypoints(预泊点)                    │
 │  3. SETTLE 等待船停稳                                         │
-│  4. entry_validator 检查 dock_enu 走廊                        │
-│  5. 发布 /dock/start → 交给 usv_docking                       │
+│  4. 发布 /dock/start → 交给 usv_docking                       │
 └─────────────────────────────────────────────────────────────┘
     │
     ▼
@@ -79,10 +80,11 @@ GCS / 上层
 | 节点 | 作用 | 要不要单独调 |
 |------|------|--------------|
 | `dock_mission_node` | 归港 FSM、Nav2 GoalChecker 切换、发航点、handoff | **主要调这个** |
-| `dock_entry_validator` | 预泊后检查船是否在 dock_enu 入口走廊内 | 调走廊几何 / Tag 要求 |
 | `speed_arbitrator` | Nav 与 Dock 的 `cmd_vel` 互斥（可选接入） | 接 Nav2 remap 时才需要 |
 
-一个 launch 会同时起前两个节点（`speed_arbitrator` 需 `enable_speed_arbitrator:=true`）：
+（`dock_entry_validator` 入口验收节点已于 2026-09 移除。）
+
+默认一个 launch 只起 `dock_mission_node`（arbitrator 需 `enable_speed_arbitrator:=true`）：
 
 ```bash
 ros2 launch dock_mission dock_mission.launch.py   # 实船默认 profile:=real, use_sim_time:=false
@@ -142,7 +144,6 @@ ros2 service call /dock/mission/cancel std_srvs/srv/Trigger {}
 ```bash
 ros2 topic echo /dock/mission_status   # JSON：state、staging_retry、nav2_profile
 ros2 topic echo /dock/status           # usv_docking 精靠泊状态
-ros2 topic echo /dock/entry_status     # 入口验收
 ```
 
 ---
@@ -154,13 +155,13 @@ ros2 topic echo /dock/entry_status     # 入口验收
 ```text
 dock_mission/
 ├── config/
-│   ├── dock_mission.yaml          ← 三个节点的 ROS 参数（主配置）
+│   ├── dock_mission.yaml          ← 节点的 ROS 参数（主配置）
 │   ├── dock_mission_real.yaml     ← 实船 overlay（默认 profile）
-│   └── dock_database.yaml         ← 泊位几何 + 预泊点坐标（GNSS/map）★ 实船须 RTK 重标定
+│   └── dock_database.yaml         ← 泊位预泊点坐标（GNSS/map）★ 实船须 RTK 重标定
 └── launch/dock_mission.launch.py  ← profile:=real 选择 overlay（默认实船）
 
 workspace_nav/config/
-└── nav2_params_real_mavros.yaml   ← GoalChecker 容差 ★ Nav 容差
+└── nav2_params_chengfeng.yaml   ← GoalChecker 容差 ★ Nav 容差
 
 usv_docking/config/
 └── docking.yaml                   ← 精靠泊全部参数（另一包）
@@ -195,20 +196,11 @@ usv_docking/config/
 
 ---
 
-### 场景 2：Nav 说到了但 Entry 验收失败
+### 场景 2：Nav 到点精度不够（交接时船位/艏向太偏）
 
-Nav2 **COMPLETED ≠ 可泊**。Entry Validator 用 dock_enu 走廊再判一次。
+入口验收已移除（2026-09），交接前的把关就是 **Nav2 的到点容差**。
 
-**改这里** → [`config/dock_database.yaml`](config/dock_database.yaml) 的 `entry_corridor`：
-
-| 字段 | 默认 | 含义 |
-|------|------|------|
-| `x_min` | -6.0 | 入口外最远（ex 更负 = 更远） |
-| `x_max` | 0.0 | 入口线（ex≥0 判为已过线 → BACKOFF） |
-| `y_max` | 1.0 | 横向 \|ey\| 上限 (m) |
-| `yaw_max` | 0.15 | 航向误差上限 (rad) |
-
-**或改 Nav 到点容差**（让 Nav 停得更准）→ `workspace_nav/config/nav2_params.yaml`：
+**改这里** → `workspace_nav/config/nav2_params_chengfeng.yaml`：
 
 ```yaml
 docking_goal_checker:
@@ -257,21 +249,7 @@ Service 固定为 `/dock/mission/start`、`/dock/mission/cancel`，一般不用�
 
 ---
 
-### 场景 5：Entry Validator 要求看到 Tag 才 handoff
-
-默认 **不要求** Tag（`require_tag_for_proceed: false`），只靠 RTK/odom + 走廊。
-
-若要加强校验：
-
-```yaml
-# dock_mission.yaml → dock_entry_validator
-require_tag_for_proceed: true
-tag_mismatch_threshold_m: 0.8   # Tag 与 map 偏差过大则拒绝
-```
-
----
-
-### 场景 6：Nav 与 Dock 抢 cmd_vel
+### 场景 5：Nav 与 Dock 抢 cmd_vel
 
 若 Nav2 输出 `/cmd_vel_nav_raw`，Dock 输出 `/cmd_vel_dock`，需要仲裁：
 
@@ -288,11 +266,11 @@ cmd_vel_dock_topic: "/cmd_vel_dock"    # usv_docking 改发这里（需改 usv_d
 
 ---
 
-### 场景 7：精靠泊阶段（倒船、Tag、充电）
+### 场景 6：精靠泊阶段（倒船、Tag、充电）
 
 **不在本包调**，去 [`../usv_docking/README.md`](../usv_docking/README.md) 的调参章节。
 
-本包只负责在 Entry 通过后发 `/dock/start`；之后全是 `usv_docking`。
+本包只负责在停稳后发 `/dock/start`；之后全是 `usv_docking`。
 
 ---
 
@@ -318,12 +296,6 @@ cmd_vel_dock_topic: "/cmd_vel_dock"    # usv_docking 改发这里（需改 usv_d
 | `/dock/speed_authority` | `String` | 速度仲裁权（NAVIGATION / DOCKING / …） |
 | `goal_checker_selector` | `String` | Nav2 GoalChecker 切换 |
 
-### 服务
-
-| 名称 | 类型 | 说明 |
-|------|------|------|
-| `/dock/validate_entry` | `Trigger` | entry_validator 提供，FSM 内部调用 |
-
 ---
 
 ## 状态机（dock_mission_node）
@@ -336,9 +308,6 @@ ARMED → NAV_TO_STAGING（apply_docking + send_waypoints）
   │ TASK_COMPLETED
   ▼
 SETTLE（settle_sec 秒）
-  ▼
-ENTRY_VALIDATE（/dock/validate_entry）
-  │ 通过
   ▼
 DOCK_HANDOFF（/dock/start=true，authority=DOCKING）
   ▼
@@ -368,7 +337,6 @@ MONITOR_DOCK（等 /dock/status success 或 needs_reapproach）
 |------|----------|------|
 | 发 `/dock/home` 没反应 | `dock_mission_node` 未启动 | launch 本包 |
 | `send_waypoints service unavailable` | mission_bridge 未跑 | 先起 mission_bridge |
-| Nav 完成但 entry 失败 | 预泊点或走廊参数不对 | 调 `dock_database.yaml` entry_corridor / map_staging |
 | `/dock/start` 后 usv_docking 不动 | Nav2 未 deactivate | 本包 handoff 前需 usv_docking 自己处理；或检查 mission 互锁 |
 | 精靠泊 Tag 搜不到 | 预泊姿态 / 相机 | 调 usv_docking，不是本包 |
 
@@ -399,7 +367,7 @@ cd src/dock_mission
 
 | 方向 | 接口 | 说明 |
 |------|------|------|
-| GCS → 船 | `/gcs_dock/command` | JSON `action`：一键归港 / 仅精靠泊 / 出泊 / 取消；可选 `dock_lat`/`dock_lon`/`dock_yaw` 指定**预泊点**（WGS84 经纬度 + **度**航向，`dock_yaw` 超 `(−360,360)` 或 `65536.0` = 不指定朝向），下发后 Nav 到该点再精确归港，缺省用泊位库 `gnss_staging`；`dock_mission` 内部把度转弧度后发给 mission_bridge |
+| GCS → 船 | `/gcs_dock/command` | JSON `action`：一键归港 / 仅精靠泊 / 出泊 / 取消；可选 `dock_lat`/`dock_lon`/`dock_yaw` 指定**预泊点**（WGS84 经纬度 + 预泊点处**船艏航向**，度，ENU/map 系 CCW、0°=东——船尾朝坞 ⇒ 取船艏朝坞外的航向；`dock_yaw` 超 `(−360,360)` 或 `65536.0` = 不指定朝向），下发后 Nav 到该点再精确归港，缺省用泊位库 `gnss_staging`；yaw 全程按**度**透传给 mission_bridge，转弧度只在 mission_bridge 生成 Nav2 位姿时做 |
 | 上层 → 船 | `/dock/home` | `Bool`：一键归港 |
 | 上层 → 船 | `/dock/mission/start` | `Trigger` service：一键归港 |
 | 船 → 上层 | `/dock_task/status` | 约 5Hz：`run_state`、`retry_count`、`needs_manual_takeover`、`dock_active` |

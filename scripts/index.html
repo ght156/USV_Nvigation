@@ -1,0 +1,771 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<title>PGM 地图编辑器</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  background: #1a1a1a; color: #ddd;
+  font-family: sans-serif;
+  display: flex; flex-direction: column;
+  height: 100vh; overflow: hidden;
+  user-select: none;
+}
+#toolbar {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 6px 12px; background: #252525; border-bottom: 1px solid #3a3a3a;
+  flex-shrink: 0;
+}
+button {
+  padding: 4px 12px; border: 1px solid #555; border-radius: 4px;
+  background: #333; color: #ccc; cursor: pointer; font-size: 13px;
+}
+button:hover { background: #444; }
+button.active { background: #1a6fc4; border-color: #2a8ae4; color: #fff; }
+.sep { width: 1px; height: 22px; background: #444; }
+label { font-size: 13px; display: flex; align-items: center; gap: 4px; }
+#viewport {
+  flex: 1; overflow: hidden; position: relative;
+  background: #111;
+}
+canvas#c {
+  position: absolute;
+  image-rendering: pixelated;
+  cursor: crosshair;
+}
+#status {
+  padding: 3px 12px; background: #252525;
+  border-top: 1px solid #3a3a3a; font-size: 12px; flex-shrink: 0;
+}
+#region-actions {
+  display: none; position: absolute; z-index: 20;
+  background: #2d2d2d; border: 1px solid #666; border-radius: 6px;
+  padding: 5px; flex-direction: column; gap: 4px;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.5);
+}
+#region-actions button { font-size: 12px; padding: 3px 10px; }
+</style>
+</head>
+<body>
+
+<div id="toolbar">
+  <button id="btn-open">📂 打开 PGM</button>
+  <input type="file" id="file-input" accept=".pgm" style="display:none">
+  <button id="btn-save">💾 导出 PGM</button>
+  <div class="sep"></div>
+  <button id="btn-wall"    class="active">🖊 障碍 (W)</button>
+  <button id="btn-free">🧹 擦除 (E)</button>
+  <button id="btn-unknown">❓ 未知 (U)</button>
+  <button id="btn-rect">⬜ 区域 (R)</button>
+  <button id="btn-poly">🔵 多边形 (P)</button>
+  <button id="btn-poly-commit" style="display:none">✅ 生成区域</button>
+  <button id="btn-line">📏 连线 (L)</button>
+  <button id="btn-line-commit" style="display:none">✅ 连线</button>
+  <div class="sep"></div>
+  <label>笔刷:
+    <input type="range" id="brush-size" min="1" max="30" value="2" style="width:70px">
+    <span id="brush-val">2</span>
+  </label>
+  <div class="sep"></div>
+  <label><input type="checkbox" id="chk-grid" checked> 网格</label>
+  <div class="sep"></div>
+  <button id="btn-undo">↩ 撤销 (Ctrl+Z)</button>
+</div>
+
+<div id="viewport">
+  <canvas id="c"></canvas>
+  <div id="region-actions">
+    <button id="ra-wall">🖊 障碍</button>
+    <button id="ra-free">🧹 擦除</button>
+    <button id="ra-cancel">✕</button>
+  </div>
+</div>
+
+<div id="status">请打开 PGM 文件</div>
+
+<script>
+const vp       = document.getElementById('viewport');
+const canvas   = document.getElementById('c');
+const ctx      = canvas.getContext('2d');
+const fileInput= document.getElementById('file-input');
+const statusEl = document.getElementById('status');
+
+// ── 地图数据 ──────────────────────────────────────────────
+let mapW = 0, mapH = 0, maxVal = 255;
+let mapData = null;   // Uint8Array，原始灰度值
+let offscreen = null; // OffscreenCanvas，地图底图
+
+// ── 视口变换 ──────────────────────────────────────────────
+let zoom = 1;
+let panX = 0, panY = 0;
+
+// ── 工具状态 ──────────────────────────────────────────────
+let tool      = 'wall';
+let brushSize = 2;
+let showGrid  = true;
+let history   = [];
+let painting  = false;
+let lastMX = -1, lastMY = -1;
+
+// 区域框选 — 存屏幕坐标，松开时转地图坐标四角点
+let rectActive = false;
+let rectSX = 0, rectSY = 0, rectEX = 0, rectEY = 0; // 屏幕坐标
+
+// 多边形打点
+const POLY_COLORS = ['#4af','#f44','#4d4','#fd0'];
+let polyPoints = [];  // [{mx,my}, ...]
+
+// 连线工具
+let linePoints = [];  // 最多2个点 [{mx,my}, ...]
+
+// 笔刷光标位置（屏幕坐标）
+let cursorX = null, cursorY = null;
+
+// 待确认区域（生成后等待用户选择障碍/擦除）
+let pendingRegion = null;  // [{mx,my}, ...]
+const raPanel = document.getElementById('region-actions');
+
+function showRegionActions(pts) {
+  // 计算区域中心的屏幕坐标
+  const cx = pts.reduce((s, p) => s + p.mx, 0) / pts.length;
+  const cy = pts.reduce((s, p) => s + p.my, 0) / pts.length;
+  // 地图坐标 → 屏幕坐标（逆向 toMap）
+  const r = vp.getBoundingClientRect();
+  const rad = rotation * Math.PI / 180;
+  const vcx = r.width / 2, vcy = r.height / 2;
+  const lx = cx * zoom + panX - vcx, ly = cy * zoom + panY - vcy;
+  const sx = lx * Math.cos(rad) - ly * Math.sin(rad) + vcx;
+  const sy = lx * Math.sin(rad) + ly * Math.cos(rad) + vcy;
+  raPanel.style.left = (sx + 12) + 'px';
+  raPanel.style.top  = (sy - 20) + 'px';
+  raPanel.style.display = 'flex';
+  pendingRegion = pts;
+}
+
+function hideRegionActions() {
+  raPanel.style.display = 'none';
+  pendingRegion = null;
+}
+
+document.getElementById('ra-wall').onclick = () => {
+  if (!pendingRegion) return;
+  pushHistory();
+  const saved = tool; tool = 'wall';
+  fillPolygon(pendingRegion);
+  tool = saved;
+  hideRegionActions();
+};
+document.getElementById('ra-free').onclick = () => {
+  if (!pendingRegion) return;
+  pushHistory();
+  const saved = tool; tool = 'free';
+  fillPolygon(pendingRegion);
+  tool = saved;
+  hideRegionActions();
+};
+document.getElementById('ra-cancel').onclick = hideRegionActions;
+
+// 中键平移 / 右键旋转
+let panning = false;
+let panStartX = 0, panStartY = 0;
+let rotating = false;
+let rotStartX = 0, rotStartAngle = 0;
+let rotation = 0;  // 度
+
+// RAF 节流
+let rafId = null;
+
+// ── 工具栏 ────────────────────────────────────────────────
+document.getElementById('btn-open').onclick = () => fileInput.click();
+fileInput.onchange = e => e.target.files[0] && loadFile(e.target.files[0]);
+document.getElementById('btn-save').onclick = exportPGM;
+document.getElementById('btn-undo').onclick = undo;
+document.getElementById('brush-size').oninput = e => {
+  brushSize = +e.target.value;
+  document.getElementById('brush-val').textContent = brushSize;
+};
+document.getElementById('chk-grid').onchange = e => {
+  showGrid = e.target.checked; requestRender();
+};
+
+['wall','free','unknown','rect','poly','line'].forEach(name => {
+  document.getElementById('btn-' + name).onclick = () => selectTool(name);
+});
+
+document.getElementById('btn-poly-commit').onclick = () => {
+  if (polyPoints.length < 3) { statusEl.textContent = '至少需要3个点才能生成区域'; return; }
+  const pts = convexHull(polyPoints);
+  polyPoints = [];
+  document.getElementById('btn-poly-commit').style.display = 'none';
+  requestRender();
+  showRegionActions(pts);
+};
+
+document.getElementById('btn-line-commit').onclick = () => {
+  if (linePoints.length < 2) return;
+  pushHistory();
+  bresenhamLine(linePoints[0].mx, linePoints[0].my, linePoints[1].mx, linePoints[1].my);
+  linePoints = [];
+  document.getElementById('btn-line-commit').style.display = 'none';
+  requestRender();
+};
+
+function bresenhamLine(x0, y0, x1, y1) {
+  let dx = Math.abs(x1-x0), dy = Math.abs(y1-y0);
+  let sx = x0<x1?1:-1, sy = y0<y1?1:-1, err = dx-dy;
+  while (true) {
+    const r = Math.floor((brushSize - 1) / 2);
+    for (let dy2 = -r; dy2 <= r; dy2++)
+      for (let dx2 = -r; dx2 <= r; dx2++) {
+        const nx = x0+dx2, ny = y0+dy2;
+        if (inMap(nx, ny)) { mapData[ny*mapW+nx] = 0; patchOffscreen(nx, ny); }
+      }
+    if (x0===x1 && y0===y1) break;
+    const e2 = 2*err;
+    if (e2 > -dy) { err -= dy; x0 += sx; }
+    if (e2 <  dx) { err += dx; y0 += sy; }
+  }
+  buildOffscreen();
+}
+
+function selectTool(name) {
+  tool = name;
+  document.querySelectorAll('#toolbar button').forEach(b => b.classList.remove('active'));
+  document.getElementById('btn-' + name).classList.add('active');
+  rectActive = false;
+  hideRegionActions();
+  if (name !== 'poly') {
+    polyPoints = [];
+    document.getElementById('btn-poly-commit').style.display = 'none';
+  }
+  if (name !== 'line') {
+    linePoints = [];
+    document.getElementById('btn-line-commit').style.display = 'none';
+  }
+  requestRender();
+}
+
+// ── PGM 解析 ──────────────────────────────────────────────
+function loadFile(file) {
+  const reader = new FileReader();
+  reader.onload = e => parsePGM(new Uint8Array(e.target.result));
+  reader.readAsArrayBuffer(file);
+}
+
+function parsePGM(buf) {
+  let i = 0;
+  function skipWS() {
+    while (i < buf.length) {
+      while (i < buf.length && buf[i] <= 32) i++;
+      if (i < buf.length && buf[i] === 35) {
+        while (i < buf.length && buf[i] !== 10) i++;
+      } else break;
+    }
+  }
+  function readToken() {
+    skipWS();
+    let s = '';
+    while (i < buf.length && buf[i] > 32) s += String.fromCharCode(buf[i++]);
+    return s;
+  }
+
+  const magic = readToken();
+  if (magic !== 'P5' && magic !== 'P2') { alert('仅支持 P5/P2 PGM'); return; }
+  mapW   = +readToken();
+  mapH   = +readToken();
+  maxVal = +readToken();
+
+  mapData = new Uint8Array(mapW * mapH);
+  if (magic === 'P5') {
+    mapData.set(buf.subarray(i, i + mapW * mapH));
+  } else {
+    for (let p = 0; p < mapW * mapH; p++) mapData[p] = +readToken();
+  }
+
+  history = [];
+  buildOffscreen();
+  fitView();
+  requestRender();
+  statusEl.textContent = `已加载: ${mapW} × ${mapH}  最大值: ${maxVal}`;
+}
+
+// ── 离屏 canvas（地图像素） ───────────────────────────────
+function buildOffscreen() {
+  offscreen = new OffscreenCanvas(mapW, mapH);
+  const oc = offscreen.getContext('2d');
+  const id = oc.createImageData(mapW, mapH);
+  writeAllPixels(id.data);
+  oc.putImageData(id, 0, 0);
+}
+
+function writeAllPixels(d) {
+  for (let p = 0; p < mapW * mapH; p++) {
+    const v = mapData[p];
+    d[p*4] = d[p*4+1] = d[p*4+2] = v;
+    d[p*4+3] = 255;
+  }
+}
+
+function patchOffscreen(px, py) {
+  const oc = offscreen.getContext('2d');
+  const v  = mapData[py * mapW + px];
+  const id = oc.createImageData(1, 1);
+  id.data[0] = id.data[1] = id.data[2] = v;
+  id.data[3] = 255;
+  oc.putImageData(id, px, py);
+}
+
+// ── 视口适配 ──────────────────────────────────────────────
+function fitView() {
+  const vw = vp.clientWidth, vh = vp.clientHeight;
+  // 让地图完整显示，取更小的缩放比
+  zoom = Math.min(vw / mapW, vh / mapH);
+  panX = (vw - mapW * zoom) / 2;
+  panY = (vh - mapH * zoom) / 2;
+  resizeCanvas();
+}
+
+function resizeCanvas() {
+  canvas.width  = vp.clientWidth;
+  canvas.height = vp.clientHeight;
+}
+
+window.addEventListener('resize', () => {
+  if (!mapData) return;
+  resizeCanvas();
+  requestRender();
+});
+
+// ── 渲染 ──────────────────────────────────────────────────
+function requestRender() {
+  if (rafId) return;
+  rafId = requestAnimationFrame(() => { rafId = null; render(); });
+}
+
+function render() {
+  if (!mapData) return;
+  const W = canvas.width, H = canvas.height;
+  ctx.clearRect(0, 0, W, H);
+
+  ctx.save();
+  // 以视口中心为旋转原点
+  const cx = W / 2, cy = H / 2;
+  ctx.translate(cx, cy);
+  ctx.rotate(rotation * Math.PI / 180);
+  ctx.translate(-cx, -cy);
+  ctx.translate(panX, panY);
+  ctx.scale(zoom, zoom);
+
+  // 地图底图
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(offscreen, 0, 0);
+
+  // 网格线（只在 zoom >= 4 时显示，否则太密）
+  if (showGrid && zoom >= 4) {
+    ctx.strokeStyle = 'rgba(80,80,80,0.7)';
+    ctx.lineWidth = 1 / zoom;
+    ctx.beginPath();
+    for (let x = 0; x <= mapW; x++) {
+      ctx.moveTo(x, 0); ctx.lineTo(x, mapH);
+    }
+    for (let y = 0; y <= mapH; y++) {
+      ctx.moveTo(0, y); ctx.lineTo(mapW, y);
+    }
+    ctx.stroke();
+  }
+
+  // 区域框选预览（屏幕坐标系，跟随旋转）
+  if (tool === 'rect' && rectActive) {
+    ctx.restore(); // 退出地图变换，在屏幕坐标系画
+    const lx = Math.min(rectSX, rectEX);
+    const ly = Math.min(rectSY, rectEY);
+    const rw = Math.abs(rectEX - rectSX);
+    const rh = Math.abs(rectEY - rectSY);
+    const r  = vp.getBoundingClientRect();
+    ctx.fillStyle = 'rgba(255,200,0,0.18)';
+    ctx.fillRect(lx - r.left, ly - r.top, rw, rh);
+    ctx.strokeStyle = 'rgba(255,200,0,0.9)';
+    ctx.lineWidth = 1.5;
+    ctx.strokeRect(lx - r.left, ly - r.top, rw, rh);
+    return; // 跳过后面的 ctx.restore()
+  }
+
+  // 多边形打点预览（按凸包顺序连线）
+  if (tool === 'poly' && polyPoints.length > 0) {
+    const hull = polyPoints.length >= 3 ? convexHull(polyPoints) : polyPoints;
+    ctx.beginPath();
+    ctx.moveTo(hull[0].mx + 0.5, hull[0].my + 0.5);
+    for (let i = 1; i < hull.length; i++)
+      ctx.lineTo(hull[i].mx + 0.5, hull[i].my + 0.5);
+    if (hull.length >= 3) ctx.closePath();
+    ctx.strokeStyle = 'rgba(255,255,255,0.7)';
+    ctx.lineWidth = 1 / zoom;
+    ctx.stroke();
+    polyPoints.forEach((p, i) => {
+      ctx.beginPath();
+      ctx.arc(p.mx + 0.5, p.my + 0.5, 3 / zoom, 0, Math.PI * 2);
+      ctx.fillStyle = POLY_COLORS[i % POLY_COLORS.length];
+      ctx.fill();
+    });
+  }
+
+  // 待确认区域轮廓
+  if (pendingRegion && pendingRegion.length >= 2) {
+    ctx.beginPath();
+    ctx.moveTo(pendingRegion[0].mx + 0.5, pendingRegion[0].my + 0.5);
+    for (let i = 1; i < pendingRegion.length; i++)
+      ctx.lineTo(pendingRegion[i].mx + 0.5, pendingRegion[i].my + 0.5);
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(255,200,0,0.12)';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255,200,0,0.9)';
+    ctx.lineWidth = 1.5 / zoom;
+    ctx.stroke();
+  }
+
+  // 连线预览
+  if (tool === 'line' && linePoints.length > 0) {
+    linePoints.forEach((p, i) => {
+      ctx.beginPath();
+      ctx.arc(p.mx + 0.5, p.my + 0.5, 4 / zoom, 0, Math.PI * 2);
+      ctx.fillStyle = i === 0 ? '#4af' : '#f44';
+      ctx.fill();
+    });
+    if (linePoints.length === 2) {
+      ctx.beginPath();
+      ctx.moveTo(linePoints[0].mx + 0.5, linePoints[0].my + 0.5);
+      ctx.lineTo(linePoints[1].mx + 0.5, linePoints[1].my + 0.5);
+      ctx.strokeStyle = 'rgba(255,80,80,0.9)';
+      ctx.lineWidth = Math.max(1, brushSize) / zoom;
+      ctx.stroke();
+    }
+  }
+
+  ctx.restore();
+
+  // 笔刷预览圆（屏幕坐标，仅绘画工具显示）
+  if (['wall','free','unknown'].includes(tool) && cursorX !== null) {
+    const r = vp.getBoundingClientRect();
+    const sx = cursorX - r.left, sy = cursorY - r.top;
+    const radius = brushSize * zoom / 2;
+    ctx.beginPath();
+    ctx.arc(sx, sy, Math.max(1, radius), 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(0,255,100,0.85)';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+  }
+}
+
+// ── 坐标转换 ──────────────────────────────────────────────
+function toMap(clientX, clientY) {
+  const r = vp.getBoundingClientRect();
+  const vx = clientX - r.left;
+  const vy = clientY - r.top;
+  // 逆旋转：以视口中心为原点
+  const cx = r.width / 2, cy = r.height / 2;
+  const rad = -rotation * Math.PI / 180;
+  const dx = vx - cx, dy = vy - cy;
+  const rx = dx * Math.cos(rad) - dy * Math.sin(rad);
+  const ry = dx * Math.sin(rad) + dy * Math.cos(rad);
+  const mx = Math.floor((rx + cx - panX) / zoom);
+  const my = Math.floor((ry + cy - panY) / zoom);
+  return [mx, my];
+}
+
+function inMap(mx, my) {
+  return mx >= 0 && mx < mapW && my >= 0 && my < mapH;
+}
+
+// ── 笔刷绘制 ──────────────────────────────────────────────
+function paintVal() {
+  return tool === 'wall' ? 0 : tool === 'free' ? 254 : 205;
+}
+
+function paintAt(mx, my) {
+  const val = paintVal();
+  const r   = Math.floor((brushSize - 1) / 2);
+  for (let dy = -r; dy <= r; dy++) {
+    for (let dx = -r; dx <= r; dx++) {
+      const nx = mx+dx, ny = my+dy;
+      if (inMap(nx, ny)) {
+        mapData[ny * mapW + nx] = val;
+        patchOffscreen(nx, ny);
+      }
+    }
+  }
+  requestRender();
+}
+
+// Bresenham 连线（防止快速拖动漏点）
+function paintLine(x0, y0, x1, y1) {
+  let dx = Math.abs(x1-x0), dy = Math.abs(y1-y0);
+  let sx = x0<x1?1:-1, sy = y0<y1?1:-1, err = dx-dy;
+  while (true) {
+    paintAt(x0, y0);
+    if (x0===x1 && y0===y1) break;
+    const e2 = 2*err;
+    if (e2 > -dy) { err -= dy; x0 += sx; }
+    if (e2 <  dx) { err += dx; y0 += sy; }
+  }
+}
+
+// ── 区域填充 ──────────────────────────────────────────────
+function fillRegion(x0, y0, x1, y1) {
+  const val = paintVal();
+  const lx = Math.max(0, Math.min(x0,x1));
+  const ly = Math.max(0, Math.min(y0,y1));
+  const rx = Math.min(mapW-1, Math.max(x0,x1));
+  const ry = Math.min(mapH-1, Math.max(y0,y1));
+  for (let y = ly; y <= ry; y++)
+    for (let x = lx; x <= rx; x++)
+      mapData[y*mapW+x] = val;
+  buildOffscreen();   // 批量操作直接重建
+  requestRender();
+}
+
+// ── 凸包（Graham Scan）→ 扫描线填充 ─────────────────────
+function convexHull(pts) {
+  const p = pts.slice().sort((a, b) => a.mx - b.mx || a.my - b.my);
+  const cross = (o, a, b) => (a.mx-o.mx)*(b.my-o.my) - (a.my-o.my)*(b.mx-o.mx);
+  const lower = [], upper = [];
+  for (const pt of p) {
+    while (lower.length >= 2 && cross(lower[lower.length-2], lower[lower.length-1], pt) <= 0) lower.pop();
+    lower.push(pt);
+  }
+  for (let i = p.length-1; i >= 0; i--) {
+    const pt = p[i];
+    while (upper.length >= 2 && cross(upper[upper.length-2], upper[upper.length-1], pt) <= 0) upper.pop();
+    upper.push(pt);
+  }
+  upper.pop(); lower.pop();
+  return lower.concat(upper);
+}
+
+function fillPolygon(pts) {
+  const hull = convexHull(pts);
+  const val = paintVal();
+  const ys = hull.map(p => p.my);
+  const minY = Math.max(0, Math.min(...ys));
+  const maxY = Math.min(mapH - 1, Math.max(...ys));
+  for (let y = minY; y <= maxY; y++) {
+    const xs = [];
+    for (let i = 0, j = hull.length - 1; i < hull.length; j = i++) {
+      const yi = hull[i].my, yj = hull[j].my;
+      if ((yi <= y && yj > y) || (yj <= y && yi > y)) {
+        xs.push(Math.round(hull[j].mx + (y - yj) / (yi - yj) * (hull[i].mx - hull[j].mx)));
+      }
+    }
+    xs.sort((a, b) => a - b);
+    for (let k = 0; k + 1 < xs.length; k += 2) {
+      const lx = Math.max(0, xs[k]), rx = Math.min(mapW - 1, xs[k + 1]);
+      for (let x = lx; x <= rx; x++) mapData[y * mapW + x] = val;
+    }
+  }
+  buildOffscreen();
+  requestRender();
+}
+
+// ── 撤销 ──────────────────────────────────────────────────
+function pushHistory() {
+  history.push(mapData.slice());
+  if (history.length > 50) history.shift();
+}
+
+function undo() {
+  if (!history.length) return;
+  mapData = history.pop();
+  buildOffscreen();
+  requestRender();
+  statusEl.textContent = '已撤销';
+}
+
+// ── 鼠标事件 ──────────────────────────────────────────────
+canvas.addEventListener('mousedown', e => {
+  if (!mapData) return;
+  e.preventDefault();
+
+  // 中键：平移
+  if (e.button === 1) {
+    panning   = true;
+    panStartX = e.clientX - panX;
+    panStartY = e.clientY - panY;
+    canvas.style.cursor = 'grab';
+    return;
+  }
+
+  // 右键：旋转
+  if (e.button === 2) {
+    rotating     = true;
+    rotStartX    = e.clientX;
+    rotStartAngle = rotation;
+    canvas.style.cursor = 'ew-resize';
+    return;
+  }
+
+  if (e.button !== 0) return;
+
+  const [mx, my] = toMap(e.clientX, e.clientY);
+
+  // 连线打点
+  if (tool === 'line') {
+    if (linePoints.length < 2) {
+      linePoints.push({ mx, my });
+      document.getElementById('btn-line-commit').style.display =
+        linePoints.length === 2 ? 'inline-block' : 'none';
+      statusEl.textContent = linePoints.length === 1
+        ? `连线第1点 (${mx}, ${my})，再点一个点`
+        : `连线第2点 (${mx}, ${my})，点击"连线"确认`;
+      requestRender();
+    }
+    return;
+  }
+
+  // 多边形打点
+  if (tool === 'poly') {
+    polyPoints.push({ mx, my });
+    document.getElementById('btn-poly-commit').style.display =
+      polyPoints.length >= 3 ? 'inline-block' : 'none';
+    statusEl.textContent = `已添加第 ${polyPoints.length} 个点 (${mx}, ${my})`;
+    requestRender();
+    return;
+  }
+
+  // 区域框选
+  if (tool === 'rect') {
+    pushHistory();
+    rectActive = true;
+    rectSX = rectEX = e.clientX;
+    rectSY = rectEY = e.clientY;
+    requestRender();
+    return;
+  }
+
+  pushHistory();
+  painting = true;
+  lastMX = mx; lastMY = my;
+  paintAt(mx, my);
+});
+
+canvas.addEventListener('mousemove', e => {
+  if (!mapData) return;
+
+  // 中键平移
+  if (panning) {
+    panX = e.clientX - panStartX;
+    panY = e.clientY - panStartY;
+    requestRender();
+    return;
+  }
+
+  // 右键旋转：水平拖动 1px = 0.5度
+  if (rotating) {
+    rotation = rotStartAngle + (e.clientX - rotStartX) * 0.5;
+    requestRender();
+    return;
+  }
+
+  cursorX = e.clientX; cursorY = e.clientY;
+
+  const [mx, my] = toMap(e.clientX, e.clientY);
+
+  // 状态栏
+  if (inMap(mx, my)) {
+    statusEl.textContent = `格子 (${mx}, ${my})  值: ${mapData[my*mapW+mx]}  缩放: ${zoom.toFixed(2)}×  旋转: ${rotation.toFixed(1)}°`;
+  }
+
+  // 笔刷预览需要实时刷新
+  if (['wall','free','unknown'].includes(tool)) requestRender();
+
+  // 区域框选拖动（存屏幕坐标）
+  if (tool === 'rect' && rectActive) {
+    rectEX = e.clientX; rectEY = e.clientY;
+    requestRender();
+    return;
+  }
+
+  // 普通绘画：连线保证连续
+  if (painting) {
+    paintLine(lastMX, lastMY, mx, my);
+    lastMX = mx; lastMY = my;
+  }
+});
+
+canvas.addEventListener('mouseup', e => {
+  if (panning) {
+    panning = false;
+    canvas.style.cursor = 'crosshair';
+    return;
+  }
+  if (rotating) {
+    rotating = false;
+    canvas.style.cursor = 'crosshair';
+    return;
+  }
+  if (tool === 'rect' && rectActive) {
+    const corners = [
+      [rectSX, rectSY], [rectEX, rectSY],
+      [rectEX, rectEY], [rectSX, rectEY]
+    ].map(([cx, cy]) => {
+      const [mx, my] = toMap(cx, cy);
+      return { mx, my };
+    });
+    rectActive = false;
+    requestRender();
+    showRegionActions(corners);
+    return;
+  }
+  painting = false;
+});
+
+canvas.addEventListener('mouseleave', () => {
+  painting = false;
+  cursorX = null; cursorY = null;
+  if (panning)  { panning  = false; canvas.style.cursor = 'crosshair'; }
+  if (rotating) { rotating = false; canvas.style.cursor = 'crosshair'; }
+  requestRender();
+});
+
+canvas.addEventListener('contextmenu', e => e.preventDefault());
+
+// ── 滚轮缩放（以鼠标为中心） ─────────────────────────────
+canvas.addEventListener('wheel', e => {
+  e.preventDefault();
+  if (!mapData) return;
+
+  const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
+  const oldZoom = zoom;
+  zoom = Math.max(0.2, Math.min(40, zoom * factor));
+
+  const r  = vp.getBoundingClientRect();
+  const mx = e.clientX - r.left;
+  const my = e.clientY - r.top;
+  panX = mx - (mx - panX) * zoom / oldZoom;
+  panY = my - (my - panY) * zoom / oldZoom;
+
+  requestRender();
+}, { passive: false });
+
+// ── 导出 PGM ──────────────────────────────────────────────
+function exportPGM() {
+  if (!mapData) return;
+  const hdr = new TextEncoder().encode(`P5\n${mapW} ${mapH}\n${maxVal}\n`);
+  const out = new Uint8Array(hdr.length + mapData.length);
+  out.set(hdr); out.set(mapData, hdr.length);
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([out], {type:'application/octet-stream'}));
+  a.download = 'map_edited.pgm';
+  a.click();
+  statusEl.textContent = '已导出 map_edited.pgm';
+}
+
+// ── 键盘 ──────────────────────────────────────────────────
+document.addEventListener('keydown', e => {
+  if (e.ctrlKey && e.key === 'z') { undo(); return; }
+  if (e.target.tagName === 'INPUT') return;
+  const map = { w:'wall', e:'free', u:'unknown', r:'rect', p:'poly', l:'line' };
+  if (map[e.key]) selectTool(map[e.key]);
+});
+</script>
+</body>
+</html>

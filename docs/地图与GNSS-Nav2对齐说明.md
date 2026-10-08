@@ -41,7 +41,7 @@ ref_gnss_10: [lon, lat]      # 与 map 原点 (0,0) 对应的角点（默认 dat
 
 | 链路 | 配置 |
 |------|------|
-| Nav2 载入海图 | `nav2_real_mavros.launch.py` → **`map:=`** |
+| Nav2 载入海图 | `nav2_boat.launch.py` → **`map:=`** |
 | `map→odom` | bringup → **`map_config_yaml:=`**（与上相同） |
 | 航点经纬→map x,y | `waypoint_transform` → **`map_yaml_path`** / 默认同包内 yaml |
 | 局域原点 | QGC 或 **`/mavros/cmd/set_home`** 对齐 **`ref_gnss*`** |

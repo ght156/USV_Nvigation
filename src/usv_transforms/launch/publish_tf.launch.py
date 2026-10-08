@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 # ----------------------------------------------------------------------------- #
-#  清污船整车 TF：加载 cleaning_boat.xacro，由 robot_state_publisher 发布
+#  清污船整车 TF：默认加载兴飞船 cleaning_boat_xingfei.xacro，
+#  由 robot_state_publisher 发布
 #  base_link → 各传感器 link 的静态 TF（URDF 内均为 fixed joint）。
 #
 #  用法：
-#    ros2 launch usv_transforms cleaning_boat_tf.launch.py
-#    ros2 launch usv_transforms cleaning_boat_tf.launch.py robot_description_file:=/path/to/other.xacro
+#    ros2 launch usv_transforms publish_tf.launch.py
+#    ros2 launch usv_transforms publish_tf.launch.py robot_description_file:=/path/to/other.xacro
+#      # 默认 = cleaning_boat_xingfei.xacro（兴飞）；澄丰船显式指定 cleaning_boat.xacro
 # ----------------------------------------------------------------------------- #
 import os
 
@@ -21,7 +23,9 @@ def generate_launch_description():
     use_sim_time = LaunchConfiguration('use_sim_time')
 
     default_urdf = os.path.join(
-        get_package_share_directory('usv_transforms'), 'urdf', 'cleaning_boat.xacro'
+        get_package_share_directory('usv_transforms'),
+        'urdf',
+        'cleaning_boat_xingfei.xacro',
     )
     robot_description = ParameterValue(
         Command(['xacro ', LaunchConfiguration('robot_description_file')]),
@@ -37,7 +41,8 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'robot_description_file',
             default_value=default_urdf,
-            description='Path to the USV xacro/urdf used by robot_state_publisher',
+            description='Path to the USV xacro/urdf used by robot_state_publisher '
+                        '(default: cleaning_boat_xingfei.xacro 兴飞; 澄丰船传 cleaning_boat.xacro)',
         ),
         Node(
             package='robot_state_publisher',

@@ -72,8 +72,8 @@ class FakeEnv(Node):
         odom.child_frame_id = "base_link"
         self._odom_pub.publish(odom)
 
-        # 给 dock_entry_validator 用的“船位”（它把该话题 pose 当 map 系）：
-        # map(2.5, 0, yaw=π) → dock_enu ex=-3.0, ey=0, eyaw=0，落在占位走廊内
+        # 实船口径的 odom 话题（usv_docking safety/FSM 订阅；入口验收已移除，
+        # 不再有节点把它当 map 系船位用）
         m = Odometry()
         m.header.stamp = now
         m.header.frame_id = "odom"

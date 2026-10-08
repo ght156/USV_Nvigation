@@ -1,0 +1,60 @@
+{
+  "configById": {
+    "3D!rpp3d": {
+      "cameraState": {
+        "distance": 15,
+        "perspective": true,
+        "phi": 60,
+        "target": [0, 0, 0],
+        "targetOffset": [0, 0, 0],
+        "thetaOffset": 45,
+        "fovy": 45,
+        "near": 0.01,
+        "far": 5000
+      },
+      "followMode": "follow-pose",
+      "followTf": "base_link",
+      "scene": {
+        "transforms": { "showLabel": false, "editable": false, "axisScale": 1 },
+        "backgroundColor": "#000000"
+      },
+      "layers": {
+        "grid": {
+          "layerId": "foxglove.Grid",
+          "visible": true,
+          "frameLocked": true,
+          "label": "Grid",
+          "instanceId": "grid",
+          "size": 20,
+          "divisions": 20,
+          "color": "#248eff"
+        }
+      },
+      "topics": {
+        "/local_plan": { "visible": true, "color": "#00ff80", "gradient": ["#00ff80", "#00ff80"] },
+        "/transformed_global_plan": { "visible": true, "color": "#ff8000", "gradient": ["#ff8000", "#ff8000"] },
+        "/received_global_plan": { "visible": false, "color": "#8080ff", "gradient": ["#8080ff", "#8080ff"] },
+        "/plan": { "visible": true, "color": "#0080ff", "gradient": ["#0080ff", "#0080ff"] },
+        "/lookahead_collision_arc": { "visible": true, "color": "#ff4040", "gradient": ["#ff4040", "#ff4040"] },
+        "/lookahead_point": { "visible": true, "color": "#ff00ff" }
+      },
+      "publish": { "type": "point", "poseTopic": "/move_base_simple/goal", "pointTopic": "/clicked_point", "poseEstimateTopic": "/initialpose", "poseEstimateXDeviation": 0.5, "poseEstimateYDeviation": 0.5, "poseEstimateThetaDeviation": 0.261799 }
+    },
+    "RawMessages!rppcmd": {
+      "topicPath": "/cmd_vel_nav",
+      "diffMethod": "custom",
+      "diffTopicPath": "",
+      "diffEnabled": false,
+      "showFullMessageForDiff": false
+    }
+  },
+  "globalVariables": {},
+  "userNodes": {},
+  "playbackConfig": { "speed": 1 },
+  "layout": {
+    "first": "3D!rpp3d",
+    "second": "RawMessages!rppcmd",
+    "direction": "row",
+    "splitPercentage": 75
+  }
+}

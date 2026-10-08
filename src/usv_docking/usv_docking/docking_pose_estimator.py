@@ -26,14 +26,19 @@
   - dock 朝向用「X 轴投影法」提取（dock_frame 若带 roll 翻转，直接取四元数
     yaw 会得到错误符号；投影法对翻转鲁棒，轴向结论见任务2实测）。
   - 连续 jump_reject_unlock_frames 帧观测都被拒，说明船已大幅移位（换泊位/
-    重新 spawn），接受新观测重建锚点。
+    重新 spawn），接受新观测重建锚点；但簇 yaw 与锚点差超
+    reloc_max_yaw_jump_deg 时判定为掠射角观测伪影，拒绝重定位保持原锚点
+    （伪影是一过性的：簇持续超 reloc_guard_escape_sec 仍判定真实移位，
+    守卫放行）。
   - pose 恒按最新可得值发布，是否可用以 pose_source 为准（下游必须判 source）。
 """
 
 import math
+import time
 
 import rclpy
 from rclpy.duration import Duration
+from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import QoSProfile
 from rclpy.time import Time
@@ -43,12 +48,17 @@ from std_msgs.msg import Bool, Float32, String
 
 import tf2_ros
 
+# wrap_angle / SRC_* 统一在 usv_docking.docking_common 定义（此处 import 复用，
+# 保持本模块命名空间可导入 wrap_angle：test_planar_math 直接引用）
+from usv_docking.docking_common import (  # noqa: F401
+    SRC_INVALID,
+    SRC_PREDICTION,
+    SRC_VISION,
+    wrap_angle,
+)
+
 
 # ══════════════════════ 平面数学（纯函数，供单测） ══════════════════════
-
-def wrap_angle(angle: float) -> float:
-    """弧度环绕到 [-pi, pi)。"""
-    return (angle + math.pi) % (2.0 * math.pi) - math.pi
 
 
 def compose_2d(ax, ay, ayaw, bx, by, byaw):
@@ -97,10 +107,6 @@ def transform_to_2d(t: TransformStamped):
 
 # ══════════════════════ 节点 ══════════════════════
 
-SRC_VISION = "VISION"
-SRC_PREDICTION = "ODOM_PREDICTION"
-SRC_INVALID = "INVALID"
-
 
 class DockingPoseEstimator(Node):
     """船坞位姿估计器。"""
@@ -113,7 +119,12 @@ class DockingPoseEstimator(Node):
         self.declare_parameter("base_frame", "base_link")
         self.declare_parameter("dock_frame", "dock_frame")
         self.declare_parameter("dock_est_frame", "dock_est")
-        self.declare_parameter("tf_timeout_sec", 0.1)
+        # TF 查询最长等待：必须保持 0（非阻塞）。本节点是 20Hz 定时器内查询，
+        # 目标帧不在缓存里时（如未检测到 Tag 的 base_link->dock_frame）阻塞等待
+        # 会占满定时器周期→单线程 executor 被定时器回调占满→/tf 订阅回调被
+        # 饿死→自己的 tf buffer 落后数秒→新鲜 odom 被误判 INVALID
+        # （2026-09-11 实船实测 age 恒 3.07s，锚点永建不起来）。
+        self.declare_parameter("tf_timeout_sec", 0.0)
         # odom 帧龄期容忍：EKF 低帧率/抖动下 0.5s 会频繁误判 INVALID 连带废锚点；
         # 推算本就允许数秒陈旧 odom（USV 慢速），3s 远比掉 INVALID 强
         self.declare_parameter("odom_tf_timeout_sec", 3.0)
@@ -134,6 +145,24 @@ class DockingPoseEstimator(Node):
         self.declare_parameter("ema_alpha_yaw", 0.15)
         self.declare_parameter("max_position_jump", 0.60)
         self.declare_parameter("max_yaw_jump_deg", 20.0)
+        # 重定位守卫（2026-10-07）：远距/掠射角观测的 yaw 系统性偏 20~33°
+        # （透视畸变），成簇后会触发跳变解锁把锚点带到错误朝向，控制器追
+        # phantom 越走越歪。浮动坞真实朝向变化缓慢，拒绝簇 EMA 的 yaw 与
+        # 锚点差超此值必是观测伪影：拒绝重定位（保持原锚点，清零计数），
+        # 位置再偏也不重定位
+        self.declare_parameter("reloc_max_yaw_jump_deg", 10.0)
+        # 守卫持续窗口逃逸（2026-10-07 评审）：伪影是船转过该方位的一过性现象，
+        # 真实移位（换泊位/重启，reset_anchor_on_start=false 时无人救）会产生
+        # 持续簇——拒绝簇持续存在超此秒数则判定真实移位，守卫放行重定位
+        self.declare_parameter("reloc_guard_escape_sec", 3.0)
+        # 重定位可信度门（2026-10-07 现场）：远场/单码观测的坞位姿不可信——
+        # 实测远场重定位 dp 0.77~1.21m 而 dyaw < 10°（守卫只判 yaw，全放过），
+        # 锚点被搬走 1m ⇒ 整个 dock 系错 ⇒ 报出 5~7m 假横偏把船带走。
+        # ① 距离门：船-坞距离超此值不重定位（相机 9~10m 极限内也留余量）
+        self.declare_parameter("reloc_max_dist_m", 6.0)
+        # ② 双码门：只在"明确只看到一个码"时拦（看不到码时观测本身也无效，
+        # 不据此拦，避免影响离线单测与无 apriltag 节点的场景）
+        self.declare_parameter("reloc_require_dual_tag", True)
         self.declare_parameter("jump_reject_unlock_frames", 5)
         # 首锚共识：单码远距离噪声/单双码系统差可达 0.7m，首帧即锚会把偏差
         # 固化并被跳变拒绝自我强化（2026-07-29 实测 dp=0.62~0.72m 持续拒绝）
@@ -143,8 +172,12 @@ class DockingPoseEstimator(Node):
 
         # ── 超时 ──
         self.declare_parameter("tag_timeout", 0.30)
-        # 推算硬上限：ABORT_EXIT/UNDOCK 全靠推算驶出，须 >= 安全节点撤离窗口(60s)
-        self.declare_parameter("odom_prediction_timeout", 70.0)
+        # 推算硬上限：ABORT_EXIT/UNDOCK 全靠推算驶出，须 >= 安全节点撤离窗口
+        # （safety.abort_exit_odom_timeout=60s）。2026-10-07 改名：本参数与 safety 的
+        # odom_prediction_timeout(3s=正常运行窗口) 同名但语义完全不同，容易被误
+        # "统一"成同一个值（改小瘫痪撤离、改大废掉安全网）；不等式由
+        # test/test_param_consistency.py 兜底
+        self.declare_parameter("anchor_prediction_timeout_sec", 70.0)
 
         p = self.get_parameter
         self._odom_frame = p("odom_frame").value
@@ -158,6 +191,12 @@ class DockingPoseEstimator(Node):
         self._alpha_yaw = float(p("ema_alpha_yaw").value)
         self._max_pos_jump = float(p("max_position_jump").value)
         self._max_yaw_jump = math.radians(float(p("max_yaw_jump_deg").value))
+        self._reloc_max_yaw_jump = math.radians(
+            float(p("reloc_max_yaw_jump_deg").value)
+        )
+        self._reloc_guard_escape = float(p("reloc_guard_escape_sec").value)
+        self._reloc_max_dist = float(p("reloc_max_dist_m").value)
+        self._reloc_require_dual = bool(p("reloc_require_dual_tag").value)
         self._unlock_frames = int(p("jump_reject_unlock_frames").value)
         self._seed_frames = int(p("seed_frames").value)
         self._seed_max_spread = float(p("seed_max_spread_m").value)
@@ -165,7 +204,9 @@ class DockingPoseEstimator(Node):
             float(p("seed_max_yaw_spread_deg").value)
         )
         self._tag_timeout = float(p("tag_timeout").value)
-        self._prediction_timeout = float(p("odom_prediction_timeout").value)
+        self._prediction_timeout = float(
+            p("anchor_prediction_timeout_sec").value
+        )
 
         qos = QoSProfile(depth=10)
         self._dock_pose_pub = self.create_publisher(
@@ -194,13 +235,18 @@ class DockingPoseEstimator(Node):
         self._reject_count = 0
         self._seed_buf = []   # 首锚共识窗口 [(x,y,yaw), ...]
         self._reject_ema = None  # 被拒观测簇的 EMA（解锁时吸附目标）
+        # 拒绝簇首次出现时刻（重定位守卫持续窗口逃逸用；簇清零时同步清 None，
+        # 但守卫拒绝路径保留——簇还在累积持续时长）
+        self._reject_cluster_start = None
         self._last_vision_stamp = None  # rclpy.time.Time，最近有效视觉观测
         self._prev_source = SRC_INVALID
         # 最近一次输出（x, y, yaw）（dock_est 系下的 base_link）
         self._last_output = None
 
         rate = float(p("publish_rate").value)
-        self.create_timer(1.0 / rate, self._update)
+        self._period = 1.0 / rate
+        self._overrun_warned = 0
+        self.create_timer(self._period, self._update)
 
         self.get_logger().info(
             f"docking_pose_estimator 已启动：{self._odom_frame}/"
@@ -215,11 +261,20 @@ class DockingPoseEstimator(Node):
             self._reject_count = 0
             self._seed_buf = []
             self._reject_ema = None
+            self._reject_cluster_start = None
             self._last_vision_stamp = None
             self._last_output = None
 
     # ── TF 查询（返回 (2d_pose, stamp_age_sec)，失败/过期返回 (None, inf)）──
     def _lookup_2d(self, target: str, source: str, now: Time):
+        """查询 target->source 的平面位姿与时间戳龄期。
+
+        必须非阻塞（tf_timeout_sec 默认 0）：本节点在 20Hz 定时器里查询，若目标
+        帧不在缓存里，阻塞等待会占满整个定时器周期，单线程 executor 随即被定时器
+        回调占满、/tf 订阅回调被饿死，自己的 tf buffer 就会落后实时流数秒，把
+        新鲜的 odom 误判成 INVALID（2026-09-11 实测龄期恒 3.07s）。定时器本身
+        20Hz 重试，阻塞等待没有任何收益。main() 还会用多线程 executor 兜底。
+        """
         try:
             t = self._tf_buffer.lookup_transform(
                 target, source, Time(), timeout=self._tf_timeout
@@ -232,6 +287,7 @@ class DockingPoseEstimator(Node):
 
     # ── 主循环 ──
     def _update(self):
+        t_cycle = time.perf_counter()
         now = self.get_clock().now()
 
         odom_pose, odom_age = self._lookup_2d(
@@ -252,7 +308,8 @@ class DockingPoseEstimator(Node):
         # ── 锚点更新（仅视觉新鲜且 odom 正常时）──
         if vision_ok and odom_ok:
             raw = compose_2d(*odom_pose, *dock_pose)
-            self._update_anchor(raw)
+            # 船-坞距离（dock 在 base_link 系里的模长）用于重定位可信度门
+            self._update_anchor(raw, dist=math.hypot(dock_pose[0], dock_pose[1]))
             self._last_vision_stamp = now - Duration(seconds=dock_age)
 
         # ── 观测龄期与来源分级 ──
@@ -287,8 +344,64 @@ class DockingPoseEstimator(Node):
         if self._broadcast_tf and self._anchor is not None:
             self._broadcast_anchor(now)
 
+        # 周期超时看门狗：回调一旦拖过两个周期，/tf 订阅回调就会开始挨饿，
+        # 早点报出来，别等到 odom 被误判 INVALID 才发现（2026-09-11 缺陷）
+        cost = time.perf_counter() - t_cycle
+        if cost > 2.0 * self._period:
+            self._overrun_warned += 1
+            self.get_logger().warn(
+                f"本周期耗时 {cost * 1e3:.0f}ms 超过定时器周期 "
+                f"{self._period * 1e3:.0f}ms ×2，TF 回调可能挨饿（已 {self._overrun_warned} 次）",
+                throttle_duration_sec=5.0,
+            )
+
     # ── 锚点滤波：共识播种 + EMA + 跳变拒绝（含簇吸附解锁）──
-    def _update_anchor(self, raw):
+    # apriltag_localization 为每个码各发一个 TF 帧（实测 2026-10-07：8.5Hz），
+    # 用它们判断"当前能看到几个码"，不需要引入 m_common 消息依赖
+    _TAG_FRAMES = ("apriltag_0", "apriltag_1")
+
+    def _visible_tag_count(self, now: Time) -> int:
+        """当前可见的单码数（非阻塞查 TF；查不到/过期不算）。"""
+        n = 0
+        for frame in self._TAG_FRAMES:
+            try:
+                t = self._tf_buffer.lookup_transform(
+                    self._base_frame, frame, Time(), timeout=Duration(seconds=0.0)
+                )
+            except (tf2_ros.LookupException, tf2_ros.ConnectivityException,
+                    tf2_ros.ExtrapolationException):
+                continue
+            age = (now - Time.from_msg(t.header.stamp)).nanoseconds * 1e-9
+            if age <= self._tag_timeout:
+                n += 1
+        return n
+
+    def _reloc_trustworthy(self, dist) -> bool:
+        """重定位可信度门：远场 / 明确单码都拒绝改写锚点。
+
+        - 距离门：dist 有效且 > reloc_max_dist_m ⇒ 拒绝（远场坞位姿不可信）
+        - 双码门：只在"明确只看到一个码"（n==1）时拒绝；n==0 表示查不到码
+          （离线单测 / 无 apriltag 节点），此时观测本身也无效，不据此拦
+        """
+        if dist is not None and dist > self._reloc_max_dist:
+            self.get_logger().warn(
+                f"拒绝锚点重定位：距坞 {dist:.1f}m > "
+                f"{self._reloc_max_dist:.1f}m，远场坞位姿不可信",
+                throttle_duration_sec=2.0,
+            )
+            return False
+        if self._reloc_require_dual:
+            n = self._visible_tag_count(self.get_clock().now())
+            if n == 1:
+                self.get_logger().warn(
+                    "拒绝锚点重定位：当前仅单码可见（单双码系统差可达 ~1m），"
+                    "保持原锚点",
+                    throttle_duration_sec=2.0,
+                )
+                return False
+        return True
+
+    def _update_anchor(self, raw, dist=None):
         if self._anchor is None:
             # 首锚共识：收满 seed_frames 帧后取位置中位数/yaw 矢量平均；
             # 离散度超门限则滑窗继续收（双码切换/远距离抖动期不播种）
@@ -321,6 +434,7 @@ class DockingPoseEstimator(Node):
             self._seed_buf = []
             self._reject_count = 0
             self._reject_ema = None
+            self._reject_cluster_start = None
             self.get_logger().info(
                 f"锚点建立（{self._seed_frames}帧共识，离散 {spread:.2f}m/"
                 f"{math.degrees(yaw_spread):.1f}°）：odom ({mx:.2f}, {my:.2f}, "
@@ -337,6 +451,8 @@ class DockingPoseEstimator(Node):
             # （比直接吞最新单帧平滑，且正中双码均值真值）
             if self._reject_ema is None:
                 self._reject_ema = raw
+                if self._reject_cluster_start is None:
+                    self._reject_cluster_start = self.get_clock().now()
             else:
                 self._reject_ema = (
                     self._reject_ema[0] + 0.4 * (raw[0] - self._reject_ema[0]),
@@ -347,14 +463,51 @@ class DockingPoseEstimator(Node):
                     ),
                 )
             if self._reject_count >= self._unlock_frames:
-                self.get_logger().warn(
-                    f"连续 {self._reject_count} 帧跳变，锚点重定位到拒绝簇均值 "
-                    f"({self._reject_ema[0]:.2f}, {self._reject_ema[1]:.2f})"
-                    "——原锚点有偏或船已大幅移位"
+                # 重定位守卫（2026-10-07）：簇 yaw 与锚点差过大疑似掠射角/远距
+                # 观测伪影（浮动坞真实朝向变化缓慢）。持续窗口逃逸：伪影是
+                # 一过性的，簇持续超 reloc_guard_escape_sec 判定真实移位
+                # （换泊位/重启），守卫放行；否则保持原锚点、清零计数与簇 EMA
+                # （但保留 _reject_cluster_start，簇还在累积持续时长）
+                dyaw_reloc = abs(
+                    wrap_angle(self._reject_ema[2] - self._anchor[2])
                 )
+                if dyaw_reloc > self._reloc_max_yaw_jump:
+                    cluster_age = (
+                        self.get_clock().now() - self._reject_cluster_start
+                    ).nanoseconds * 1e-9
+                    if cluster_age > self._reloc_guard_escape:
+                        self.get_logger().warn(
+                            f"簇持续 {cluster_age:.1f}s（> "
+                            f"{self._reloc_guard_escape:.1f}s 守卫窗口），"
+                            "判定真实移位，守卫放行重定位"
+                        )
+                    else:
+                        self.get_logger().warn(
+                            f"拒绝锚点重定位：簇艏向偏差 "
+                            f"{math.degrees(dyaw_reloc):.1f}° > "
+                            f"{math.degrees(self._reloc_max_yaw_jump):.1f}°，"
+                            "疑似掠射角观测伪影，保持原锚点",
+                            throttle_duration_sec=2.0,
+                        )
+                        self._reject_count = 0
+                        self._reject_ema = None
+                        return
+                else:
+                    self.get_logger().warn(
+                        f"连续 {self._reject_count} 帧跳变，锚点重定位到拒绝簇均值 "
+                        f"({self._reject_ema[0]:.2f}, {self._reject_ema[1]:.2f})"
+                        "——原锚点有偏或船已大幅移位"
+                    )
+                # 可信度门（2026-10-07 现场，见参数处注释）：远场 / 明确单码的观测
+                # 不足以改写锚点（锚点一歪，dock 系全歪，控制律会追假目标把船带走）
+                if not self._reloc_trustworthy(dist):
+                    self._reject_count = 0
+                    self._reject_ema = None
+                    return
                 self._anchor = self._reject_ema
                 self._reject_count = 0
                 self._reject_ema = None
+                self._reject_cluster_start = None
             else:
                 self.get_logger().warn(
                     f"拒绝锚点跳变：dp={dp:.2f}m dyaw={math.degrees(dyaw):.1f}°"
@@ -365,6 +518,7 @@ class DockingPoseEstimator(Node):
 
         self._reject_count = 0
         self._reject_ema = None
+        self._reject_cluster_start = None
         ax, ay, ayaw = self._anchor
         self._anchor = (
             ax + self._alpha_pos * (raw[0] - ax),
@@ -419,11 +573,16 @@ class DockingPoseEstimator(Node):
 def main(args=None):
     rclpy.init(args=args)
     node = DockingPoseEstimator()
+    # 多线程 executor：tf2_ros 的 /tf、/tf_static 订阅建在 ReentrantCallbackGroup，
+    # 本节点定时器在默认互斥组，多线程下定时器回调再慢也不会饿死 TF 订阅。
+    executor = MultiThreadedExecutor()
+    executor.add_node(node)
     try:
-        rclpy.spin(node)
+        executor.spin()
     except KeyboardInterrupt:
         pass
     finally:
+        executor.shutdown()
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

@@ -97,7 +97,6 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/NavEmergencyStop.srv"
   "srv/SendWaypoints.srv"
   "srv/CancelMission.srv"
-  "srv/EmergencyStop.srv"
   "srv/SetPause.srv"
   "srv/PerceptionControl.srv"
   "srv/PayloadControl.srv"

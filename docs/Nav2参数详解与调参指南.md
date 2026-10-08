@@ -1,12 +1,12 @@
 # Nav2 参数详解与调参指南（USV 实船）
 
-本文逐一解释 **`workspace_nav/config/nav2_params_real_mavros.yaml`** 中每个参数的含义、原理、对 USV 运动的影响，以及遇到问题时的调参方向。
+本文逐一解释 **`workspace_nav/config/nav2_params_chengfeng.yaml`** 中每个参数的含义、原理、对 USV 运动的影响，以及遇到问题时的调参方向。
 
 **适用场景**：MAVROS/PX4 实船、Livox 避障、差动推进，`RegulatedPurePursuitController` + `SmacPlanner2D`。里程计 **`/mavros/local_position/odom`**；速度链 **`/cmd_vel_nav` → `nav2_cmd_vel_to_mavros` → PX4**。
 
 > **与仿真对照**：RPP / lookahead 几何原理与仿真仓 `wuxihik_navigation/docs/Nav2参数详解与调参指南.md` 一致；仿真参数文件为 `nav2_params.yaml`（EKF `/odometry/filtered`）。改参时**只改本仓实船 yaml**，勿改仿真仓。
 
-**实船启动**：`ros2 launch workspace_nav nav2_real_mavros.launch.py`（见 [`项目运行与联调.md`](./项目运行与联调.md)）。
+**实船启动**：`ros2 launch workspace_nav nav2_boat.launch.py`（见 [`项目运行与联调.md`](./项目运行与联调.md)）。
 
 ---
 
@@ -45,7 +45,7 @@ bt_navigator:
 |------|------|------|------|
 | `global_frame` | 全局坐标系名称 | 所有全局规划、目标点都在这个坐标系下表达。必须与 costmap 的 `global_frame` 一致 | 固定 `map`，不要改 |
 | `robot_base_frame` | 机器人本体系 | TF 树中表示机器人位置的坐标系 | 固定 `base_link`，与 URDF 一致 |
-| `odom_topic` | 里程计话题 | 行为树用这个判断机器人是否在移动、是否到达目标 | 实船为 **`/mavros/local_position/odom`**（与 `nav2_params_real_mavros.yaml`、`mission_bridge`、`velocity_smoother` 一致） |
+| `odom_topic` | 里程计话题 | 行为树用这个判断机器人是否在移动、是否到达目标 | 实船为 **`/mavros/local_position/odom`**（与 `nav2_params_chengfeng.yaml`、`mission_bridge`、`velocity_smoother` 一致） |
 | `bt_loop_duration` | 行为树循环周期 (ms) | 每 10ms 检查一次行为树状态，决定下一步动作 | 默认 10ms，一般不需要改。太小增加 CPU，太大响应慢 |
 | `default_server_timeout` | 动作服务器超时 (ms) | 向 planner/controller 发请求后，等多久算超时 | 网络差或大地图时可适当加大到 50-100 |
 | `wait_for_service_timeout` | 启动等待超时 (ms) | 等待 planner/controller/recovery 等服务就绪 | 默认 1000ms 足够 |
@@ -226,6 +226,9 @@ use_rotate_to_heading: false         # 是否先原地转向对齐路径
 use_collision_detection: true        # 是否启用碰撞检测减速
 max_allowed_time_to_collision_up_to_carrot: 2.0  # 碰撞时间阈值 (s)
 min_distance_to_obstacle: 0.8        # 最小障碍物距离 (m)
+use_interpolation: true              # 稀疏路径点插值补点，跟踪更平滑
+transform_tolerance: 0.2             # TF 变换容忍时间 (s)
+max_robot_pose_search_dist: 10.0     # 路径上找最近位姿的最大搜索距离 (m)
 cost_scaling_factor: 0.5             # 代价缩放因子
 inflation_radius: 1.5                # 膨胀半径 (m)
 stateful: true                       # 是否记住上一周期状态
@@ -238,6 +241,9 @@ stateful: true                       # 是否记住上一周期状态
 | `use_rotate_to_heading` | 追路径前先原地转对方向 | **单桨船必须关**（无法原地转）。**双体差动船可以开**，但注意这会导致高频原地旋转 |
 | `use_collision_detection` | 提前检测是否会撞障碍物 | 必须开。检测到碰撞风险时自动降速甚至停车 |
 | `max_allowed_time_to_collision_up_to_carrot` | 预估碰撞时间 < 此值则触发减速 | 减小 → 更激进；加大 → 更保守 |
+| `use_interpolation` | 路径点之间插值补点 | 路径点稀疏时不插值会一顿一顿，一般开 |
+| `transform_tolerance` | TF 变换容忍时间 (s) | 容忍定位/雷达时基抖动，防报错丢帧；太大精度略降 |
+| `max_robot_pose_search_dist` | 路径上找最近位姿的最大搜索距离 (m) | 防路径自交/回环时投影到错误路段 |
 | `min_distance_to_obstacle` | 与障碍物的安全距离 | 船惯性大，可以设大一点（1~1.5m） |
 | `stateful` | 保持上一周期状态，避免控制指令突变 | 一般开 |
 
@@ -855,4 +861,4 @@ nav2_cmd_vel_to_mavros 限幅 (max_linear_x / max_angular_z)
 
 ---
 
-*最后更新：2026-05-29（实船副本；与 `nav2_params_real_mavros.yaml` 同步维护）*
+*最后更新：2026-05-29（实船副本；与 `nav2_params_chengfeng.yaml` 同步维护）*

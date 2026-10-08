@@ -21,7 +21,6 @@ kill_nodes() {
   pkill -f "docking_motion_controlle[r]" 2>/dev/null
   pkill -f "docking_safet[y]" 2>/dev/null
   pkill -f "dock_mission_nod[e]" 2>/dev/null
-  pkill -f "dock_entry_validato[r]" 2>/dev/null
   pkill -f "fake_en[v]" 2>/dev/null
   pkill -f "mock_mission_bridg[e]" 2>/dev/null
   pkill -f "mock_event_serve[r]" 2>/dev/null

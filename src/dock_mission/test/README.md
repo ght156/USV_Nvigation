@@ -8,19 +8,17 @@
 
 # 或手动
 source /opt/ros/humble/setup.bash
-cd /home/ght/USV_NAV && colcon build --merge-install --packages-select dock_mission
+cd /home/ght/USV_NAV && colcon build --packages-select dock_mission
 source install/setup.bash
 cd src/dock_mission && PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest test/ -v --ignore=test/integration
 ```
 
-当前 **48 项**测试（全部通过；3 个仿真仓遗留的过时断言已于 2026-09-02 对齐现行行为），覆盖：
+当前 **38 项**测试（全部通过；入口验收相关测试已随 `entry_validator`/`dock_enu` 于 2026-09 一并移除），覆盖：
 
 | 模块 | 文件 | 要点 |
 |------|------|------|
 | 泊位加载 | `test_bay_loader.py` | YAML 解析、缺 key、默认值 |
 | GNSS 预泊 | `test_gnss_staging.py` | map/GNSS 互转、`make_staging_pose`、`make_staging_waypoint`（实船 WGS84 契约） |
-| dock_enu | `test_dock_enu.py` | 坐标变换、roundtrip |
-| 入口验收 | `test_entry_validator.py` | RTK / 走廊 / tag / 拒绝分支 |
 | 任务事件 | `test_task_event.py` | JSON 与 legacy 字符串解析 |
 | Nav2 切换 | `test_nav2_goal_checker.py` | docking/cruise GoalChecker |
 | 归港 FSM | `test_dock_mission_fsm.py` | `/dock/home` → Nav staging → handoff |

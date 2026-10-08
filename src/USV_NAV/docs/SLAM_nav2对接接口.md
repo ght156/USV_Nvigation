@@ -13,7 +13,7 @@
 | **话题名** | `/slam/localization` |
 | **消息类型** | `nav_msgs/Odometry` |
 | **频率** | ≥ 20 Hz |
-| **QoS** | BEST_EFFORT, depth ≥ 10 |
+| **QoS** | **RELIABLE**, depth ≥ 10 |
 | **header.frame_id** | `"odom"` |
 | **child_frame_id** | `"base_link"` |
 
@@ -42,6 +42,12 @@ header.stamp                  # 时间戳（ROS 时间）
 
 > **协方差说明**：如果 SLAM 不输出动态协方差，全部填 `0.01` 即可（必须 < 1.0，否则导航判定位异常）。
 
+> **QoS 说明（2026-09-15 更正）**：导航侧订阅端（Nav2 `bt_navigator`/`controller_server`/`velocity_smoother`、
+> `mission_bridge`、`nav_status_aggregator`）的 odom 订阅都是 **RELIABLE**，因此 `/slam/localization`
+> 必须用 **RELIABLE**（depth ≥ 10）发布。RELIABLE 发布端可以兼容 BEST_EFFORT 订阅端，反之不兼容
+> （BEST_EFFORT 发布的数据不会被 RELIABLE 订阅端接收）。本文早前写的 BEST_EFFORT 是错的，已作废。
+> 参考：`slam_nav_bridge.cpp` 里输出即 `rclcpp::QoS(10)` + RELIABLE。
+
 ### 1.2 TF 变换
 
 广播 TF 链：**`map → odom → base_link`**
@@ -54,6 +60,14 @@ header.stamp                  # 时间戳（ROS 时间）
 - `odom → base_link` 就是 Odometry 消息表达的位姿（`frame_id: odom, child_frame_id: base_link`），可以直接从 Odometry 消息发布 TF 或单独广播。
 - `map → odom` 是 SLAM 消除累积漂移后的修正量。如果没有回环检测，初始启动时发布 identity 变换即可。
 
+**时间戳约定**：两条 TF 都使用**定位源 odom 消息的时间戳**（即 `/slam/localization` 的 `header.stamp`），
+使 `map → odom` 与 `odom → base_link` 处于同一时间基；没有有效时间戳时回退 `now()`。
+导航侧已**废弃**"给准静态 `map → odom` 打 `now()+0.2s` 未来时间戳"的旧做法（`tf_future_offset_sec`），
+SLAM 侧不需要做任何预偏移。
+
+**`/tf`、`/tf_static` 的 QoS 不用改**：由 `tf2_ros` 统一管理（RELIABLE，depth 100），发布端与订阅端天然一致；
+需要额外注意 QoS 的只有 `/slam/localization` 本身。
+
 **为什么是两层而不是直接 `map → base_link`？**
 
 导航的 local_costmap（局部避障）工作在 `odom` 帧，global_costmap（全局规划）工作在 `map` 帧。两层解耦让局部规划不受全局修正跳变的影响。
@@ -62,7 +76,8 @@ header.stamp                  # 时间戳（ROS 时间）
 
 ## 二、导航侧提供给 SLAM 的数据
 
-**无需任何运行时通信。** SLAM 直接读取和导航同一份 `map.yaml`，自己提取锚点和元数据。
+**导航侧与 SLAM 之间无需任何运行时通信**：SLAM 直接读取和导航同一份 `map.yaml` 自己提取锚点与元数据；
+GNSS 由 SLAM 自行从船端 GNSS 话题获取（见 2.2）。
 
 ### 2.1 map.yaml 格式
 
@@ -79,6 +94,26 @@ ref_gnss_11: [120.37224289, 31.48551322]   # [经度, 纬度] — SE 角
 
 - `ref_gnss_00` 对应 map 系 `(0, H)`，`ref_gnss_11` 对应 `(W, 0)`，W = 宽×分辨率，H = 高×分辨率
 - **SLAM 自行解析此文件**，不需要导航侧传递任何参数
+
+### 2.2 GNSS 输入（SLAM 侧订阅，船端实际话题）
+
+船端 GNSS 原始数据来自 GI320 驱动，**没有 `/rtk/fix` 的发布者**（`/gnss/fix` 也需要由下述节点生成）：
+
+| 话题 | 类型 | 说明 |
+|------|------|------|
+| `/gi320/gngga` | `bw_gi320_driver/Gi320Gngga` | GGA：`fix_type` / HDOP / 卫星数 |
+| `/gi320/inspvaa` | `bw_gi320_driver/Gi320Inspvaa` | INSPVAA：10 Hz 位置、姿态、航向、速度 |
+
+SLAM 侧统一从 `mapping_gnss` 的 `gnss_unify_node` 取数，它把上面两路合成 `mapping_gnss/GnssFix` 后发到 `/gnss/fix`：
+
+```bash
+ros2 launch mapping_gnss gnss_unify.launch.py \
+  gngga_topic:=/gi320/gngga inspvaa_topic:=/gi320/inspvaa output_topic:=/gnss/fix
+```
+
+因此 lightning / mapping_bridge 里所有 GNSS 话题参数（lightning `system.rtk_topic`、bridge 各节点的
+`gps_topic` / `heading_topic`）都必须指向 **`/gnss/fix`**；写成 `/rtk/fix` 或别的名字在船上收不到数据
+（船上对应话题不存在）。带旧 bag 的 NavSatFix 场景用 `navsat_topic:=` 传入，正常实船运行留空即可。
 
 ---
 
@@ -106,7 +141,10 @@ ref_gnss_11: [120.37224289, 31.48551322]   # [经度, 纬度] — SE 角
 ### 3.2 关键要求
 
 - SLAM 的 `map` 系必须与导航 OccupancyGrid 的原点一致（PGM 左下角 = map 坐标 `origin: [x, y, z]`）
-- 初始化只在启动时做一次，之后 SLAM 独立运行，不再需要 GNSS
+- **初始化（坐标对齐 / 首次锁定 `map→odom`）只在启动时做一次**，之后 SLAM 独立运行
+- 但 GNSS 不是"用完就丢"：运行中 SLAM 仍需继续用它做低频漂移修正。当前 `rtk_lio_fuse` 会持续软融合
+  RTK（`alpha_xy≈0.05`、创新门控 5 m、`z_mode=rtk`），GNSS 失锁超过 `max_gps_age_s`（1 s）才退回纯 LIO。
+  因此"初始化一次"指的是坐标对齐只做一次，不等于"之后可以没有 GNSS"
 - 如果启动时 GNSS 不可用，可回退到手动指定初始位姿
 
 ### 3.3 帧树

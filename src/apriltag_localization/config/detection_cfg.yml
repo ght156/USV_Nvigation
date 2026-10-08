@@ -13,17 +13,20 @@ apriltag_node:
     tag_size: 0.25 # AprilTag码的实际物理尺寸，单位为m
     tag_ids: [0,1] # tag码的唯一ID号，int类型，可自定义配置 tag_ids，支持多个，最少配置一个码
     #参数命名必须包含 tag_{tag_id}码配置船坞至二维码的距离/角度参数
+    # 2026-09-30 兴飞实测标定：船停入船坞后，由两 tag 原始位姿反解，
+    # 使融合 dock_frame 中心对齐 base_link 原点（姿态保持实测值）。
+    # 详见 docs/bug_debug/2026-09-30_兴飞后视AprilTag与船坞中心不对称排查.md
     tag_0: # tag id为0的二维码中心至船坞中心的距离/角度参数
-      dock_offset_x: 0.0 #单位m
-      dock_offset_y: -0.75 #单位m
-      dock_offset_z: -0.2 #单位m
-      dock_offset_roll: 0.0 #单位:度
-      dock_offset_pitch: 0.0 #单位:度
-      dock_offset_yaw: 0.0 #单位:度
+      dock_offset_x: -0.666 #单位m
+      dock_offset_y: 0.724 #单位m
+      dock_offset_z: -0.649 #单位m
+      dock_offset_roll: -0.19 #单位:度
+      dock_offset_pitch: -0.25 #单位:度
+      dock_offset_yaw: -0.26 #单位:度
     tag_1: # tag id为1的的二维码中心至船坞中心的距离/角度参数
-      dock_offset_x: 0.0 #单位m
-      dock_offset_y: 0.75 #单位m
-      dock_offset_z: -0.2 #单位m
-      dock_offset_roll: 0.0 #单位:度
-      dock_offset_pitch: 0.0 #单位:度
-      dock_offset_yaw: 0.0 #单位角:度
+      dock_offset_x: -0.688 #单位m
+      dock_offset_y: -0.540 #单位m
+      dock_offset_z: -0.649 #单位m
+      dock_offset_roll: 0.21 #单位:度
+      dock_offset_pitch: 0.34 #单位:度
+      dock_offset_yaw: 0.15 #单位角:度

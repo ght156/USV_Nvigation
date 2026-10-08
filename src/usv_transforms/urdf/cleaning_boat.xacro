@@ -33,11 +33,14 @@
   <xacro:arg name="camera_front_astra_xyz" default="1.72 0.0 0.1"/>
   <xacro:arg name="camera_front_astra_rpy" default="0.0 0.0 0.0"/>
   <!-- base_link → camera_back_video_link（后向 UVC，供 apriltag，对应 usv_cf 的 camera_rear_link；绕 Z 转 180° 朝后） -->
-  <xacro:arg name="camera_back_video_xyz" default="1.60 0.06 0.42"/>
-  <xacro:arg name="camera_back_video_rpy" default="0.0 0.0 ${pi}"/>
+  <xacro:arg name="camera_back_video_xyz" default="1.60 0.00 0.42"/>
+  <xacro:arg name="camera_back_video_rpy" default="0.0 ${-27*pi/180} ${pi}"/>
 
   <xacro:arg name="camera_front_hik_xyz" default="1.69 0.0 0.1"/>
   <xacro:arg name="camera_front_hik_rpy" default="0.0 0.0 0.0"/>
+  <!-- base_link → camera_front_gemini_link（前向 Gemini 330/335L；姿态补偿/定位用，占位值，实船测量后覆盖） -->
+  <xacro:arg name="camera_front_gemini_xyz" default="1.70 0.0 0.15"/>
+  <xacro:arg name="camera_front_gemini_rpy" default="0.0 0.0 0.0"/>
 
   <xacro:property name="livox_xyz" value="$(arg livox_xyz)"/>
   <xacro:property name="livox_rpy" value="$(arg livox_rpy)"/>
@@ -51,6 +54,8 @@
   <xacro:property name="camera_back_video_rpy" value="$(arg camera_back_video_rpy)"/>
   <xacro:property name="camera_front_hik_xyz" value="$(arg camera_front_hik_xyz)"/>
   <xacro:property name="camera_front_hik_rpy" value="$(arg camera_front_hik_rpy)"/>
+  <xacro:property name="camera_front_gemini_xyz" value="$(arg camera_front_gemini_xyz)"/>
+  <xacro:property name="camera_front_gemini_rpy" value="$(arg camera_front_gemini_rpy)"/>
 
   <!-- 船体外形（仅 RViz 可视化；不影响 TF/导航），实船尺寸 -->
   <xacro:property name="hull_length" value="2.72"/>
@@ -116,6 +121,11 @@
                       rpy="${camera_front_hik_rpy}"/>
   <xacro:optical_frame name="camera_front_hik_optical_frame"
                        parent="camera_front_hik_link"/>
+
+  <!-- 前向 Gemini 330/335L（orbbec_camera）：仅挂 link；color/depth/optical/imu 各系由驱动 publish_tf 发布 -->
+  <xacro:sensor_frame name="camera_front_gemini_link"
+                      xyz="${camera_front_gemini_xyz}"
+                      rpy="${camera_front_gemini_rpy}"/>
 
   <!-- 后向 UVC：link + optical；apriltag TF parent 用 link，图像 header 用 optical -->
   <xacro:sensor_frame name="camera_back_video_link"

@@ -6,10 +6,16 @@
         -> BACK_IN -> FINAL_DOCK -> DOCKED
     异常：REACQUIRE_TAG（入口外丢 Tag）/ ABORT_EXIT（坞内失败驶出）/ FAILED
     出泊：[WAIT_DOCK_RELEASE*] -> UNDOCK_EXIT -> UNDOCK_SETTLE（/dock/undock 触发）
-    * 夹爪交互状态，仅 dock_claw_enabled=true 时启用（默认 false，船坞无夹爪时关闭）：
+    终局（2026-10-05 压紧段设计）：浮动坞位置会漂移，FINAL_DOCK 到达原"死位置"
+      （final_target_x±docked_x_tol）不再停车判成功，控制器低速继续倒船（压紧段），
+      成功判据为无线充电信号稳定（主，/wireless_charger_state 好样本连续
+      charge_stable_sec）/ WaitIO 夹爪抓住（并行保留）；压紧超时
+      （final_push_time_sec）或充电话题断流（CHARGE_SIGNAL_LOST）-> ABORT_EXIT 重试
+    * 夹爪交互状态，仅 dock_claw_enabled=true 时启用（默认 true＝兴飞船；
+      船坞无夹爪时置 false）：
       归港开始先经 WAIT_DOCK_OPEN 请求船坞打开夹爪（ControlDO action），成功才进
       ACQUIRE_TAG；BACK_IN/FINAL_DOCK 期间发 WaitIO action 等待夹爪抓住，抓住即
-      DOCKED（夹爪模式下不再以位置到位判成功）；倒船位移长时间无进展
+      DOCKED（与充电判据并行）；倒船位移长时间无进展
       （backin_stuck_timeout_sec）-> ABORT_EXIT 驶出由 dock_mission 重试；
       出泊先经 WAIT_DOCK_RELEASE 请求松开夹爪，成功才 UNDOCK_EXIT，失败 FAILED
       （爪子可能仍扣着，禁止盲动）。Action 接口为嵌软的
@@ -21,6 +27,8 @@
   /docking/pose_source      (String: VISION/ODOM_PREDICTION/INVALID)
   /docking/measurement_age  (Float32)
   /docking/abort_request    (String, 来自 safety，空串=无请求)
+  /wireless_charger_state      (usv_rs485_driver/WirelessChargerState,
+                                 压紧段充电判据；接口懒加载，话题名见 charge_topic)
   /dock/start                  (Bool, dock_mission 契约)
   /dock/cancel                 (Empty, dock_mission 契约)
   /dock/undock                 (Bool, dock_mission 契约)
@@ -59,32 +67,24 @@ from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Odometry
 from std_msgs.msg import Bool, Empty, Float32, String
 
-
-def wrap_angle(angle: float) -> float:
-    return (angle + math.pi) % (2.0 * math.pi) - math.pi
-
-
-def yaw_from_quat(z: float, w: float) -> float:
-    """平面四元数（仅 yaw 分量）-> yaw。"""
-    return math.atan2(2.0 * z * w, 1.0 - 2.0 * z * z)
-
-
-class DockState:
-    IDLE = "IDLE"
-    ACQUIRE_TAG = "ACQUIRE_TAG"
-    APPROACH_ENTRY = "APPROACH_ENTRY"
-    ALIGN_ENTRY = "ALIGN_ENTRY"
-    BACK_IN = "BACK_IN"
-    FINAL_DOCK = "FINAL_DOCK"
-    DOCKED = "DOCKED"
-    REACQUIRE_TAG = "REACQUIRE_TAG"
-    ABORT_EXIT = "ABORT_EXIT"
-    FAILED = "FAILED"
-    UNDOCK_EXIT = "UNDOCK_EXIT"
-    UNDOCK_SETTLE = "UNDOCK_SETTLE"
-    # 船坞夹爪交互（仅 dock_claw_enabled=true）：归港前请求打开 / 出泊前请求松开
-    WAIT_DOCK_OPEN = "WAIT_DOCK_OPEN"
-    WAIT_DOCK_RELEASE = "WAIT_DOCK_RELEASE"
+from usv_docking.docking_common import (
+    DockState,
+    MODE_ALIGN,
+    MODE_APPROACH,
+    MODE_BACK_IN,
+    MODE_DOCKED_HOLD,
+    MODE_EXIT_FORWARD,
+    MODE_FINAL_DOCK,
+    MODE_HOLD,
+    MODE_SEARCH,
+    MODE_SEARCH_LIMITED,
+    MODE_UNDOCK_FORWARD,
+    SRC_INVALID,
+    SRC_PREDICTION,
+    SRC_VISION,
+    wrap_angle,
+    yaw_from_quat,
+)
 
 
 # 坞内状态（失败须 ABORT_EXIT 驶出）与入口外状态（失败直接回 IDLE 上报）
@@ -97,21 +97,8 @@ OUTSIDE_STATES = (
     DockState.WAIT_DOCK_OPEN,  # 船尚未动，按入口外处理
 )
 
-# target_mode 取值（控制器任务5消费）
-MODE_HOLD = "HOLD"                    # 零速
-MODE_SEARCH = "SEARCH"                # 按 odom 预测方位的扇形搜索（无锚点则自转）
-MODE_APPROACH = "APPROACH"            # 弧线到入口外预备点
-MODE_ALIGN = "ALIGN"                  # v=0 只修航向
-MODE_BACK_IN = "BACK_IN"              # 沿中心线倒入
-MODE_FINAL_DOCK = "FINAL_DOCK"        # 低速倒向充电位
-MODE_SEARCH_LIMITED = "SEARCH_LIMITED"  # 坞内小角度搜索（±backin_max_search_angle）
-MODE_EXIT_FORWARD = "EXIT_FORWARD"    # ABORT_EXIT 沿轴线前进驶出
-MODE_UNDOCK_FORWARD = "UNDOCK_FORWARD"  # 出泊前进
-MODE_DOCKED_HOLD = "DOCKED_HOLD"      # 入泊保持
-
-SRC_VISION = "VISION"
-SRC_PREDICTION = "ODOM_PREDICTION"
-SRC_INVALID = "INVALID"
+# DockState / MODE_* / SRC_* / wrap_angle / yaw_from_quat 统一在
+# usv_docking.docking_common 定义（此处 import 复用，取值不变）。
 
 
 class DockingFsm(Node):
@@ -148,14 +135,23 @@ class DockingFsm(Node):
         self.declare_parameter("acquire_miss_tolerance", 3)
 
         # ── APPROACH_ENTRY：预备点与到点容差（dock 系）──
-        self.declare_parameter("staging_x", -2.5)
+        # 下列默认值与 config/docking.yaml 的实船标定值逐项对齐（2026-10-07），
+        # 由 test/test_param_defaults.py 强制——不带参数文件启动时行为才一致
+        self.declare_parameter("staging_x", -2.0)
         self.declare_parameter("approach_x_tol", 0.4)
         # 必须 <= align_y_tol：否则 (align_y_abort, approach_y_tol) 成死区致
         # APPROACH<->ALIGN 慢性循环
         self.declare_parameter("approach_y_tol", 0.15)
         # APPROACH 放行 ALIGN 的艏向门槛：基线只查 x/y，大艏偏（实测 55°）进场后
         # ALIGN 原地旋转把 y 甩离轴线冲线（08-05/08-10 两次复现）
-        self.declare_parameter("approach_yaw_tol_deg", 10.0)
+        # 2026-10-07：15→25 让大艏偏尽早交给 ALIGN（ALIGN 有 align_arc_speed
+        # 边转边倒，不会像 APPROACH 退化区那样卡死打转）
+        self.declare_parameter("approach_yaw_tol_deg", 25.0)
+        # 预备点退化区打转逃逸（2026-10-07 现场 bag 实锤）：预备线附近带横偏时
+        # 方位角奇异，v=0 原地打转横向修不掉。艏向偏差持续超门限累计此秒数
+        # 仍收不进 -> ABORT 回 IDLE 上报 needs_reapproach（dock_mission 重试，
+        # 比干等 approach_timeout_sec=120s 快得多）
+        self.declare_parameter("approach_stuck_sec", 25.0)
         # 进 ALIGN 前实际速度须接近 0：FSM 切 ALIGN 即发 v=0，实测切换时船仍有
         # ~0.27m/s（命令已降到 0.13），旋转 + 残余线速度放大横向漂移
         self.declare_parameter("approach_stop_speed", 0.15)
@@ -169,10 +165,12 @@ class DockingFsm(Node):
         self.declare_parameter("approach_timeout_sec", 120.0)
 
         # ── ALIGN_ENTRY：进 BACK_IN 门槛 / 退回门槛 ──
+        # 2026-10-06 外八坞入口放宽（y 0.15→0.25 / yaw 5→10 / abort 0.35→0.45）；
+        # 2026-10-07 yaw 10→7（实测廊道单侧仅 5cm，入廊道艏偏要收小）。与 yaml 对齐
         self.declare_parameter("align_y_tol", 0.15)
-        self.declare_parameter("align_yaw_tol_deg", 5.0)
-        self.declare_parameter("align_hold_sec", 1.0)
-        self.declare_parameter("align_y_abort", 0.35)
+        self.declare_parameter("align_yaw_tol_deg", 7.0)
+        self.declare_parameter("align_hold_sec", 2.0)
+        self.declare_parameter("align_y_abort", 0.45)
         self.declare_parameter("align_timeout_sec", 45.0)
         # 艏向已准但 y 滞留卡死带 (y_tol, y_abort] 的逃逸时限：
         # 超时确定性回 APPROACH 修 y（替代干等噪声/总超时）
@@ -193,16 +191,35 @@ class DockingFsm(Node):
         self.declare_parameter("back_in_tag_loss_search_sec", 2.0)
         # 走廊违规（与控制器门控2一致；连续 violation_cycles 周期 -> ABORT_EXIT）
         self.declare_parameter("back_in_gate2_y", 0.35)
-        self.declare_parameter("back_in_gate2_yaw_deg", 10.0)
+        self.declare_parameter("back_in_gate2_yaw_deg", 15.0)
         self.declare_parameter("violation_cycles", 10)
 
         # ── FINAL_DOCK ──
         self.declare_parameter("docked_x_tol", 0.15)
         self.declare_parameter("docked_y_tol", 0.10)
+        # 以下两参数为压紧段设计（2026-10-05）前的"位置到位判 DOCKED"遗留，
+        # FSM 不再使用；保留声明以兼容 scripts/dock_tune_gui.py 在线调参
         self.declare_parameter("docked_yaw_tol_deg", 3.0)
         self.declare_parameter("docked_hold_sec", 1.0)
         self.declare_parameter("final_dock_timeout_sec", 60.0)
         self.declare_parameter("final_dock_tag_loss_timeout_sec", 2.0)
+
+        # ── FINAL_DOCK 压紧段 + 无线充电判据（2026-10-05）──
+        # 到死位置后控制器低速继续倒船（压紧段，见控制器 final_push_speed）：
+        # 压紧段最长时长，超时未判成功 -> ABORT_EXIT（FINAL_PUSH_TIMEOUT）重试
+        self.declare_parameter("final_push_time_sec", 6.0)
+        # 无线充电好样本（charging_status∈{1,5} 且 error_code==0）需连续
+        # 稳定此时长才判 DOCKED；任何坏样本清零计时
+        self.declare_parameter("charge_stable_sec", 2.0)
+        # 无线充电状态话题（usv_rs485_driver/msg/WirelessChargerState）与
+        # 监测开关服务（usv_rs485_driver/srv/WirelessChargerMonitor，enable bool；
+        # 进 BACK_IN 打开，回 IDLE/FAILED 关闭，DOCKED 保留便于观察充电）
+        self.declare_parameter("charge_topic", "/wireless_charger_state")
+        self.declare_parameter("charge_monitor_service", "/wireless_charger_monitor")
+        # 压紧段内充电话题超过此时长无消息视为信号链失效
+        # -> ABORT_EXIT（CHARGE_SIGNAL_LOST）；无线充默认 5s 一帧太慢，
+        # 船端 rs485 驱动需把 wireless_charger 轮询周期改为 1000ms
+        self.declare_parameter("charge_status_timeout_sec", 3.0)
 
         # ── ALIGN_ENTRY 丢 Tag 宽限 ──
         # 视野边缘检测逐帧闪烁（估计器 0.3s 无帧即切推算），零容忍会与 REACQUIRE
@@ -213,16 +230,32 @@ class DockingFsm(Node):
         self.declare_parameter("reacquire_frames", 5)
         self.declare_parameter("reacquire_miss_tolerance", 3)
         self.declare_parameter("reacquire_timeout_sec", 30.0)
-        self.declare_parameter(
-            "reacquire_search_yaw_deg", 30.0
-        )  # REACQUIRE 丢 Tag 且艏偏>此值才自转寻找（否则 HOLD 等闪烁恢复）
+        # 遗留参数（2026-10-07 虚拟坞位回归后 FSM 不再使用）：原"REACQUIRE
+        # 艏偏>此值才自转寻找"逻辑已由推算驾驶（reacquire_drive_max_sec）
+        # 取代；保留声明仅为兼容旧 yaml/launch 覆盖
+        self.declare_parameter("reacquire_search_yaw_deg", 30.0)
+        # 会话级虚拟坞位回归（2026-10-07）：REACQUIRE 且锚点活着（odom 推算中）
+        # 时不再原地等/纯转圈，受控对准并接近本次会话锚定的虚拟坞位
+        # （MODE_APPROACH，复用现有 APPROACH 控制律的先上轴/限速/迟滞保护；
+        # 预备点附近该模式主要是原地转向对准，不平移）。本参数为同一归港会话
+        # 内推算驾驶的累计预算（APPROACH↔REACQUIRE 乒乓不重置），用完后退回
+        # HOLD 等闪烁恢复，由 reacquire_timeout_sec 兜底。safety 对 REACQUIRE
+        # 本就豁免 odom 推算时长检查（SEARCH_STATES），不会被 3s 窗口掐掉
+        self.declare_parameter("reacquire_drive_max_sec", 10.0)
+        # 虚拟坞位驾驶的距离门（2026-10-07 现场）：远距离视觉的坞位姿本来就会跳
+        # （实测远场重定位 dp 0.77~1.21m），拿它当"虚拟坞位"等于朝幻影开。
+        # 只有船在坞外这个距离以内（此时锚点新鲜且可信，且丢失 Tag 多半是纠偏
+        # 机动造成）才允许 REACQUIRE 期间驾驶；超出则退回 HOLD 等 Tag 恢复
+        self.declare_parameter("reacquire_drive_max_dist_m", 5.0)
 
         # ── ABORT_EXIT ──
         self.declare_parameter("exit_complete_x", -4.0)
         self.declare_parameter("abort_exit_timeout_sec", 45.0)
 
         # ── UNDOCK ──
-        self.declare_parameter("undock_complete_x", -4.0)
+        # 出少点：0.45m/s 惯性还要滑 1.5~2m，-4 会冲出再归港触发门
+        # （2026-09-12 实测）；与 yaml 对齐
+        self.declare_parameter("undock_complete_x", -3.0)
         self.declare_parameter("undock_timeout_sec", 60.0)
         self.declare_parameter("undock_settle_sec", 1.0)
 
@@ -234,7 +267,8 @@ class DockingFsm(Node):
         # 开始归港；BACK_IN/FINAL_DOCK 发 WaitIO 等夹爪抓住，抓住即 DOCKED（不再
         # 以位置到位判成功）；倒船位移停滞超时 -> ABORT_EXIT 驶出重试；
         # /dock/undock 先 WAIT_DOCK_RELEASE 请求松开夹爪，成功才驶出。
-        self.declare_parameter("dock_claw_enabled", False)
+        # 兴飞船坞带夹爪：默认开启（无夹爪船坞在 yaml 置 false）
+        self.declare_parameter("dock_claw_enabled", True)
         self.declare_parameter("control_do_action", "control_do")
         self.declare_parameter("wait_io_action", "wait_io")
         # ControlDO 等结果/等 server 的超时（电机动作约 3s，留足余量）
@@ -309,12 +343,25 @@ class DockingFsm(Node):
         self._align_hold = 0.0
         self._align_tag_loss = 0.0
         self._align_y_stuck = 0.0
-        self._docked_hold = 0.0
+        # 压紧段/充电防抖状态：离开 BACK_IN/FINAL_DOCK（含 /dock/cancel）即复位
+        self._final_push_start = None
+        self._charge_signal_dead = False
+        self._final_push_elapsed = 0.0
+        self._charge_good_elapsed = 0.0
+        self._charge_good_sample = False
         self._violation_count = 0
         self._reacquire_frames = 0
         self._reacquire_miss = 0
+        # REACQUIRE 推算驾驶预算：同一归港会话内累计（APPROACH↔REACQUIRE
+        # 乒乓不重置，防每轮重获全额预算累计失控）；会话开始（_reset_flags）
+        # 与结束（IDLE/FAILED/DOCKED）时清零，此处只是初始化
+        self._reacquire_drive_elapsed = 0.0
         self._staging_hold = 0.0
         self._approach_tag_loss = 0.0
+        # 预备点退化区打转计时（大艏偏持续累计），随状态切换复位
+        self._approach_stuck = 0.0
+        # 预备点退化区打转计时（大艏偏持续累计），随状态切换复位
+        self._approach_stuck = 0.0
 
         # 上报标志（dock_mission 契约）
         self._success = False
@@ -342,6 +389,30 @@ class DockingFsm(Node):
         # 坞内倒船位移停滞检测
         self._stuck_best_x = None
         self._stuck_elapsed = 0.0
+
+        # 无线充电监测/判据（usv_rs485_driver msg/srv，懒加载；
+        # 接口缺失或服务不可用时 warn 一次并降级，充电判据自然失效）
+        self._charge_client = None
+        self._WirelessChargerMonitor = None
+        self._charge_import_failed = False
+        self._charge_monitor_on = False      # 监测已成功打开（服务侧接受调用）
+        self._charge_monitor_warned = False  # 服务不可用只 warn 一次
+        self._charge_last_msg_time = None    # 最近一次充电话题消息时刻（话题级，不随状态复位）
+
+        # 状态 -> 转移 handler 分派表（IDLE/DOCKED/FAILED 无 handler，等待外部触发）
+        self._trans_handlers = {
+            DockState.ACQUIRE_TAG: self._trans_acquire_tag,
+            DockState.APPROACH_ENTRY: self._trans_approach_entry,
+            DockState.ALIGN_ENTRY: self._trans_align_entry,
+            DockState.BACK_IN: self._trans_back_in,
+            DockState.FINAL_DOCK: self._trans_final_dock,
+            DockState.WAIT_DOCK_OPEN: self._trans_wait_dock_open,
+            DockState.WAIT_DOCK_RELEASE: self._trans_wait_dock_release,
+            DockState.REACQUIRE_TAG: self._trans_reacquire_tag,
+            DockState.ABORT_EXIT: self._trans_abort_exit,
+            DockState.UNDOCK_EXIT: self._trans_undock_exit,
+            DockState.UNDOCK_SETTLE: self._trans_undock_settle,
+        }
 
         rate = float(p("state_rate").value)
         self.create_timer(1.0 / rate, self._tick)
@@ -437,24 +508,49 @@ class DockingFsm(Node):
         self.get_logger().info(f"状态: {self._state} -> {state}")
         self._state = state
         self._state_enter_time = self.get_clock().now()
+        self._reset_state_timers()
+        self._manage_io_goals_on_enter(state)
+        self._manage_charge_monitor_on_enter(state)
+        self._update_flags_on_enter(state)
+
+    def _reset_state_timers(self):
+        """计时器/计数器组：每次状态进入全量清零。
+
+        历史上漏重置出过 bug（见各注释），新增计时器/计数器必须加在这里。
+        """
         self._acquire_frames = 0
         self._acquire_miss = 0
         self._align_hold = 0.0
         self._align_tag_loss = 0.0
         self._align_y_stuck = 0.0
-        self._docked_hold = 0.0
+        # 压紧段/充电防抖状态：离开 BACK_IN/FINAL_DOCK（含 /dock/cancel）即复位
+        self._final_push_start = None
+        self._final_push_elapsed = 0.0
+        self._charge_signal_dead = False
+        self._charge_good_elapsed = 0.0
+        self._charge_good_sample = False
         self._violation_count = 0
         self._reacquire_frames = 0
         self._reacquire_miss = 0
+        # 注意：_reacquire_drive_elapsed 不在此复位——它是会话级预算
+        #（APPROACH↔REACQUIRE 乒乓时每轮重置会累计失控），
+        # 只在会话开始（_reset_flags）/结束（IDLE/FAILED/DOCKED）清零
         # APPROACH 阶段计时器也须复位：REACQUIRE 集帧路由回 APPROACH 后若残留
         # 旧推算计时，遇短暂新闪烁会立即复弹 REACQUIRE（08-10 活锁的弱化版）
         self._staging_hold = 0.0
         self._approach_tag_loss = 0.0
+        # 预备点退化区打转计时（大艏偏持续累计），随状态切换复位
+        self._approach_stuck = 0.0
         # 坞内倒船位移停滞检测计时随状态切换复位
         self._stuck_best_x = None
         self._stuck_elapsed = 0.0
-        # 夹爪交互 goal 生命周期：WaitIO 仅在坞内（BACK_IN/FINAL_DOCK）存活；
-        # ControlDO 仅在 WAIT_DOCK_OPEN/WAIT_DOCK_RELEASE 存活，离开即取消
+
+    def _manage_io_goals_on_enter(self, state: str):
+        """Action 生命周期组：夹爪交互 goal 随状态进出创建/取消。
+
+        WaitIO 仅在坞内（BACK_IN/FINAL_DOCK）存活；ControlDO 仅在
+        WAIT_DOCK_OPEN/WAIT_DOCK_RELEASE 存活，离开即取消。
+        """
         if state not in CORRIDOR_STATES:
             self._cancel_wait_io()
         else:
@@ -463,8 +559,14 @@ class DockingFsm(Node):
             self._cancel_control_do()
         else:
             self._control_do_result = None
+
+    def _update_flags_on_enter(self, state: str):
+        """标志组：DOCKED 置成功；回 IDLE 清 success/undock_success。"""
         if state == DockState.DOCKED:
             self._success = True
+        if state in (DockState.IDLE, DockState.FAILED, DockState.DOCKED):
+            # 会话结束：清零 REACQUIRE 推算驾驶的会话级累计预算
+            self._reacquire_drive_elapsed = 0.0
         if state == DockState.IDLE:
             # success / undock_success 分别在 DOCKED / UNDOCK_SETTLE 期间已被
             # dock_mission 消费，回 IDLE 必须清掉：残留 true 会让下一次任务进
@@ -481,6 +583,9 @@ class DockingFsm(Node):
         self._needs_manual_takeover = False
         self._abort_reason = None
         self._claw_grabbed = False
+        # 会话开始（/dock/start、/dock/undock 均经此）：清零 REACQUIRE
+        # 推算驾驶的会话级累计预算
+        self._reacquire_drive_elapsed = 0.0
 
     def _fail(self, reason: str):
         self.get_logger().error(f"FAILED: {reason}")
@@ -580,7 +685,13 @@ class DockingFsm(Node):
             return
         if not handle.accepted:
             self._control_do_goal_active = False
-            self._control_do_result = (False, "GOAL_REJECTED")
+            # GOAL_REJECTED 多为驱动侧已有在途 goal（电机 3s 窗口内 dock_mission
+            # 重试竞态，2026-09-30 实测）：不当失败，tick 下周期重发，
+            # 由 dock_open_timeout_sec 兜底；驱动持续不可用也会同样超时失败
+            self.get_logger().warn(
+                "ControlDO goal 被拒（驱动侧有在途 goal？），下周期重试",
+                throttle_duration_sec=2.0,
+            )
             return
         self._control_do_goal_handle = handle
         handle.get_result_async().add_done_callback(self._on_control_do_result_cb)
@@ -697,6 +808,115 @@ class DockingFsm(Node):
             self.get_parameter("backin_stuck_timeout_sec").value
         )
 
+    # ══════════════ 无线充电监测/判据（usv_rs485_driver msg/srv）══════════════
+    def _ensure_charge_interfaces(self) -> bool:
+        """懒创建充电话题订阅与监测服务客户端；接口包不可导入时 warn 一次
+        并降级（返回 False，充电判据失效，退化为 WaitIO/压紧超时逻辑）。"""
+        if self._charge_client is not None:
+            return True
+        if self._charge_import_failed:
+            return False
+        try:
+            from usv_rs485_driver.msg import WirelessChargerState
+            from usv_rs485_driver.srv import WirelessChargerMonitor
+        except ImportError as exc:
+            self._charge_import_failed = True
+            self.get_logger().warn(
+                f"usv_rs485_driver 无线充电接口不可导入（{exc}），"
+                "充电判据失效，退化为 WaitIO/压紧超时逻辑"
+            )
+            return False
+        p = self.get_parameter
+        self.create_subscription(
+            WirelessChargerState,
+            p("charge_topic").value,
+            self._charge_cb,
+            QoSProfile(depth=10),
+        )
+        self._charge_client = self.create_client(
+            WirelessChargerMonitor, p("charge_monitor_service").value
+        )
+        self._WirelessChargerMonitor = WirelessChargerMonitor
+        return True
+
+    def _set_charge_monitor(self, enable: bool):
+        """打开/关闭无线充电监测。服务不可用时 warn 一次并继续：
+        不阻塞归港，充电判据自然失效（退化为 WaitIO/压紧超时逻辑）。"""
+        if not self._ensure_charge_interfaces():
+            self._charge_monitor_on = False
+            return
+        if not self._charge_client.service_is_ready():
+            if not self._charge_monitor_warned:
+                self._charge_monitor_warned = True
+                self.get_logger().warn(
+                    "无线充电监测服务 "
+                    f"{self.get_parameter('charge_monitor_service').value} 不可用，"
+                    "充电判据失效，退化为 WaitIO/压紧超时逻辑"
+                )
+            self._charge_monitor_on = False
+            return
+        req = self._WirelessChargerMonitor.Request()
+        req.enable = enable
+        self._charge_client.call_async(req)
+        self._charge_monitor_on = enable
+        self.get_logger().info(f"无线充电监测已{'打开' if enable else '关闭'}")
+
+    def _manage_charge_monitor_on_enter(self, state: str):
+        """充电监测生命周期（归港会话单一点）：进 BACK_IN 打开监测；
+        会话结束（回 IDLE/FAILED）关闭；DOCKED 成功保留（便于观察充电）。"""
+        if state == DockState.BACK_IN:
+            self._set_charge_monitor(True)
+        elif state in (DockState.IDLE, DockState.FAILED):
+            if self._charge_monitor_on:
+                self._set_charge_monitor(False)
+
+    def _charge_cb(self, msg):
+        self._charge_last_msg_time = self.get_clock().now()
+        # 好样本：充电状态为已连接/充电中（1/5）且无错误；任何坏样本清零稳定计时
+        good = int(msg.charging_status) in (1, 5) and int(msg.error_code) == 0
+        self._charge_good_sample = good
+        if not good:
+            self._charge_good_elapsed = 0.0
+
+    def _charge_push_check(self, dt) -> bool:
+        """压紧段内充电判据。好样本连续累计 >= charge_stable_sec -> DOCKED；
+        话题超 charge_status_timeout_sec 无消息：夹爪模式（WaitIO 在跑）下
+        降级为告警并继续等 WaitIO/压紧超时（2026-10-06 现场：夹爪 DI 置位仅比
+        断流中止晚 0.1s，信号链单点不该杀死压紧段）；无夹爪时才 ABORT_EXIT
+        （CHARGE_SIGNAL_LOST）。监测未打开时判据失效，直接返回 False。
+        返回 True 表示本 tick 已裁决完毕。"""
+        if not self._charge_monitor_on:
+            return False
+        p = self.get_parameter
+        now = self.get_clock().now()
+        # 从未收到消息时以压紧段起点为基线：监测开了却始终无帧同样算断流
+        last = self._charge_last_msg_time
+        if last is None:
+            last = self._final_push_start
+        if (now - last).nanoseconds * 1e-9 > float(
+            p("charge_status_timeout_sec").value
+        ):
+            if self._claw_on():
+                if not self._charge_signal_dead:
+                    self._charge_signal_dead = True
+                    self.get_logger().warn(
+                        "充电话题断流，但夹爪 WaitIO 在途——降级：压紧段继续，"
+                        "成功判据交给夹爪 DI（原 CHARGE_SIGNAL_LOST 不再中止）"
+                    )
+                return False
+            self._abort_corridor("CHARGE_SIGNAL_LOST")
+            return True
+        if self._charge_good_sample:
+            self._charge_good_elapsed += dt
+            if self._charge_good_elapsed >= float(p("charge_stable_sec").value):
+                self.get_logger().info(
+                    f"无线充电信号稳定 {self._charge_good_elapsed:.1f}s"
+                    "（充电判据）-> DOCKED"
+                )
+                self._enter(DockState.DOCKED)
+                return True
+        return False
+
     # ══════════════ 主循环 ══════════════
     def _tick(self):
         now = self.get_clock().now()
@@ -715,7 +935,6 @@ class DockingFsm(Node):
 
     def _transitions(self, dt: float):
         s = self._state
-        p = self.get_parameter
         x, e_y, e_yaw = self._errors()
 
         # 全局总超时：坞内 -> ABORT_EXIT；坞外 -> IDLE 上报
@@ -726,183 +945,11 @@ class DockingFsm(Node):
                 self._abort_and_report("GLOBAL_TIMEOUT")
             return
 
-        if s == DockState.ACQUIRE_TAG:
-            if self._pose_source == SRC_VISION and self._tag_visible:
-                self._acquire_frames += 1
-                self._acquire_miss = 0
-            else:
-                self._acquire_miss += 1
-                if self._acquire_miss > int(p("acquire_miss_tolerance").value):
-                    self._acquire_frames = 0
-            if self._acquire_frames >= int(p("tag_acquire_frames").value):
-                self._enter(DockState.APPROACH_ENTRY)
-            elif self._state_elapsed() > float(p("acquire_timeout_sec").value):
-                self._abort_and_report("ACQUIRE_TIMEOUT")
-
-        elif s == DockState.APPROACH_ENTRY:
-            reacquire = False
-            if self._pose_source == SRC_INVALID:
-                reacquire = True
-            elif self._pose_source != SRC_VISION:
-                # 推算期宽限：视野边缘闪烁属常态，宽限内靠 odom 预测继续逼近；
-                # 超宽限才弹 REACQUIRE（08-10 实测零宽限导致 APPROACH<->REACQUIRE
-                # 活锁，横向净进度≈0）
-                self._approach_tag_loss += dt
-                if self._approach_tag_loss > float(
-                    p("approach_tag_loss_grace_sec").value
-                ):
-                    reacquire = True
-            else:
-                self._approach_tag_loss = 0.0
-            if reacquire:
-                self._enter(DockState.REACQUIRE_TAG)
-            elif x is not None and self._staging_reached(x, e_y, e_yaw, dt):
-                self._enter(DockState.ALIGN_ENTRY)
-            elif self._state_elapsed() > float(p("approach_timeout_sec").value):
-                self._abort_and_report("APPROACH_TIMEOUT")
-
-        elif s == DockState.ALIGN_ENTRY:
-            # 丢 Tag 宽限计时：VISION 清零，推算期累积（INVALID 立即弹）
-            if self._pose_source == SRC_VISION:
-                self._align_tag_loss = 0.0
-            elif self._pose_source != SRC_INVALID:
-                self._align_tag_loss += dt
-            if self._pose_source == SRC_INVALID:
-                self._enter(DockState.REACQUIRE_TAG)
-            elif self._pose_source != SRC_VISION:
-                # 视野边缘检测逐帧闪烁属常态，宽限期内靠推算继续对准
-                if self._align_tag_loss > float(
-                    p("align_tag_loss_grace_sec").value
-                ):
-                    self._enter(DockState.REACQUIRE_TAG)
-            elif x is None:
-                pass
-            elif abs(e_y) > float(p("align_y_abort").value):
-                # 差速船 v=0 修不了横向，退回弧线阶段
-                self.get_logger().warn(
-                    f"ALIGN 中 |e_y|={abs(e_y):.2f} 超限，退回 APPROACH_ENTRY"
-                )
-                self._enter(DockState.APPROACH_ENTRY)
-            elif self._align_gate_ok(x, e_y, e_yaw):
-                self._align_hold += dt
-                if self._align_hold >= float(p("align_hold_sec").value):
-                    self._enter(DockState.BACK_IN)
-            else:
-                self._align_hold = 0.0
-                # y 卡死带 (align_y_tol, align_y_abort]：艏向已准但 y 超差，
-                # ALIGN v=0 修不了横向只能干等到超时（2026-07-29 实测卡满 45s）。
-                # 滞留超时确定性退回 APPROACH 弧线修 y，再到ALIGN复核
-                yaw_tol = math.radians(float(p("align_yaw_tol_deg").value))
-                if (
-                    abs(e_yaw) <= yaw_tol
-                    and abs(e_y) > float(p("align_y_tol").value)
-                ):
-                    self._align_y_stuck += dt
-                    if self._align_y_stuck > float(
-                        p("align_y_stuck_sec").value
-                    ):
-                        self.get_logger().warn(
-                            f"ALIGN 艏向已准但 |e_y|={abs(e_y):.2f} 滞留"
-                            f" {self._align_y_stuck:.1f}s，回 APPROACH 修 y"
-                        )
-                        self._enter(DockState.APPROACH_ENTRY)
-                else:
-                    self._align_y_stuck = 0.0
-                if self._state_elapsed() > float(p("align_timeout_sec").value):
-                    self._abort_and_report("ALIGN_TIMEOUT")
-
-        elif s == DockState.BACK_IN:
-            self._tick_back_in(dt, x, e_y, e_yaw)
-
-        elif s == DockState.FINAL_DOCK:
-            self._tick_final_dock(dt, x, e_y, e_yaw)
-
-        elif s == DockState.WAIT_DOCK_OPEN:
-            # 夹爪模式：请求船坞打开夹爪（ControlDO），成功才进 ACQUIRE_TAG；
-            # 失败/超时回 IDLE 上报 needs_reapproach（船尚未动，同入口外失败）
-            if self._control_do_result is not None:
-                ok, message = self._control_do_result
-                if ok:
-                    self.get_logger().info(f"船坞夹爪已打开：{message}")
-                    self._enter(DockState.ACQUIRE_TAG)
-                else:
-                    self._abort_and_report(f"DOCK_OPEN_FAILED:{message}")
-            elif self._state_elapsed() > float(p("dock_open_timeout_sec").value):
-                self._abort_and_report("DOCK_OPEN_TIMEOUT")
-            else:
-                self._send_control_do()
-
-        elif s == DockState.WAIT_DOCK_RELEASE:
-            # 夹爪模式出泊：请求船坞松开夹爪，成功才 UNDOCK_EXIT；
-            # 失败/超时 FAILED 停车（爪子可能仍扣着，禁止盲动）
-            if self._control_do_result is not None:
-                ok, message = self._control_do_result
-                if ok:
-                    self.get_logger().info(f"船坞夹爪已松开：{message}")
-                    self._enter(DockState.UNDOCK_EXIT)
-                else:
-                    self._fail(f"DOCK_RELEASE_FAILED:{message}")
-            elif self._state_elapsed() > float(p("dock_open_timeout_sec").value):
-                self._fail("DOCK_RELEASE_TIMEOUT")
-            else:
-                self._send_control_do()
-
-        elif s == DockState.REACQUIRE_TAG:
-            if self._pose_source == SRC_VISION and self._tag_visible:
-                self._reacquire_frames += 1
-                self._reacquire_miss = 0
-            else:
-                self._reacquire_miss += 1
-                if self._reacquire_miss > int(
-                    p("reacquire_miss_tolerance").value
-                ):
-                    self._reacquire_frames = 0
-            if self._reacquire_frames >= int(p("reacquire_frames").value):
-                self._route_after_reacquire(x, e_y, e_yaw)
-            elif self._state_elapsed() > float(p("reacquire_timeout_sec").value):
-                self._abort_and_report("REACQUIRE_TIMEOUT")
-
-        elif s == DockState.ABORT_EXIT:
-            done = False
-            if x is not None and self._pose_source != SRC_INVALID:
-                done = x <= float(p("exit_complete_x").value)
-            if done:
-                self._needs_reapproach = True
-                self._enter(DockState.IDLE)
-            elif self._state_elapsed() > float(p("abort_exit_timeout_sec").value):
-                if self._pose_source == SRC_INVALID:
-                    # 位姿 INVALID 时控制器输出零速（无"odom 距离跟踪驶出"），
-                    # 超时退出不得谎报"已驶出"：不置 needs_reapproach，以免
-                    # dock_mission 在船仍卡坞内时立刻重试；交人工/上层裁决
-                    self.get_logger().warn(
-                        "ABORT_EXIT 超时且位姿 INVALID：驶出未确认，回 IDLE "
-                        "上报 ABORT_EXIT_UNCONFIRMED（不置 needs_reapproach）"
-                    )
-                    self._abort_reason = "ABORT_EXIT_UNCONFIRMED"
-                    self._needs_manual_takeover = True
-                else:
-                    self.get_logger().warn(
-                        "ABORT_EXIT 超时（位姿有效），回 IDLE 上报 needs_reapproach"
-                    )
-                    self._needs_reapproach = True
-                self._enter(DockState.IDLE)
-
-        elif s == DockState.UNDOCK_EXIT:
-            done = False
-            if x is not None and self._pose_source != SRC_INVALID:
-                done = x <= float(p("undock_complete_x").value)
-            if done:
-                self._undock_success = True
-                self._enter(DockState.UNDOCK_SETTLE)
-            elif self._state_elapsed() > float(p("undock_timeout_sec").value):
-                # 超时不报假成功：船未确认驶出，FAILED（JSON 映射 DOCK_ABORT）
-                self._fail("UNDOCK_TIMEOUT")
-
-        elif s == DockState.UNDOCK_SETTLE:
-            if self._state_elapsed() > float(p("undock_settle_sec").value):
-                self._enter(DockState.IDLE)
-
-        # IDLE / DOCKED / FAILED：等待外部触发（start/cancel/undock）
+        # 状态 -> handler 分派（分派表在 __init__ 构建，handler 见下文章节）；
+        # IDLE / DOCKED / FAILED 无 handler：等待外部触发（start/cancel/undock）
+        handler = self._trans_handlers.get(s)
+        if handler is not None:
+            handler(dt, x, e_y, e_yaw)
 
     def _staging_reached(self, x, e_y, e_yaw, dt: float) -> bool:
         p = self.get_parameter
@@ -939,20 +986,146 @@ class DockingFsm(Node):
             or abs(e_yaw) > math.radians(float(p("back_in_gate2_yaw_deg").value))
         )
 
-    def _tick_back_in(self, dt, x, e_y, e_yaw):
+    # ══════════════ 坞内公共段（BACK_IN/FINAL_DOCK 共用）══════════════
+    def _claw_wait_or_docked(self, dt, x, stuck_reason: str) -> bool:
+        """夹爪模式坞内公共段：WaitIO 抓住即 DOCKED；维持 WaitIO 在途
+        （失败按 wait_io_retry_max 重发）；位移停滞超时 -> ABORT_EXIT 驶出重试。
+        返回 True 表示本 tick 已裁决完毕（调用方直接 return）。"""
+        if not self._claw_on():
+            return False
+        if self._claw_grabbed:
+            self.get_logger().info("夹爪已抓住（WaitIO）-> DOCKED")
+            self._enter(DockState.DOCKED)
+            return True
+        self._manage_wait_io()
+        if self._state not in CORRIDOR_STATES:
+            return True  # _manage_wait_io 内可能已 ABORT_EXIT（WAIT_IO_FAILED）
+        if self._claw_stuck_check(dt, x):
+            self._abort_corridor(stuck_reason)
+            return True
+        return False
+
+    def _corridor_violation_abort(self, x, e_y, e_yaw) -> bool:
+        """走廊违规计数（与控制器门控2一致；连续 violation_cycles 周期 ->
+        ABORT_EXIT）。返回 True 表示已中止。"""
+        if x is not None and self._corridor_violation(e_y, e_yaw):
+            self._violation_count += 1
+            if self._violation_count >= int(
+                self.get_parameter("violation_cycles").value
+            ):
+                self._abort_corridor("CORRIDOR_VIOLATION")
+                return True
+        else:
+            self._violation_count = 0
+        return False
+
+    # ══════════════ 状态转移 handlers（由 _transitions 分派）══════════════
+    def _trans_acquire_tag(self, dt, x, e_y, e_yaw):
+        p = self.get_parameter
+        if self._pose_source == SRC_VISION and self._tag_visible:
+            self._acquire_frames += 1
+            self._acquire_miss = 0
+        else:
+            self._acquire_miss += 1
+            if self._acquire_miss > int(p("acquire_miss_tolerance").value):
+                self._acquire_frames = 0
+        if self._acquire_frames >= int(p("tag_acquire_frames").value):
+            self._enter(DockState.APPROACH_ENTRY)
+        elif self._state_elapsed() > float(p("acquire_timeout_sec").value):
+            self._abort_and_report("ACQUIRE_TIMEOUT")
+
+    def _trans_approach_entry(self, dt, x, e_y, e_yaw):
+        p = self.get_parameter
+        reacquire = False
+        if self._pose_source == SRC_INVALID:
+            reacquire = True
+        elif self._pose_source != SRC_VISION:
+            # 推算期宽限：视野边缘闪烁属常态，宽限内靠 odom 预测继续逼近；
+            # 超宽限才弹 REACQUIRE（08-10 实测零宽限导致 APPROACH<->REACQUIRE
+            # 活锁，横向净进度≈0）
+            self._approach_tag_loss += dt
+            if self._approach_tag_loss > float(
+                p("approach_tag_loss_grace_sec").value
+            ):
+                reacquire = True
+        else:
+            self._approach_tag_loss = 0.0
+        # 预备点退化区打转逃逸（2026-10-07 现场 bag 实锤）：预备线附近带横偏时
+        # 方位角奇异 v=0 原地打转，横向修不掉只能干等 120s 超时。|e_yaw| 持续
+        # 超放行门槛累计 approach_stuck_sec 收不进 -> ABORT 回 IDLE 上报
+        # needs_reapproach（dock_mission 重试，比超时兜底快得多）
+        if x is not None and abs(e_yaw) > math.radians(
+            float(p("approach_yaw_tol_deg").value)
+        ):
+            self._approach_stuck += dt
+        else:
+            self._approach_stuck = 0.0
+        if self._approach_stuck > float(p("approach_stuck_sec").value):
+            self._abort_and_report("APPROACH_STUCK")
+            return
+        if reacquire:
+            self._enter(DockState.REACQUIRE_TAG)
+        elif x is not None and self._staging_reached(x, e_y, e_yaw, dt):
+            self._enter(DockState.ALIGN_ENTRY)
+        elif self._state_elapsed() > float(p("approach_timeout_sec").value):
+            self._abort_and_report("APPROACH_TIMEOUT")
+
+    def _trans_align_entry(self, dt, x, e_y, e_yaw):
+        p = self.get_parameter
+        # 丢 Tag 宽限计时：VISION 清零，推算期累积（INVALID 立即弹）
+        if self._pose_source == SRC_VISION:
+            self._align_tag_loss = 0.0
+        elif self._pose_source != SRC_INVALID:
+            self._align_tag_loss += dt
+        if self._pose_source == SRC_INVALID:
+            self._enter(DockState.REACQUIRE_TAG)
+        elif self._pose_source != SRC_VISION:
+            # 视野边缘检测逐帧闪烁属常态，宽限期内靠推算继续对准
+            if self._align_tag_loss > float(
+                p("align_tag_loss_grace_sec").value
+            ):
+                self._enter(DockState.REACQUIRE_TAG)
+        elif x is None:
+            pass
+        elif abs(e_y) > float(p("align_y_abort").value):
+            # 差速船 v=0 修不了横向，退回弧线阶段
+            self.get_logger().warn(
+                f"ALIGN 中 |e_y|={abs(e_y):.2f} 超限，退回 APPROACH_ENTRY"
+            )
+            self._enter(DockState.APPROACH_ENTRY)
+        elif self._align_gate_ok(x, e_y, e_yaw):
+            self._align_hold += dt
+            if self._align_hold >= float(p("align_hold_sec").value):
+                self._enter(DockState.BACK_IN)
+        else:
+            self._align_hold = 0.0
+            # y 卡死带 (align_y_tol, align_y_abort]：艏向已准但 y 超差，
+            # ALIGN v=0 修不了横向只能干等到超时（2026-07-29 实测卡满 45s）。
+            # 滞留超时确定性退回 APPROACH 弧线修 y，再到ALIGN复核
+            yaw_tol = math.radians(float(p("align_yaw_tol_deg").value))
+            if (
+                abs(e_yaw) <= yaw_tol
+                and abs(e_y) > float(p("align_y_tol").value)
+            ):
+                self._align_y_stuck += dt
+                if self._align_y_stuck > float(
+                    p("align_y_stuck_sec").value
+                ):
+                    self.get_logger().warn(
+                        f"ALIGN 艏向已准但 |e_y|={abs(e_y):.2f} 滞留"
+                        f" {self._align_y_stuck:.1f}s，回 APPROACH 修 y"
+                    )
+                    self._enter(DockState.APPROACH_ENTRY)
+            else:
+                self._align_y_stuck = 0.0
+            if self._state_elapsed() > float(p("align_timeout_sec").value):
+                self._abort_and_report("ALIGN_TIMEOUT")
+
+    def _trans_back_in(self, dt, x, e_y, e_yaw):
         p = self.get_parameter
         # 夹爪模式：WaitIO 抓住即成功；位移停滞超时 -> 驶出重试
-        if self._claw_on():
-            if self._claw_grabbed:
-                self.get_logger().info("夹爪已抓住（WaitIO）-> DOCKED")
-                self._enter(DockState.DOCKED)
-                return
-            self._manage_wait_io()
-            if self._state != DockState.BACK_IN:
-                return  # _manage_wait_io 内可能已 ABORT_EXIT（WAIT_IO_FAILED）
-            if self._claw_stuck_check(dt, x):
-                self._abort_corridor("BACK_IN_STUCK")
-                return
+        if self._claw_wait_or_docked(dt, x, "BACK_IN_STUCK"):
+            return
         # Tag 丢失分级（measurement_age 为 inf 时直接进 ABORT_EXIT）
         if self._pose_source != SRC_VISION:
             age = self._measurement_age
@@ -960,13 +1133,8 @@ class DockingFsm(Node):
                 self._abort_corridor("TAG_LOST_IN_BACK_IN")
                 return
         # 走廊违规（连续 N 周期）
-        if x is not None and self._corridor_violation(e_y, e_yaw):
-            self._violation_count += 1
-            if self._violation_count >= int(p("violation_cycles").value):
-                self._abort_corridor("CORRIDOR_VIOLATION")
-                return
-        else:
-            self._violation_count = 0
+        if self._corridor_violation_abort(x, e_y, e_yaw):
+            return
         # 到 FINAL_DOCK 过渡位：x 进过渡距离且 y 已收敛到终局可修范围
         if x is not None and (
             abs(x - float(p("final_target_x").value))
@@ -978,21 +1146,12 @@ class DockingFsm(Node):
         if self._state_elapsed() > float(p("back_in_timeout_sec").value):
             self._abort_corridor("BACK_IN_TIMEOUT")
 
-    def _tick_final_dock(self, dt, x, e_y, e_yaw):
+    def _trans_final_dock(self, dt, x, e_y, e_yaw):
         p = self.get_parameter
-        # 夹爪模式：成功判据改为 WaitIO 抓住（不再以位置到位判成功）；
+        # 夹爪模式：WaitIO 抓住即成功（压紧段内外均有效，并行判据）；
         # 顶住坞但夹爪未抓住时位移停滞超时 -> 驶出重试
-        if self._claw_on():
-            if self._claw_grabbed:
-                self.get_logger().info("夹爪已抓住（WaitIO）-> DOCKED")
-                self._enter(DockState.DOCKED)
-                return
-            self._manage_wait_io()
-            if self._state != DockState.FINAL_DOCK:
-                return  # _manage_wait_io 内可能已 ABORT_EXIT（WAIT_IO_FAILED）
-            if self._claw_stuck_check(dt, x):
-                self._abort_corridor("FINAL_DOCK_STUCK")
-                return
+        if self._claw_wait_or_docked(dt, x, "FINAL_DOCK_STUCK"):
+            return
         # 最后阶段不主动搜索：停车等待短时重识别，超时退出
         if self._pose_source != SRC_VISION and (
             self._measurement_age
@@ -1000,29 +1159,143 @@ class DockingFsm(Node):
         ):
             self._abort_corridor("TAG_LOST_IN_FINAL_DOCK")
             return
-        if x is not None and self._corridor_violation(e_y, e_yaw):
-            self._violation_count += 1
-            if self._violation_count >= int(p("violation_cycles").value):
-                self._abort_corridor("CORRIDOR_VIOLATION")
-                return
-        else:
-            self._violation_count = 0
-        # 到位判据（无充电/接触传感器的临时版本；夹爪模式下成功判据改由
-        # WaitIO 抓住给出，此处不再以位置到位判 DOCKED）
-        if not self._claw_on() and x is not None and (
+        if self._corridor_violation_abort(x, e_y, e_yaw):
+            return
+        # 到达原"死位置" -> 进入压紧段（2026-10-05）：浮动坞位置会漂移，
+        # 固定位置到位不再判成功，改由控制器低速继续倒船压向夹爪/充电板；
+        # 成功 = 无线充电信号稳定（主）/ WaitIO 抓住（上文并行），
+        # 失败 = 压紧超时 / 充电话题断流 -> ABORT_EXIT 由 dock_mission 重试。
+        # 段内漂出窗口（浮坞移动/Tag 噪声）不复位计时，避免反复重进
+        if x is not None and (
             abs(x - float(p("final_target_x").value))
             < float(p("docked_x_tol").value)
             and abs(e_y) < float(p("docked_y_tol").value)
-            and abs(e_yaw) < math.radians(float(p("docked_yaw_tol_deg").value))
         ):
-            self._docked_hold += dt
-            if self._docked_hold >= float(p("docked_hold_sec").value):
-                self._enter(DockState.DOCKED)
+            if self._final_push_start is None:
+                self._final_push_start = self.get_clock().now()
+                self.get_logger().info(
+                    "FINAL_DOCK 到达死位置，进入压紧段（低速继续倒船，"
+                    "等待无线充电信号/夹爪抓住）"
+                )
+            if self._charge_push_check(dt):
                 return
-        else:
-            self._docked_hold = 0.0
+            self._final_push_elapsed += dt
+            if self._final_push_elapsed > float(p("final_push_time_sec").value):
+                self._abort_corridor("FINAL_PUSH_TIMEOUT")
+                return
         if self._state_elapsed() > float(p("final_dock_timeout_sec").value):
             self._abort_corridor("FINAL_DOCK_TIMEOUT")
+
+    def _trans_wait_dock_open(self, dt, x, e_y, e_yaw):
+        # 夹爪模式：请求船坞打开夹爪（ControlDO），成功才进 ACQUIRE_TAG；
+        # 失败/超时回 IDLE 上报 needs_reapproach（船尚未动，同入口外失败）
+        self._trans_wait_dock_io(
+            action_desc="打开",
+            success_state=DockState.ACQUIRE_TAG,
+            fail_prefix="DOCK_OPEN",
+            on_failure=self._abort_and_report,
+        )
+
+    def _trans_wait_dock_release(self, dt, x, e_y, e_yaw):
+        # 夹爪模式出泊：请求船坞松开夹爪，成功才 UNDOCK_EXIT；
+        # 失败/超时 FAILED 停车（爪子可能仍扣着，禁止盲动）
+        self._trans_wait_dock_io(
+            action_desc="松开",
+            success_state=DockState.UNDOCK_EXIT,
+            fail_prefix="DOCK_RELEASE",
+            on_failure=self._fail,
+        )
+
+    def _trans_wait_dock_io(self, action_desc, success_state, fail_prefix, on_failure):
+        """WAIT_DOCK_OPEN / WAIT_DOCK_RELEASE 公共流程：等 ControlDO 结果，
+        成功进 success_state；失败/超时由 on_failure 按各自语义处理
+        （OPEN 失败回 IDLE 上报 needs_reapproach；RELEASE 失败 FAILED 停车）。"""
+        if self._control_do_result is not None:
+            ok, message = self._control_do_result
+            if ok:
+                self.get_logger().info(f"船坞夹爪已{action_desc}：{message}")
+                self._enter(success_state)
+            else:
+                on_failure(f"{fail_prefix}_FAILED:{message}")
+        elif self._state_elapsed() > float(
+            self.get_parameter("dock_open_timeout_sec").value
+        ):
+            on_failure(f"{fail_prefix}_TIMEOUT")
+        else:
+            self._send_control_do()
+
+    def _trans_reacquire_tag(self, dt, x, e_y, e_yaw):
+        p = self.get_parameter
+        # 推算驾驶预算记时（虚拟坞位回归，2026-10-07）：锚点活着（odom 推算）
+        # 期间 _compute_mode 给 MODE_APPROACH 受控对准并接近虚拟坞位；
+        # 同一归港会话内累计超 reacquire_drive_max_sec 用完预算，
+        # 之后退回 HOLD 等闪烁恢复
+        if self._pose_source == SRC_PREDICTION:
+            budget = float(p("reacquire_drive_max_sec").value)
+            was_within = self._reacquire_drive_elapsed <= budget
+            self._reacquire_drive_elapsed += dt
+            if was_within and self._reacquire_drive_elapsed > budget:
+                self.get_logger().warn(
+                    "REACQUIRE 推算驾驶累计超 reacquire_drive_max_sec"
+                    f"（{budget:.0f}s）预算，退回 HOLD 等 Tag 恢复"
+                )
+        if self._pose_source == SRC_VISION and self._tag_visible:
+            self._reacquire_frames += 1
+            self._reacquire_miss = 0
+        else:
+            self._reacquire_miss += 1
+            if self._reacquire_miss > int(
+                p("reacquire_miss_tolerance").value
+            ):
+                self._reacquire_frames = 0
+        if self._reacquire_frames >= int(p("reacquire_frames").value):
+            self._route_after_reacquire(x, e_y, e_yaw)
+        elif self._state_elapsed() > float(p("reacquire_timeout_sec").value):
+            self._abort_and_report("REACQUIRE_TIMEOUT")
+
+    def _trans_abort_exit(self, dt, x, e_y, e_yaw):
+        p = self.get_parameter
+        done = False
+        if x is not None and self._pose_source != SRC_INVALID:
+            done = x <= float(p("exit_complete_x").value)
+        if done:
+            self._needs_reapproach = True
+            self._enter(DockState.IDLE)
+        elif self._state_elapsed() > float(p("abort_exit_timeout_sec").value):
+            if self._pose_source == SRC_INVALID:
+                # 位姿 INVALID 时控制器输出零速（无"odom 距离跟踪驶出"），
+                # 超时退出不得谎报"已驶出"：不置 needs_reapproach，以免
+                # dock_mission 在船仍卡坞内时立刻重试；交人工/上层裁决
+                self.get_logger().warn(
+                    "ABORT_EXIT 超时且位姿 INVALID：驶出未确认，回 IDLE "
+                    "上报 ABORT_EXIT_UNCONFIRMED（不置 needs_reapproach）"
+                )
+                self._abort_reason = "ABORT_EXIT_UNCONFIRMED"
+                self._needs_manual_takeover = True
+            else:
+                self.get_logger().warn(
+                    "ABORT_EXIT 超时（位姿有效），回 IDLE 上报 needs_reapproach"
+                )
+                self._needs_reapproach = True
+            self._enter(DockState.IDLE)
+
+    def _trans_undock_exit(self, dt, x, e_y, e_yaw):
+        p = self.get_parameter
+        done = False
+        if x is not None and self._pose_source != SRC_INVALID:
+            done = x <= float(p("undock_complete_x").value)
+        if done:
+            self._undock_success = True
+            self._enter(DockState.UNDOCK_SETTLE)
+        elif self._state_elapsed() > float(p("undock_timeout_sec").value):
+            # 超时不报假成功：船未确认驶出，FAILED（JSON 映射 DOCK_ABORT）
+            self._fail("UNDOCK_TIMEOUT")
+
+    def _trans_undock_settle(self, dt, x, e_y, e_yaw):
+        if self._state_elapsed() > float(
+            self.get_parameter("undock_settle_sec").value
+        ):
+            self._enter(DockState.IDLE)
 
     def _route_after_reacquire(self, x, e_y, e_yaw):
         """重捕获后按位置路由：入口窗口内且横向/艏向/速度已达 ALIGN 通过门槛
@@ -1069,18 +1342,32 @@ class DockingFsm(Node):
                 return MODE_HOLD  # 最后阶段只停车等待
             return MODE_FINAL_DOCK
         if s == DockState.REACQUIRE_TAG:
-            # 位姿有效（含 odom 推算）默认 HOLD 停车集帧：SEARCH 自转会把刚修好
-            # 的横向偏差扫漂（08-10 实测 21 轮活锁），小艏偏闪烁时 HOLD 等其恢复最优。
-            # 但若 Tag 已丢且艏向偏差大（Tag 在船尾后方，纯 HOLD 永远重捕不到），
-            # 改为受控旋转寻找（MODE_SEARCH 绕推算坞方位闭环转），否则必 30s 超时
-            # 回 IDLE——这是 3 轮复测统一死在 REACQUIRE 的根因。
-            if self._pose_source != SRC_INVALID and not self._tag_visible:
-                yaw = wrap_angle(self._dock_yaw - math.pi)
-                if abs(yaw) > math.radians(
-                    float(self.get_parameter("reacquire_search_yaw_deg").value)
+            # 会话级虚拟坞位回归（2026-10-07）：丢 Tag 但锚点活着（odom 推算中）
+            # 时受控对准并接近本次会话锚定的虚拟坞位（MODE_APPROACH，复用
+            # APPROACH 控制律的先上轴/限速/迟滞保护；预备点附近主要是原地
+            # 转向对准，不平移），不再原地干等；驾驶预算 reacquire_drive_max_sec
+            # （同一归港会话内累计）用完后退回 HOLD。VISION 但 tag 闪烁保持
+            # HOLD 等其恢复（SEARCH 自转会把刚修好的横向偏差扫漂，08-10 实测
+            # 21 轮活锁）。位姿 INVALID（锚点也丢了）才退回原地找：
+            # 艏向偏差大（Tag 在船尾后方，纯 HOLD 永远重捕不到）时受控旋转
+            # 寻找（MODE_SEARCH 绕推算坞方位闭环转），否则 HOLD。
+            if self._pose_source == SRC_PREDICTION:
+                # 距离门（2026-10-07）：远场锚点本就不可信，不许拿它盲开
+                near = self._dock_x is not None and abs(self._dock_x) <= float(
+                    self.get_parameter("reacquire_drive_max_dist_m").value
+                )
+                if (
+                    near
+                    and self._reacquire_drive_elapsed
+                    <= float(
+                        self.get_parameter("reacquire_drive_max_sec").value
+                    )
                 ):
-                    return MODE_SEARCH
-            return MODE_HOLD if self._pose_source != SRC_INVALID else MODE_SEARCH
+                    return MODE_APPROACH
+                return MODE_HOLD
+            if self._pose_source == SRC_VISION:
+                return MODE_HOLD
+            return MODE_SEARCH
         if s == DockState.ABORT_EXIT:
             return MODE_EXIT_FORWARD
         if s == DockState.UNDOCK_EXIT:

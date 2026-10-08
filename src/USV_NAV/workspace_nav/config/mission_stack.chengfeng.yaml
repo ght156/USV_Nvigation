@@ -1,0 +1,77 @@
+# 实船 mission_bridge + nav_status_aggregator 参数
+# 用法:
+#   ros2 launch workspace_nav mission_bridge.launch.py \
+#     use_sim_time:=false \
+#     mission_stack_params_file:=<install/share/workspace_nav/config/mission_stack.chengfeng.yaml>
+# map_yaml_path 由 nav2_boat.launch.py 自动与 map:= 一致，一般无需再设
+#
+# map_yaml_path / odom_topic 建议由 launch 内联覆盖，与 Nav2 保持一致。
+#
+# 【切换定位源 mavros ⇄ SLAM】只需要改 odom_topic（Mission/Nav 两侧一致），
+#   gps_topic 不用动（它监控的是 GNSS 接收机，与定位源无关，详见下方注释）。
+
+mission_bridge:
+  ros__parameters:
+    map_yaml_path: ""                      # 空 = 由 launch 注入（与 nav2 的 map:= 同源）
+    # 定位源话题（nav_msgs/Odometry，frame_id=odom → child_frame_id=base_link）
+    #   mavros 模式：/mavros/gps_input/local      （ArduPilot → GI320 INSPVAA）
+    #   SLAM  模式：/slam/localization（mapping_bridge/slam_nav_bridge 输出，RELIABLE）
+    # 切 SLAM 时改这一行；运行时也可用 launch 参数统一覆盖（Nav2/mission 两侧同源）：
+    #   ros2 launch workspace_nav nav2_boat.launch.py odom_topic:=/slam/localization
+    odom_topic: "/mavros/gps_input/local"
+    global_frame: "map"
+    robot_frame: "base_link"
+    map_datum_ref_key: "ref_gnss_10"       # map.yaml 里的经纬度锚点键（ENU 投影原点）
+    waypoint_commit_delay_sec: 0.45
+    allow_replace_running_mission: false   # true = 允许新任务顶掉正在跑的任务
+    mission_cancel_topic: "/gcs_mission/cancel"
+
+nav_status_aggregator:
+  ros__parameters:
+    # —— GNSS 健康监控（订阅 sensor_msgs/NavSatFix，BEST_EFFORT）——
+    # 作用：与 odom 超时、TF 可用性、pose 协方差一起判定 localization_overall(GOOD/DEGRADED/LOST)，
+    #   并写入 /nav_status：localization_gps_fix（int，0=无 / 3=3D fix）、alerts_gps_stale；
+    #   状态恶化时通过 /task_event 报 LOC_DEGRADED / LOC_LOST（见 docs/导航与归港异常告警.md）。
+    # 与定位源的关系：它监控的是「GNSS 接收机本身」，不随导航用 mavros 还是 SLAM 而变 →
+    #   **切到 SLAM 时这个话题不用改**（只要 mavros 还在跑，raw/fix 就一直在发，实船 mavros 常驻）。
+    #   如果某天 SLAM 模式不跑 mavros：raw/fix 没有发布者，gps_timeout(5s) 到期后
+    #   localization_overall 会恒为 DEGRADED；此时应改用其它 NavSatFix 源，或让本节点支持
+    #   mapping_gnss/GnssFix（SLAM 侧 /gnss/fix，它的 fix_type 是 NMEA 0..6）。
+    # ⚠️ 判据现状：节点里用 `status.status < 3` 判 DEGRADED，而 mavros 按标准 NavSatStatus
+    #   填的是 0(=FIX) / -1(=NO_FIX)（实船实测 0），所以**当前会一直判 DEGRADED**；
+    #   要让它能判 GOOD，需把判据改成 `status.status < 0`（或改成读 fix_type 0..6 的源）。
+    gps_topic: "/mavros/gps_input/raw/fix"
+    # 定位源话题，与 mission_bridge 保持一致（切 SLAM 建议用 launch 参数 odom_topic 统一覆盖）
+    odom_topic: "/mavros/gps_input/local"
+    publish_rate: 2.0                      # /nav_status 发布频率 (Hz)
+    vehicle_id: "usv_real_001"             # 上报到上层的平台编号
+    odom_timeout: 2.0                      # 定位 odom 超过 2s 没更新 → LOST
+    gps_timeout: 5.0                       # GNSS 超过 5s 没更新 → DEGRADED (alerts_gps_stale=true)
+    stuck_progress_timeout: 12.0           # CTRL_STUCK 兜底：Nav2 不可达时才用；默认自动同步 Nav2 progress_checker
+    stuck_movement_radius_m: 0.3           # CTRL_STUCK 兜底位移阈值（m），同上
+    sync_stuck_from_nav2: true             # true=从 controller_server progress_checker 读取
+                                           #   required_movement_radius / movement_time_allowance（当前 2.0m/30.0s），
+                                           #   每 nav2_param_poll_period_sec 秒轮询，调 Nav2 参数即生效，无需改这里
+    nav2_param_poll_period_sec: 10.0
+    # 【odom 频率判据】低于 min_odom_hz → DEGRADED（2026-09-17 从 20 降到 8；现已参数化）。
+    #   实船两类定位源都到不了 20Hz：MAVROS /mavros/gps_input/local ≈10Hz（每条 INSPVAA 一条）、
+    #   SLAM /slam/localization ≈20-29Hz（raw LIO odom，raw_odom_max_hz=20），阈值 20 会误判；
+    #   真断流由上面的 odom_timeout(2s) → LOST 兜底。SLAM 掉频严重时再调低。
+    min_odom_hz: 8.0
+
+# —— 电子围栏：作业区/禁止区/硬边界 ——
+zone_manager:
+  ros__parameters:
+    # 硬边界折线栅格膨胀格数（掩码分辨率=地图分辨率 1m/格 时 ±2m）
+    boundary_dilation_cells: 2
+    # 掩码/filter_info 周期重发间隔（s）；0=关闭（TRANSIENT_LOCAL 已保证晚加入者收到最后一帧）
+    republish_period_sec: 0.0
+
+zone_monitor:
+  ros__parameters:
+    enabled: true
+    # 定位源话题，与 mission_bridge 保持一致（切 SLAM 建议用 launch 参数 odom_topic 统一覆盖）
+    odom_topic: "/mavros/gps_input/local"
+    # 检查周期（s）与连续违规确认次数：0.5s × 5 ≈ 2.5s 防抖
+    check_period_sec: 0.5
+    violation_threshold: 5

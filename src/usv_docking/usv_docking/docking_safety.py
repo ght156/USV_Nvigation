@@ -37,40 +37,40 @@ from rclpy.qos import QoSProfile
 from geometry_msgs.msg import PoseStamped
 from std_msgs.msg import Bool, Float32, String
 
+from usv_docking.docking_common import (
+    DockState,
+    SRC_INVALID,
+    wrap_angle,
+    yaw_from_quat,
+)
+
 # 误差检查适用的状态：仅坞内走廊（BACK_IN/FINAL_DOCK）。
 # APPROACH/ACQUIRE/REACQUIRE 在开阔水域，横向偏差由控制器自行收敛；
 # ALIGN 的职责就是从大艏向误差开始修正，初始误差是正常输入而非故障，
 # 过早检查会误中止（2026-07-29 偏轴线入场实测两次教训）
 ERROR_CHECK_STATES = (
-    "BACK_IN",
-    "FINAL_DOCK",
+    DockState.BACK_IN,
+    DockState.FINAL_DOCK,
 )
 # 撤离通道状态：放宽 odom 窗口、不做误差中止
-EXIT_STATES = ("ABORT_EXIT", "UNDOCK_EXIT", "UNDOCK_SETTLE")
-# 搜索状态：本质就是"靠 odom 推算找 Tag"，豁免 odom 推算时长检查
-# （由 FSM 的 acquire/reacquire 超时兜底，2026-07-29 实测：否则 REACQUIRE 活不过 3s）
-SEARCH_STATES = ("ACQUIRE_TAG", "REACQUIRE_TAG")
+EXIT_STATES = (DockState.ABORT_EXIT, DockState.UNDOCK_EXIT, DockState.UNDOCK_SETTLE)
+# 搜索/推算驾驶状态：本质就是"靠 odom 推算找 Tag"，豁免 odom 推算时长检查
+# （由 FSM 的 acquire/reacquire 超时兜底，2026-07-29 实测：否则 REACQUIRE 活不过 3s。
+# 2026-10-07 起 REACQUIRE 在推算中会发 MODE_APPROACH 受控对准并接近虚拟坞位，
+# 驾驶预算 reacquire_drive_max_sec 在 FSM 侧记时；若此处不豁免，
+# safety 会在 3s 就以 ODOM_TIMEOUT 把推算驾驶掐掉）
+SEARCH_STATES = (DockState.ACQUIRE_TAG, DockState.REACQUIRE_TAG)
 # 完全静默状态
 # WAIT_DOCK_OPEN/WAIT_DOCK_RELEASE（夹爪模式）：船静止停车等待船坞夹爪动作，
 # 坞内夹爪扣住时位姿可能 INVALID，若按活动状态查 odom 推算会在 ControlDO
 # 电机动作（约3s）完成前就误触发 ODOM_TIMEOUT -> FAILED（2026-09-03 评审发现）
 QUIET_STATES = (
-    "IDLE",
-    "DOCKED",
-    "FAILED",
-    "WAIT_DOCK_OPEN",
-    "WAIT_DOCK_RELEASE",
+    DockState.IDLE,
+    DockState.DOCKED,
+    DockState.FAILED,
+    DockState.WAIT_DOCK_OPEN,
+    DockState.WAIT_DOCK_RELEASE,
 )
-
-SRC_INVALID = "INVALID"
-
-
-def wrap_angle(angle: float) -> float:
-    return (angle + math.pi) % (2.0 * math.pi) - math.pi
-
-
-def yaw_from_quat(z: float, w: float) -> float:
-    return math.atan2(2.0 * z * w, 1.0 - 2.0 * z * z)
 
 
 class DockingSafety(Node):
@@ -145,21 +145,20 @@ class DockingSafety(Node):
         self.create_subscription(
             String, self.get_parameter("state_topic").value, self._state_cb, qos
         )
-
         self._pose_x = None
         self._pose_y = None
         self._pose_yaw = None
         self._tag_visible = False
         self._pose_source = SRC_INVALID
         self._measurement_age = float("inf")
-        self._state = "IDLE"
+        self._state = DockState.IDLE
 
         # 话题活性（节点死亡检测）
         now = self.get_clock().now()
         self._last_pose_msg_time = now
         self._last_state_msg_time = now
         self._mission_start_time = None
-        self._last_state = "IDLE"
+        self._last_state = DockState.IDLE
 
         # 防抖计数
         self._lateral_count = 0
@@ -168,7 +167,6 @@ class DockingSafety(Node):
         self._global_count = 0
         # 撤离通道位姿 INVALID 起始时刻（None=未处于丢失中）
         self._exit_invalid_since = None
-
         rate = float(self.get_parameter("check_rate").value)
         self.create_timer(1.0 / rate, self._check)
 
@@ -254,7 +252,7 @@ class DockingSafety(Node):
         ):
             if state in EXIT_STATES:
                 odom_limit = float(p("abort_exit_odom_timeout").value)
-            elif state == "ALIGN_ENTRY":
+            elif state == DockState.ALIGN_ENTRY:
                 # 见 align_odom_prediction_timeout 参数注释：不得抢跑 FSM
                 # align_tag_loss_grace_sec 宽限
                 odom_limit = float(p("align_odom_prediction_timeout").value)
@@ -305,9 +303,9 @@ class DockingSafety(Node):
                         abort_reason = "YAW_ERROR"
                 else:
                     self._yaw_count = 0
-        else:
-            self._lateral_count = 0
-            self._yaw_count = 0
+            else:
+                self._lateral_count = 0
+                self._yaw_count = 0
 
         stop_msg = Bool()
         stop_msg.data = stop

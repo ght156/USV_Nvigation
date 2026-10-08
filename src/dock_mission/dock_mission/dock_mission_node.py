@@ -53,9 +53,6 @@ class DockMissionNode(Node):
         self._pending_nav = False
         self._staging_send_inflight = False
         self._staging_send_mono = 0.0
-        self._entry_validate_result: Optional[bool] = None
-        self._entry_validate_inflight = False
-        self._entry_validate_mono = 0.0
         self._mission_id = "dock_staging"
         self._command_id = ""
         self._staging_override: Optional[tuple[float, float, float]] = None
@@ -109,8 +106,6 @@ class DockMissionNode(Node):
                 DockTaskEvent, self._dock_task_event_service
             )
 
-        self._validate_cli = self.create_client(Trigger, "/dock/validate_entry")
-
         self.create_timer(0.2, self._tick)
         self.get_logger().info(
             f"dock_mission ready home_topic={home_topic} "
@@ -123,7 +118,7 @@ class DockMissionNode(Node):
             "dock_database_path": "",
             "map_yaml_path": "",
             "use_gnss_staging": True,  # 实船默认 WGS84 预泊点；False=map_staging 反解(标定用)
-            "staging_retry_max": 3,
+            "staging_retry_max": 5,  # 2026-10-06 现场要求
             "settle_sec": 2.5,
             "complete_settle_sec": 2.0,
             "dock_home_topic": "/dock/home",
@@ -133,6 +128,7 @@ class DockMissionNode(Node):
             "dock_task_event_log_topic": "/dock_task/event_log",
             "event_ack_timeout": 3.0,
             "send_waypoints_service": "/mission_bridge/send_waypoints",
+            "cancel_mission_service": "/mission_bridge/cancel_mission",
             "nav2_controller_node": "/controller_server",
             "goal_checker_selector_topic": "goal_checker_selector",
             "use_goal_checker_selector": True,
@@ -145,14 +141,7 @@ class DockMissionNode(Node):
             "dock_mission_id": "dock_staging",
         }
         for name, value in defaults.items():
-            if isinstance(value, bool):
-                self.declare_parameter(name, value)
-            elif isinstance(value, int):
-                self.declare_parameter(name, value)
-            elif isinstance(value, float):
-                self.declare_parameter(name, value)
-            else:
-                self.declare_parameter(name, value)
+            self.declare_parameter(name, value)
 
     def _load_parameters(self) -> None:
         g = self.get_parameter
@@ -165,7 +154,7 @@ class DockMissionNode(Node):
             try:
                 from ament_index_python.packages import get_package_share_directory
 
-                self._map_yaml = Path(get_package_share_directory("workspace_nav")) / "config" / "map_hk.yaml"
+                self._map_yaml = Path(get_package_share_directory("workspace_nav")) / "config" / "map.yaml"
             except Exception:
                 self._map_yaml = Path("")
         self._use_gnss = bool(g("use_gnss_staging").value)
@@ -289,20 +278,54 @@ class DockMissionNode(Node):
             self._settle_elapsed = 0.0
         if new_state == MissionState.COMPLETE_SETTLE:
             self._complete_settle_elapsed = 0.0
-        if new_state == MissionState.ENTRY_VALIDATE:
-            self._entry_validate_result = None
-            self._entry_validate_inflight = False
         self._state = new_state
 
-    def _release_docking_session(self, *, reason: str) -> None:
+    def _release_docking_session(
+        self,
+        *,
+        reason: str,
+        authority: SpeedAuthority = SpeedAuthority.RELEASE,
+        end_session: bool = True,
+    ) -> None:
+        """释放归港会话占用的下游资源（取消 docking、切回巡航容差、发速度让权）。
+
+        authority：RELEASE=正常收尾（成功/取消/关闭）让权；FAILED=任务失败收场。
+        end_session=False 用于预泊失败重试：会话仍存活（_dock_active 保持 True），
+        且 GCS 预泊点覆盖（_staging_override）必须保留——清掉会让重试退回泊位库
+        默认点，与"同点重试"语义不符。
+
+        撤销 Nav2 goal 只在 end_session=True 且 staging 导航可能还在跑时发：
+        重试路径（end_session=False）不发——重试的 send_waypoints 会在
+        mission_bridge 内抢占替换旧 goal（for_replace=True），显式 cancel 若晚于
+        新 goal 到达会把新 goal 一起撤掉。
+        """
+        if end_session and (
+            self._pending_nav
+            or self._staging_send_inflight
+            or self._state == MissionState.NAV_TO_STAGING
+        ):
+            self._cancel_staging_nav(reason)
         self._dock_cancel_pub.publish(Empty())
         self._goal_switch.apply_cruise()
-        self._set_authority(SpeedAuthority.FAILED)
+        self._set_authority(authority)
         self._pending_nav = False
         self._staging_send_inflight = False
-        self._staging_override = None
-        self._dock_active = False
+        if end_session:
+            self._staging_override = None
+            self._dock_active = False
         self.get_logger().info(f"dock session released: {reason}")
+
+    def _cancel_staging_nav(self, reason: str) -> None:
+        """让 mission_bridge 撤销已下发的 Nav2 FollowWaypoints goal。
+
+        取消失败只记日志，不阻塞主流程（桥侧对 IDLE 幂等，重复取消安全）。
+        """
+
+        def _done(ok: bool, msg: str) -> None:
+            log = self.get_logger().info if ok else self.get_logger().warning
+            log(f"cancel_mission [{reason}]: {'OK' if ok else 'FAILED'} {msg}")
+
+        self._mission.cancel_async(done_cb=_done)
 
     def _begin_session(
         self,
@@ -316,42 +339,53 @@ class DockMissionNode(Node):
         if command == DockCommand.CANCEL:
             return self._cancel_active_session()
 
+        if not self._accepting_new_task():
+            return False, f"busy in {self._state.value}"
+
         if command == DockCommand.UNDOCK:
-            if self._dock_active or self._state not in (
-                MissionState.IDLE,
-                MissionState.SUCCEEDED,
-                MissionState.FAILED,
-                MissionState.CANCELLED,
-            ):
-                return False, f"busy in {self._state.value}"
+            mode = "undock"
+            dock_point = None  # 出泊不导航，忽略预泊点覆盖
+        elif command == DockCommand.ONE_CLICK_DOCK:
+            mode = "one_click"
+        elif command == DockCommand.DOCK_ONLY:
+            mode = "dock_only"
+        else:
+            return False, f"unsupported command {int(command)}"
 
-            self._staging_retry = 0
-            self._needs_manual_takeover = False
-            self._needs_reapproach = False
-            self._last_fail_reason = ""
-            self._session_start_mono = time.monotonic()
-            self._dock_active = True
-            self._staging_override = None
-            self._mission_id = mission_id.strip() or str(
-                self.get_parameter("dock_mission_id").value
-            )
-            self._command_id = command_id.strip()
-            self._mode = "undock"
-            self._transition(MissionState.ARMED, "undock requested")
-            self._emit_event(
-                "UNDOCK_TASK_ACCEPTED",
-                detail={"mode": self._mode},
-            )
-            return True, "undock task accepted"
+        self._arm_session(
+            mission_id=mission_id,
+            command_id=command_id,
+            mode=mode,
+            dock_point=dock_point,
+        )
+        self._transition(MissionState.ARMED, f"{mode} requested")
+        detail = {"mode": mode}
+        if mode != "undock":
+            # 相机握手未实现：require_camera 仅透传进事件 detail，_camera_ready
+            # 恒为 True（有真实握手流程前不据此阻塞任务）
+            detail["require_camera"] = require_camera
+            self._emit_event("DOCK_TASK_ACCEPTED", detail=detail)
+            return True, f"dock task accepted mode={mode}"
+        self._emit_event("UNDOCK_TASK_ACCEPTED", detail=detail)
+        return True, "undock task accepted"
 
-        if self._dock_active or self._state not in (
+    def _accepting_new_task(self) -> bool:
+        return not self._dock_active and self._state in (
             MissionState.IDLE,
             MissionState.SUCCEEDED,
             MissionState.FAILED,
             MissionState.CANCELLED,
-        ):
-            return False, f"busy in {self._state.value}"
+        )
 
+    def _arm_session(
+        self,
+        *,
+        mission_id: str,
+        command_id: str,
+        mode: str,
+        dock_point: Optional[tuple[float, float, float]] = None,
+    ) -> None:
+        """新会话公共初始化：清上一轮重试/失败残留，开计时，登记 id 与模式。"""
         self._staging_retry = 0
         self._needs_manual_takeover = False
         self._needs_reapproach = False
@@ -359,27 +393,11 @@ class DockMissionNode(Node):
         self._session_start_mono = time.monotonic()
         self._dock_active = True
         self._staging_override = dock_point
-        self._mission_id = mission_id.strip() or str(self.get_parameter("dock_mission_id").value)
-        self._command_id = command_id.strip()
-
-        if command == DockCommand.ONE_CLICK_DOCK:
-            self._mode = "one_click"
-        elif command == DockCommand.DOCK_ONLY:
-            self._mode = "dock_only"
-        else:
-            return False, f"unsupported command {int(command)}"
-
-        if require_camera:
-            self._camera_ready = False
-            self.get_logger().info("require_camera=true (camera handshake TBD)")
-            self._camera_ready = True
-
-        self._transition(MissionState.ARMED, f"{self._mode} requested")
-        self._emit_event(
-            "DOCK_TASK_ACCEPTED",
-            detail={"mode": self._mode, "require_camera": require_camera},
+        self._mission_id = mission_id.strip() or str(
+            self.get_parameter("dock_mission_id").value
         )
-        return True, f"dock task accepted mode={self._mode}"
+        self._command_id = command_id.strip()
+        self._mode = mode
 
     def _cancel_active_session(self) -> tuple[bool, str]:
         if not self._dock_active and self._state == MissionState.IDLE:
@@ -449,11 +467,14 @@ class DockMissionNode(Node):
     ) -> Optional[tuple[float, float, float]]:
         """从 GCS 命令里提取预泊点覆盖 (lat, lon, yaw_deg)。
 
-        只在经纬度齐全且合法时返回覆盖；缺字段或非法返回 None（沿用泊位库）。
+        只在经纬度齐全且合法时返回覆盖；缺字段（或 null/非数）返回 None（沿用泊位库）。
+        字段齐全但非法（(0,0)/越界）同样返回 None，由调用方据此丢弃整条指令。
         dock_lat/dock_lon 为 WGS84 度；**dock_yaw 为度**（接口统一用度），直接透传。
         弧度转换只在 mission_bridge 生成 Nav2 位姿时做。dock_yaw 缺失或为超范围哨兵
         （如 65536.0）时填 DOCK_YAW_UNSPECIFIED，mission_bridge 判为"不指定朝向"，
         导航按行进方向取到点朝向。
+        dock_yaw 是**预泊点处船艏航向**（ENU/map 系，CCW，0°=东）：船尾朝坞 ⇒
+        该值为船艏朝坞外的航向（详见 dock_task_api.GcsCommand docstring）。
         """
         if not parsed.has_dock_point:
             return None
@@ -518,7 +539,12 @@ class DockMissionNode(Node):
 
     def _on_staging_sent(self, ok: bool, msg: str) -> None:
         if not self._staging_send_inflight:
-            return  # 会话已取消/已判失败，忽略迟到响应
+            # 会话已取消/已判失败，忽略迟到响应。但若 bridge 实际受理了该次下发
+            # （ok），此前 release 发出的 cancel 可能先于 send 到达 bridge 而落空，
+            # 这里补一次取消，确保 Nav2 goal 被撤销。
+            if ok and self._state != MissionState.NAV_TO_STAGING:
+                self._cancel_staging_nav("late staging response")
+            return
         self._staging_send_inflight = False
         if self._state != MissionState.NAV_TO_STAGING:
             return
@@ -579,7 +605,7 @@ class DockMissionNode(Node):
 
     def _finish_failed(self, reason: str) -> None:
         self._last_fail_reason = reason
-        self._release_docking_session(reason=reason)
+        self._release_docking_session(reason=reason, authority=SpeedAuthority.FAILED)
         if self._staging_retry >= self._retry_max():
             self._needs_manual_takeover = True
             self._emit_event(
@@ -599,11 +625,13 @@ class DockMissionNode(Node):
 
     def _on_staging_failed(self, reason: str) -> None:
         self._staging_retry += 1
-        self._dock_cancel_pub.publish(Empty())
-        self._goal_switch.apply_cruise()
-        self._set_authority(SpeedAuthority.FAILED)
-        self._pending_nav = False
-        self._staging_send_inflight = False
+        # 重试中会话不结束：end_session=False 保留 _dock_active 与
+        # _staging_override（GCS 预泊点覆盖沿用至下一次重试）
+        self._release_docking_session(
+            reason=f"staging retry: {reason}",
+            authority=SpeedAuthority.FAILED,
+            end_session=False,
+        )
         if self._staging_retry >= self._retry_max():
             self._finish_failed(reason)
             return
@@ -611,51 +639,21 @@ class DockMissionNode(Node):
             f"staging retry {self._staging_retry}/{self._retry_max()}: {reason}"
         )
         if self._mode == "dock_only":
-            self._transition(MissionState.ENTRY_VALIDATE, reason)
+            self._transition(MissionState.DOCK_HANDOFF, reason)
         else:
             self._transition(MissionState.NAV_TO_STAGING, reason)
 
-    def _finish_succeeded(self) -> None:
-        self._release_docking_session(reason="dock succeeded")
-        self._transition(MissionState.SUCCEEDED, "dock complete")
+    def _finish_succeeded(self, *, undock: bool = False) -> None:
+        event = "UNDOCK_SUCCEEDED" if undock else "DOCK_SUCCEEDED"
+        kind = "undock" if undock else "dock"
+        self._release_docking_session(reason=f"{kind} succeeded")
+        self._transition(MissionState.SUCCEEDED, f"{kind} complete")
         self._emit_event(
-            "DOCK_SUCCEEDED",
+            event,
             detail={"elapsed_sec": self._elapsed_sec(), "mode": self._mode},
         )
         self._mode = None
         self._transition(MissionState.IDLE, "session closed")
-
-    def _finish_undock_succeeded(self) -> None:
-        self._release_docking_session(reason="undock succeeded")
-        self._transition(MissionState.SUCCEEDED, "undock complete")
-        self._emit_event(
-            "UNDOCK_SUCCEEDED",
-            detail={"elapsed_sec": self._elapsed_sec(), "mode": self._mode},
-        )
-        self._mode = None
-        self._transition(MissionState.IDLE, "session closed")
-
-    def _request_entry_validation(self) -> None:
-        """发起一次异步入口验收（结果在 _on_entry_validated 回写）。
-
-        同步阻塞版（spin_until_future_complete）在单线程 executor 的定时器
-        回调里收不到响应，必超时误判失败 —— 故改异步。
-        """
-        if not self._validate_cli.service_is_ready():
-            self.get_logger().warning("validate_entry unavailable; proceed")
-            self._entry_validate_result = True
-            return
-        self._entry_validate_inflight = True
-        self._entry_validate_mono = time.monotonic()
-        future = self._validate_cli.call_async(Trigger.Request())
-        future.add_done_callback(self._on_entry_validated)
-
-    def _on_entry_validated(self, future) -> None:
-        if not self._entry_validate_inflight:
-            return  # 已超时/已离开状态，忽略迟到响应
-        self._entry_validate_inflight = False
-        resp = future.result()
-        self._entry_validate_result = bool(resp.success) if resp is not None else False
 
     def _tick(self) -> None:
         dt = 0.2
@@ -680,7 +678,7 @@ class DockMissionNode(Node):
             if self._mode == "undock":
                 self._transition(MissionState.UNDOCK_HANDOFF, "undock skip nav")
             elif self._mode == "dock_only":
-                self._transition(MissionState.ENTRY_VALIDATE, "dock_only skip nav")
+                self._transition(MissionState.DOCK_HANDOFF, "dock_only skip nav")
             else:
                 self._transition(MissionState.NAV_TO_STAGING, "start nav staging")
                 self._start_nav_to_staging()
@@ -694,53 +692,39 @@ class DockMissionNode(Node):
                 self._staging_send_inflight = False
                 self._on_staging_failed("send_waypoints response timeout")
 
-        elif self._state == MissionState.SETTLE:
-            self._set_authority(SpeedAuthority.STAGING_VERIFY)
-            self._settle_elapsed += dt
-            settle_sec = float(self.get_parameter("settle_sec").value)
-            if self._settle_elapsed >= settle_sec:
-                self._transition(MissionState.ENTRY_VALIDATE)
+        elif self._state in (MissionState.SETTLE, MissionState.COMPLETE_SETTLE):
+            self._tick_settle(dt)
 
-        elif self._state == MissionState.ENTRY_VALIDATE:
-            if self._entry_validate_result is not None:
-                if self._entry_validate_result:
-                    self._transition(MissionState.DOCK_HANDOFF, "entry OK")
-                else:
-                    self._on_staging_failed("entry validation failed")
-            elif not self._entry_validate_inflight:
-                self._request_entry_validation()
-            elif time.monotonic() - self._entry_validate_mono > 3.0:
-                # 响应超时按失败处理（与原同步版语义一致）
-                self._entry_validate_inflight = False
-                self._entry_validate_result = False
-
-        elif self._state == MissionState.DOCK_HANDOFF:
-            self._set_authority(SpeedAuthority.DOCKING)
-            start = Bool()
-            start.data = True
-            self._dock_start_pub.publish(start)
-            self._emit_event("DOCK_HANDOFF")
-            self._transition(MissionState.MONITOR_DOCK, "handoff usv_docking")
-
-        elif self._state == MissionState.UNDOCK_HANDOFF:
-            self._set_authority(SpeedAuthority.DOCKING)
-            undock = Bool()
-            undock.data = True
-            self._dock_undock_pub.publish(undock)
-            self._emit_event("UNDOCK_HANDOFF")
-            self._transition(MissionState.MONITOR_UNDOCK, "handoff usv_docking undock")
-
-        elif self._state == MissionState.COMPLETE_SETTLE:
-            self._complete_settle_elapsed += dt
-            complete_sec = float(self.get_parameter("complete_settle_sec").value)
-            if self._complete_settle_elapsed >= complete_sec:
-                if self._mode == "undock":
-                    self._finish_undock_succeeded()
-                else:
-                    self._finish_succeeded()
+        elif self._state in (MissionState.DOCK_HANDOFF, MissionState.UNDOCK_HANDOFF):
+            self._tick_handoff(undock=self._state == MissionState.UNDOCK_HANDOFF)
 
         self._publish_task_status()
         self._publish_legacy_status()
+
+    def _tick_settle(self, dt: float) -> None:
+        """SETTLE / COMPLETE_SETTLE 公共停稳等待：累计 elapsed，到各自时长参数后推进。"""
+        if self._state == MissionState.SETTLE:
+            self._set_authority(SpeedAuthority.STAGING_VERIFY)
+            self._settle_elapsed += dt
+            if self._settle_elapsed >= float(self.get_parameter("settle_sec").value):
+                self._transition(MissionState.DOCK_HANDOFF, "settle done")
+            return
+        self._complete_settle_elapsed += dt
+        if self._complete_settle_elapsed >= float(
+            self.get_parameter("complete_settle_sec").value
+        ):
+            self._finish_succeeded(undock=self._mode == "undock")
+
+    def _tick_handoff(self, *, undock: bool) -> None:
+        """DOCK_HANDOFF / UNDOCK_HANDOFF：把控制权交给 usv_docking 并转 MONITOR_*。"""
+        self._set_authority(SpeedAuthority.DOCKING)
+        pub = self._dock_undock_pub if undock else self._dock_start_pub
+        pub.publish(Bool(data=True))
+        self._emit_event("UNDOCK_HANDOFF" if undock else "DOCK_HANDOFF")
+        self._transition(
+            MissionState.MONITOR_UNDOCK if undock else MissionState.MONITOR_DOCK,
+            "handoff usv_docking undock" if undock else "handoff usv_docking",
+        )
 
 
 def main(args=None) -> None:

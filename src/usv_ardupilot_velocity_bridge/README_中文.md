@@ -217,6 +217,11 @@ PWM 数据用于帮助判断和校准船体速度可行域。
 6. vx_out = min(vx_cmd, vx_max)
         |
         v
+6.5 原地旋转位置保持（可选，见 9.1 节）
+   纯旋转指令时把位置误差投影到船体 x 轴，
+   叠加一个小 vx 修正
+        |
+        v
 7. 线加速度 / 减速度限制
         |
         v
@@ -303,7 +308,58 @@ max_negative_yaw_rate
 max_linear_accel
 max_linear_decel
 max_angular_accel
+
+min_in_place_angular_z    # 原地旋转角速度下限 (rad/s)，0=关闭（兴飞保持关闭：
+                          # 地板会把归港的比例微调钉成全速造成震荡，2026-10-05；
+                          # 漂移/过冲分别由位置保持和旋转刹车兜底）
+in_place_floor_trigger    # 下限触发门槛（默认 0.08）：|wz| 低于此值视为
+                          # 闭环微调指令（如归港对角度），原样透传不抬升
+
+imu_topic                 # 旋转刹车所用 IMU（默认 /mavros/imu/data）
+enable_yaw_brake          # 旋转刹车开关（兴飞 launch 默认 true）
+yaw_brake_kd              # 阻尼增益：wz_out = -kd × ω_meas（默认 1.0）
+yaw_brake_max             # 刹车角速度上限（默认 0.2 rad/s）
+yaw_brake_engage_rate     # 残转超过此值触发刹车（默认 0.03 rad/s）
+yaw_brake_release_rate    # 低于此值退出刹车（默认 0.02 rad/s）
+yaw_brake_cmd_deadband    # |wz 指令|低于此值视为空闲（默认 0.01 rad/s）
+imu_timeout_sec           # IMU 超时（默认 0.5 s）
+
+pose_topic                # 位置保持所用位姿反馈（默认 /mavros/local_position/odom，ENU；
+                          # 本船 mavros 不发布 local_position/pose，故用 odom）
+enable_in_place_hold      # 原地旋转位置保持开关（兴飞 launch 默认 true）
+hold_linear_deadband      # |vx| ≤ 此值视为纯旋转（默认 0.02 m/s）
+hold_angular_min          # |wz| ≥ 此值才触发保持（默认 0.05 rad/s）
+hold_kp                   # 保持 P 增益：每 m 误差给出的修正速度（默认 0.5 1/s）
+hold_max_correction       # 修正速度上限（默认 0.3 m/s）
+hold_error_deadband       # 误差死区，小于此值不修正（默认 0.10 m，抗 GPS 噪声）
+hold_max_error            # 误差钳制（默认 2.0 m，防 GPS 跳变）
+pose_timeout_sec          # 位姿超时（默认 1.0 s），超时自动退出保持
+hold_decay_start_sec      # 持续旋转超过此时长修正开始衰减（默认 5.0 s）
+hold_decay_full_sec       # 衰减到此时长达到下限（默认 15.0 s）
+hold_min_correction       # 衰减后修正下限（默认 0.05 m/s，防极限环画圈）
 ```
+
+### 9.1 原地旋转位置保持（P 环）
+
+ArduRover GUIDED 的"转速+速度"子模式（即本桥的输出链路）只有转向角速度环和速度环，**没有任何位置环**：纯旋转时差速推进不对称、水流等扰动产生的位移无人纠正，表现为边转边倒退画弧。
+
+`enable_in_place_hold=true` 时，bridge 在 ROS 侧补一个位置保持环：
+
+- 指令为纯旋转（`|vx| ≤ hold_linear_deadband` 且 `|wz| ≥ hold_angular_min`）时，把当前位置记为锚点；
+- 保持期间把"锚点 − 当前位置"的世界系（ENU）误差投影到船体 x 轴，经 P 增益和限幅后叠加到输出 `vx` 上（修正也会经过加速度限制，平滑进出）;
+- **修正幅值随持续旋转时长衰减**(`hold_decay_start_sec`/`hold_decay_full_sec`/`hold_min_correction`)：船体 x 单向修正在连续旋转坐标系下无法收敛，会形成极限环画大圈（2026-10-05 现场实测半径 2m)；前 5s 全量（导航短旋转不受影响）,15s 衰减到 0.05 m/s（残余圈半径 ~0.33m);
+- 只修正前/后方向：本船横向不可直接推进，横向误差靠旋转中的航向变化自然收敛；
+- 指令恢复平移、指令超时或位姿超时即释放锚点，下次纯旋转重新取锚。
+
+只用 P 环是有意的：保持是短时行为，I 在 GPS 跳变/修正饱和时容易积分风up;3 Hz GPS 位姿下 D 会放大噪声。如实测有固定方向残差（如持续水流），优先考虑标定前馈或调 `hold_kp`，不要急着加 I。
+
+### 9.2 旋转刹车（角速度阻尼）
+
+2026-10-05 水测：角速度指令归零后，船因飞控输出缓降 + 惯性还要再转 25~35°、约 9~11s 才停稳（τ≈4s）。归港微调角度时表现为过冲震荡。
+
+`enable_yaw_brake=true` 时，桥在上游空闲（`|vx 指令|≤0.02` 且 `|wz 指令|≤0.01`）但 IMU 实测 `|ω|≥0.03` 时进入刹车态，输出反向阻尼角速度 `wz = −kd×ω`（限幅 ±0.2，走角加速度斜率限制），把残转主动刹停；`|ω|<0.02` 退出。指令超时（导航停发）时刹车同样生效——那正是残转需要刹的时候。上游一旦恢复任何运动指令立即退出，不与 nav2/归港抢控制权。
+
+与位置保持的分工：保持环管"别漂走"（平移），刹车管"别多转"（旋转），两者触发条件互斥（保持要求 |wz 指令|≥0.05，刹车要求 |wz 指令|≤0.01）。
 
 ### 输入话题与 QoS
 

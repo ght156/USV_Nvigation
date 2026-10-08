@@ -13,7 +13,7 @@
 | 项目 | 要求 |
 |------|------|
 | 频率 | ≥ 20 Hz（低于此频率触发 DEGRADED 告警） |
-| QoS | BEST_EFFORT, depth ≥ 10 |
+| QoS | **RELIABLE**, depth ≥ 10（见下方说明） |
 | `header.frame_id` | `"odom"` |
 | `child_frame_id` | `"base_link"` |
 
@@ -36,12 +36,25 @@
 
 **可填 0 的字段**：`pose.pose.position.z`、`twist.twist.linear.y`、`twist.twist.linear.z`
 
+> **QoS 说明（2026-09-15 更正）**：导航侧订阅端是 RELIABLE（Nav2 `bt_navigator`/`controller_server`/
+> `velocity_smoother` 用 `rclcpp::SystemDefaultsQoS()`，`mission_bridge`/`nav_status_aggregator` 用 rclpy 默认），
+> 所以 `/slam/localization` 必须用 **RELIABLE** 发布。RELIABLE 发布端兼容 BEST_EFFORT 订阅端，反之不兼容。
+> 现网 `slam_nav_bridge` 输出即 RELIABLE（`rclcpp::QoS(10)`），与订阅端一致。
+
 ### 1.2 TF 广播
 
 | 变换 | 父帧 | 子帧 | 说明 |
 |------|------|------|------|
 | `map → odom` | `map` | `odom` | SLAM 全局漂移修正；≥ 20 Hz |
 | `odom → base_link` | `odom` | `base_link` | 局部里程计；Odometry 消息自带或单独广播 |
+
+**时间戳约定**：两条 TF 都使用**定位源 odom 消息的时间戳**（与 `/slam/localization` 的 `header.stamp` 同源），
+保证 `map→odom` 与 `odom→base_link` 处于同一时间基；无有效时间戳时回退 `now()`。
+导航侧已**废弃**"准静态 `map→odom` 打 `now()+0.2s` 未来时间戳"的旧做法（`usv_map_odom_tf` 的
+`tf_future_offset_sec` 已移除），SLAM 侧不需要任何预偏移。
+
+**`/tf`、`/tf_static` 的 QoS 不用改**：tf2_ros 默认 RELIABLE（depth 100），两端天然一致；只有
+`/slam/localization` 这个普通话题需要注意 QoS。
 
 **为什么分两层？**
 - `odom → base_link`：连续平滑的局部里程计（帧间准确，但会累积漂移）
@@ -90,6 +103,27 @@ map 系坐标 = ENU(当前GNSS − 锚点GNSS)
 
 SLAM 融合 GNSS 初始化即可输出 map 系位姿。
 
+### 2.4 GNSS 数据来源（船端实际话题）
+
+船端**没有 `/rtk/fix` 发布者**，GNSS 原始数据只有 GI320 驱动这两路：
+
+| 话题 | 类型 | 说明 |
+|------|------|------|
+| `/gi320/gngga` | `bw_gi320_driver/Gi320Gngga` | GGA：`fix_type` / HDOP / 卫星数 |
+| `/gi320/inspvaa` | `bw_gi320_driver/Gi320Inspvaa` | INSPVAA：10 Hz 位置、姿态、航向、速度 |
+
+SLAM 侧统一经 `mapping_gnss/gnss_unify_node` 取数，输出 `mapping_gnss/GnssFix` 到 `/gnss/fix`：
+
+```bash
+ros2 launch mapping_gnss gnss_unify.launch.py \
+  gngga_topic:=/gi320/gngga inspvaa_topic:=/gi320/inspvaa output_topic:=/gnss/fix
+```
+
+lightning `system.rtk_topic` 与 mapping_bridge 各节点的 `gps_topic` / `heading_topic` 都必须指向
+`/gnss/fix`；写 `/rtk/fix` 在船上收不到数据。已安装的 `run_lightning_odom.launch.py` 已 include
+`gnss_unify` 并使用 `/gnss/fix`；`~/usv/src/mapping/lightning-lm` 源码副本是旧版（`/rtk/fix`、
+未 include `gnss_unify`），从该副本重新编译前需先同步。
+
 ---
 
 ## 3. 导航 → SLAM 的输出
@@ -105,18 +139,34 @@ SLAM 融合 GNSS 初始化即可输出 map 系位姿。
 
 ## 4. 当前 MAVROS 方案 → SLAM 方案的配置切换
 
-从 MAVROS（PX4 EKF）切换到 SLAM 定位，需修改以下配置中的 odom_topic。
+从 MAVROS（ArduPilot + GI320）切换到 SLAM 定位，用 launch 参数 `odom_topic` 一处切换（2026-09-23 起）：
 
-### 4.1 需修改的文件
+```bash
+# 导航 + mission 栈（Nav2 的 bt_navigator / controller_server / velocity_smoother
+# 与 mission_bridge / nav_status_aggregator / zone_monitor 同时被改写）
+ros2 launch workspace_nav nav2_boat.launch.py odom_topic:=/slam/localization ...
 
-| 文件 | 参数路径 | 当前值 | 改为 |
-|------|----------|--------|------|
-| `nav2_params_real_mavros.yaml` | `bt_navigator.odom_topic` | `/mavros/local_position/odom` | `/slam/localization` |
-| `nav2_params_real_mavros.yaml` | `velocity_smoother.odom_topic` | `/mavros/local_position/odom` | `/slam/localization` |
-| `nav2_mavros_odom_overlay.yaml` | `bt_navigator.odom_topic` | `/mavros/local_position/odom` | `/slam/localization` |
-| `nav2_mavros_odom_overlay.yaml` | `velocity_smoother.odom_topic` | `/mavros/local_position/odom` | `/slam/localization` |
-| `mission_stack.real_boat.yaml` | `mission_bridge.odom_topic` | `/mavros/local_position/odom` | `/slam/localization` |
-| `mission_bridge.launch.py` | `odom_topic` 参数默认值 | `/mavros/local_position/odom` | `/slam/localization` |
+# 归港栈（覆盖 docking_fsm.odom_speed_topic）
+ros2 launch usv_docking docking.launch.py odom_topic:=/slam/localization
+```
+
+### 4.1 odom_topic 参数行为
+
+| launch 参数 | 空（默认） | 非空（如 `/slam/localization`） |
+|------|----------|--------|
+| `nav2_boat.launch.py` 的 `odom_topic` | 尊重 `params_file`（`nav2_params_chengfeng.yaml` 默认 `/mavros/gps_input/local`） | RewrittenYaml 改写 Nav2 全部三处 `odom_topic`，并透传 mission 栈 |
+| `mission_bridge.launch.py` 的 `odom_topic` | 尊重 `mission_stack.chengfeng.yaml` / 代码默认 | 覆盖 mission_bridge / nav_status_aggregator / zone_monitor |
+| `docking.launch.py` 的 `odom_topic` | 尊重 `docking.yaml` | 覆盖 `docking_fsm.odom_speed_topic` |
+
+**说明**
+
+- MAVROS 模式的 odom 不是 `/mavros/local_position/odom`：实船（ArduPilot + GI320）用的是 mavros
+  `gps_input` 插件的 `/mavros/gps_input/local`，`/mavros/local_position/odom` 是另一路（未参与导航）。
+- 要固定换源，也可以直接改 yaml：`nav2_params_chengfeng.yaml` 三处（bt_navigator /
+  controller_server / velocity_smoother）、`mission_stack.chengfeng.yaml`、`docking.yaml`
+  里的 `odom_topic`（文件内注释标了位置）；legacy `waypoint_with_state` 不在实船链路，不用管。
+- `nav_status_aggregator` 的 odom 频率判据是参数 `min_odom_hz`（默认 8.0），SLAM 掉频时可在
+  `mission_stack.chengfeng.yaml` 调低。
 
 ### 4.2 不再需要的节点
 
@@ -124,7 +174,7 @@ SLAM 融合 GNSS 初始化即可输出 map 系位姿。
 
 | 节点 | 原因 |
 |------|------|
-| `gnss_odom_map_tf` | `map→odom` TF 改由 SLAM 发布 |
+| `usv_map_odom_tf`（旧称 `gnss_odom_map_tf`） | `map→odom` TF 改由 SLAM 发布，两个发布者会抢同一条 TF |
 | MAVROS `local_position` TF 发布 | `odom→base_link` TF 改由 SLAM 发布 |
 | `nav_status_aggregator` 的 GPS 订阅 | 如 SLAM 不提供 NavSatFix，gps_fix 字段需调整或禁用 |
 

@@ -22,7 +22,7 @@ TL = QoSProfile(
     reliability=ReliabilityPolicy.RELIABLE,
 )
 
-# 当前船上滤波链（与 nav2_params_real_mavros.yaml 一致）
+# 当前船上滤波链（与 nav2_params_chengfeng.yaml 一致）
 R_MIN, R_MAX = 2.0, 20.0
 Z_OBS_MIN, Z_OBS_MAX = -0.25, 1.5
 Z_VOXEL_CAP = 1.0

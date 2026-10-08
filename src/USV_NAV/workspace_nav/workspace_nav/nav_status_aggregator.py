@@ -24,7 +24,8 @@ from typing import Any, Deque, Dict, Optional, Set, Tuple
 import rclpy
 from action_msgs.msg import GoalStatus, GoalStatusArray
 from nav_msgs.msg import Odometry
-from rcl_interfaces.msg import Log
+from rcl_interfaces.msg import Log, ParameterType
+from rcl_interfaces.srv import GetParameters
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.duration import Duration as RDuration
 from rclpy.node import Node
@@ -74,11 +75,18 @@ class NavStatusAggregator(Node):
         self._publish_rate = max(0.5, min(10.0,
                                           float(self.get_parameter("publish_rate").value)))
         self._odom_timeout = max(0.5, float(self.get_parameter("odom_timeout").value))
+        self._min_odom_hz = max(0.1, float(self.get_parameter("min_odom_hz").value))
         self._gps_timeout = max(0.5, float(self.get_parameter("gps_timeout").value))
         self._mb_timeout = max(1.0, float(self.get_parameter("mission_bridge_timeout").value))
         self._cov_lost = float(self.get_parameter("cov_lost_threshold").value)
         self._cov_degraded = float(self.get_parameter("cov_degraded_threshold").value)
         self._stuck_timeout = max(1.0, float(self.get_parameter("stuck_progress_timeout").value))
+        self._stuck_radius = max(
+            0.01, float(self.get_parameter("stuck_movement_radius_m").value))
+        self._sync_stuck_from_nav2 = bool(
+            self.get_parameter("sync_stuck_from_nav2").value)
+        self._controller_server_node = str(
+            self.get_parameter("controller_server_node").value)
         self._global_frame = str(self.get_parameter("global_frame").value)
         self._robot_frame = str(self.get_parameter("robot_frame").value)
 
@@ -204,6 +212,18 @@ class NavStatusAggregator(Node):
                                                 self._publish_nav_status)
         self._tf_timer = self.create_timer(1.0, self._check_tf)
 
+        # CTRL_STUCK 阈值跟随 Nav2 controller_server 的 progress_checker
+        # （required_movement_radius / movement_time_allowance），调 Nav2 参数即同步；
+        # Nav2 未上线或查询失败时回退本地 stuck_movement_radius_m / stuck_progress_timeout。
+        self._nav2_param_client = None
+        if self._sync_stuck_from_nav2:
+            self._nav2_param_client = self.create_client(
+                GetParameters,
+                f"{self._controller_server_node}/get_parameters")
+            poll = max(2.0, float(
+                self.get_parameter("nav2_param_poll_period_sec").value))
+            self.create_timer(poll, self._poll_nav2_stuck_params)
+
         self.get_logger().info(
             f"nav_status_aggregator started  rate={self._publish_rate}Hz  "
             f"vehicle={self._vehicle_id}  "
@@ -227,11 +247,16 @@ class NavStatusAggregator(Node):
         self.declare_parameter("publish_rate", 2.0)
         self.declare_parameter("vehicle_id", "usv_001")
         self.declare_parameter("odom_timeout", 2.0)
+        self.declare_parameter("min_odom_hz", 8.0)
         self.declare_parameter("gps_timeout", 5.0)
         self.declare_parameter("mission_bridge_timeout", 5.0)
         self.declare_parameter("cov_lost_threshold", 10.0)
         self.declare_parameter("cov_degraded_threshold", 1.0)
         self.declare_parameter("stuck_progress_timeout", 12.0)
+        self.declare_parameter("stuck_movement_radius_m", 0.3)
+        self.declare_parameter("sync_stuck_from_nav2", True)
+        self.declare_parameter("controller_server_node", "/controller_server")
+        self.declare_parameter("nav2_param_poll_period_sec", 10.0)
         self.declare_parameter("global_frame", "map")
         self.declare_parameter("robot_frame", "base_link")
 
@@ -440,7 +465,12 @@ class NavStatusAggregator(Node):
         elif (
             self._position_cov_max > self._cov_degraded
             or (self._gps is not None and self._gps.status.status < 3)
-            or (self._odom_hz > 0.0 and self._odom_hz < 20.0)
+            # 定位 odom 频率下限（min_odom_hz 参数，默认 8Hz）。实船两类源都不到 20Hz ——
+            #   MAVROS /mavros/gps_input/local：每条 INSPVAA 转发一条 ≈10Hz
+            #   SLAM   /slam/localization：raw LIO odom（raw_odom_max_hz=20）≈20-29Hz
+            # 20Hz 会让 MAVROS 模式一直判 DEGRADED（SLAM 模式也在边界抖动）；
+            # 真断流由上面的 odom_timeout(2s) → LOST 兜底，这里只拦"明显变慢"。
+            or (self._odom_hz > 0.0 and self._odom_hz < self._min_odom_hz)
             or gps_stale
         ):
             self._loc_health = LocHealth.DEGRADED
@@ -499,8 +529,84 @@ class NavStatusAggregator(Node):
                 f"[nav_status_aggregator]: localization GOOD (recovered from {prev_loc.value})"
             )
 
+    # ----------------------------------------------------------------------- #
+    # Nav2 progress_checker 参数同步
+    # ----------------------------------------------------------------------- #
+
+    _PC_PLUGIN_PARAM = "progress_checker_plugin"
+    _PC_DEFAULT_PLUGIN = "progress_checker"
+
+    def _poll_nav2_stuck_params(self) -> None:
+        client = self._nav2_param_client
+        if client is None or not client.service_is_ready():
+            return
+        plugin = self._PC_DEFAULT_PLUGIN
+        names = [
+            self._PC_PLUGIN_PARAM,
+            f"{plugin}.required_movement_radius",
+            f"{plugin}.movement_time_allowance",
+        ]
+        self._request_nav2_params(names)
+
+    def _request_nav2_params(self, names: list) -> None:
+        req = GetParameters.Request()
+        req.names = list(names)
+        fut = self._nav2_param_client.call_async(req)
+        fut.add_done_callback(
+            lambda f, n=tuple(names): self._on_nav2_params(f, n))
+
+    def _on_nav2_params(self, future: Any, names: tuple) -> None:
+        try:
+            resp = future.result()
+        except Exception:
+            return
+        if resp is None:
+            return
+        plugin = self._PC_DEFAULT_PLUGIN
+        radius: Optional[float] = None
+        allowance: Optional[float] = None
+        for name, val in zip(names, resp.values):
+            if val.type == ParameterType.PARAMETER_NOT_SET:
+                continue
+            if name == self._PC_PLUGIN_PARAM:
+                if val.type == ParameterType.PARAMETER_STRING and val.string_value:
+                    plugin = val.string_value
+            elif name.endswith("required_movement_radius"):
+                radius = float(val.double_value)
+            elif name.endswith("movement_time_allowance"):
+                allowance = float(val.double_value)
+        if plugin != self._PC_DEFAULT_PLUGIN and (radius is None or allowance is None):
+            # progress_checker 插件名被改过，按实际插件名再查一次
+            self._request_nav2_params([
+                f"{plugin}.required_movement_radius",
+                f"{plugin}.movement_time_allowance",
+            ])
+            return
+        self._apply_nav2_stuck_params(radius, allowance)
+
+    def _apply_nav2_stuck_params(self, radius: Optional[float],
+                                 allowance: Optional[float]) -> None:
+        changed = []
+        if radius is not None and radius > 0.0 \
+                and abs(radius - self._stuck_radius) > 1e-9:
+            changed.append(f"radius {self._stuck_radius}→{radius}m")
+            self._stuck_radius = radius
+        if allowance is not None and allowance >= 1.0 \
+                and abs(allowance - self._stuck_timeout) > 1e-9:
+            changed.append(f"timeout {self._stuck_timeout}→{allowance}s")
+            self._stuck_timeout = allowance
+        if changed:
+            self.get_logger().info(
+                "CTRL_STUCK 阈值已同步 Nav2 progress_checker: "
+                + ", ".join(changed))
+
     def _update_stuck_detection(self) -> None:
-        """Detect if the robot is stuck (no progress while mission RUNNING)."""
+        """Detect if the robot is stuck (no progress while mission RUNNING).
+
+        只看 xy 位移、不看 yaw：原地旋转不算进展，转 >30s 同样触发。
+        阈值默认经 sync_stuck_from_nav2 与 Nav2 progress_checker 同步
+        （实际生效 2.0m/30.0s）；触发只发 CTRL_STUCK 告警，不动任务。
+        """
         if self._mission_state != "RUNNING":
             self._controller_stuck = False
             self._last_progress_pose = None
@@ -518,7 +624,7 @@ class NavStatusAggregator(Node):
         dy = current_pose[1] - self._last_progress_pose[1]
         dist = math.hypot(dx, dy)
 
-        if dist > 0.3:
+        if dist > self._stuck_radius:
             # Made progress — reset stuck timer
             self._last_progress_pose = current_pose
             self._last_progress_time = now
@@ -609,7 +715,7 @@ class NavStatusAggregator(Node):
                     "task_id": self._task_id,
                     "source": "cancel",
                 })
-        elif prev in ("PAUSED", "EMERGENCY") and curr == "IDLE":
+        elif prev == "PAUSED" and curr == "IDLE":
             if transition_reason == "cancel":
                 self._fire_event("TASK_CANCELLED", {
                     "task_id": self._task_id,
@@ -626,12 +732,6 @@ class NavStatusAggregator(Node):
             self._fire_event("TASK_RESUMED", {
                 "task_id": self._task_id,
                 "waypoint_index": self._waypoint_current_index,
-            })
-
-        elif curr == "EMERGENCY":
-            self._last_error = "EMERGENCY_STOP"
-            self._fire_event("EMERGENCY_STOP", {
-                "task_id": self._task_id,
             })
 
     # ----------------------------------------------------------------------- #
@@ -761,7 +861,7 @@ class NavStatusAggregator(Node):
 
         # --- 标志位 ---
         msg.flags_manual_override = False
-        msg.flags_emergency_stop = self._mission_state == "EMERGENCY"
+        msg.flags_emergency_stop = False
         msg.flags_recovery_active = nav_phase == "RECOVERY"
 
         # --- 告警布尔 ---
@@ -770,7 +870,7 @@ class NavStatusAggregator(Node):
         msg.alerts_mission_bridge_alive = mb_alive
         msg.alerts_planner_error = planner_status == "FAILED"
         msg.alerts_controller_error = controller_status in ("FAILED", "STUCK")
-        msg.alerts_emergency_active = self._mission_state == "EMERGENCY"
+        msg.alerts_emergency_active = False
         msg.alerts_mission_paused = self._mission_state == "PAUSED"
 
         self._nav_status_pub.publish(msg)
@@ -785,8 +885,6 @@ class NavStatusAggregator(Node):
             return "IDLE"
         if self._mission_state == "PAUSED":
             return "PAUSED"
-        if self._mission_state == "EMERGENCY":
-            return "EMERGENCY"
         if self._controller_stuck:
             return "STUCK"
         if self._waypoint_goal_active:

@@ -1,0 +1,502 @@
+# -----------------------------------------------------------------------------
+#
+# 【兴飞船 xingfei】Nav2 参数 —— 复制自 nav2_params_chengfeng.yaml（澄丰实船基线）
+#   切换：ros2 launch workspace_nav nav2_boat.launch.py \
+#           params_file:=$(ros2 pkg prefix workspace_nav)/share/workspace_nav/config/nav2_params_xingfei.yaml \
+#           map:=<与 bringup / SLAM 同源的 map_xingfei.yaml>
+#
+#   换船要现场改的（详见 src/USV_NAV/README.md「换船 / 切换定位源」）：
+#     [ ] 船体 footprint（local/global costmap 各一处，现前 2.7 / 后 0.5 / 半宽 0.84）
+#     [ ] 速度与加速度限幅、RPP lookahead / min_radius（按兴飞实测运动能力）
+#     [ ] 切 SLAM 不必改本文件：launch 加 odom_topic:=/slam/localization 即可（会覆盖三处）
+#     [ ] 传感器外参不在这里，在 usv_transforms/urdf/cleaning_boat.xacro
+#
+# -----------------------------------------------------------------------------
+#
+# 里程计 / TF：
+#   - odom→base_link：NX gps_input 插件（inspvaa 时间戳）
+#   - map→odom：gnss_odom_map_tf（real_boat_bringup），时间戳跟随 RTK（inspvaa），
+#     与 odom→base_link 同源；map_server 用同一份 map.yaml
+#   - 各 odom_topic 统一为 /mavros/gps_input/local
+#
+# 速度链：controller_server → /cmd_vel_nav → ardupilot_velocity_bridge
+#   → /mavros/setpoint_velocity/cmd_vel_unstamped
+#   （桥只做转发/超时归零/限速；切模式与解锁由外部负责，桥不再接管）
+#
+# RPP 前瞻 L≈clamp(v×lookahead_time, min, max)：
+#   min 过小 → carrot 在转弯半径内侧 → S 线/震荡；max 过大 → 先冲远再拐（目标在船后明显）
+#   min 宜 ≥ 船头前伸(2.8m = footprint 2.7 + padding 0.1) 且 ≥ 最小转弯半径（见 regulated_linear_scaling_min_radius）
+#   max 另有硬上限：≤ 局部窗口半宽(10m) − 船头前伸(2.8m) = 7.2m，见 FollowPath 的碰撞检测注释
+#
+# 保守下水：速度与 ardupilot_velocity_bridge 的 max_linear_x / max_angular_z 同量级，先小后大。
+# Livox：/livox/lidar；footprint 见 local/global costmap 注释。
+# -----------------------------------------------------------------------------
+bt_navigator:
+  ros__parameters:
+    use_sim_time: false
+    global_frame: map              # 与 global_costmap、规划目标一致，固定 map
+    robot_base_frame: base_link   # gps_input/local odom 子帧
+    odom_topic: "/mavros/gps_input/local"  # 与 mission_bridge、velocity_smoother、速度桥一致
+    bt_loop_duration: 10
+    default_server_timeout: 20
+    wait_for_service_timeout: 1000
+    plugin_lib_names: [
+      nav2_compute_path_to_pose_action_bt_node, nav2_compute_path_through_poses_action_bt_node,
+      nav2_smooth_path_action_bt_node, nav2_follow_path_action_bt_node, nav2_spin_action_bt_node,
+      nav2_wait_action_bt_node, nav2_assisted_teleop_action_bt_node, nav2_back_up_action_bt_node,
+      nav2_drive_on_heading_bt_node, nav2_clear_costmap_service_bt_node, nav2_is_stuck_condition_bt_node,
+      nav2_goal_reached_condition_bt_node, nav2_goal_updated_condition_bt_node, nav2_globally_updated_goal_condition_bt_node,
+      nav2_is_path_valid_condition_bt_node, nav2_initial_pose_received_condition_bt_node,
+      nav2_reinitialize_global_localization_service_bt_node, nav2_rate_controller_bt_node,
+      nav2_distance_controller_bt_node, nav2_speed_controller_bt_node, nav2_truncate_path_action_bt_node,
+      nav2_truncate_path_local_action_bt_node, nav2_goal_updater_node_bt_node, nav2_recovery_node_bt_node,
+      nav2_pipeline_sequence_bt_node, nav2_round_robin_node_bt_node, nav2_transform_available_condition_bt_node,
+      nav2_time_expired_condition_bt_node, nav2_path_expiring_timer_condition, nav2_distance_traveled_condition_bt_node,
+      nav2_single_trigger_bt_node, nav2_goal_updated_controller_bt_node, nav2_is_battery_low_condition_bt_node,
+      nav2_navigate_through_poses_action_bt_node, nav2_navigate_to_pose_action_bt_node,
+      nav2_remove_passed_goals_action_bt_node, nav2_planner_selector_bt_node, nav2_controller_selector_bt_node,
+      nav2_goal_checker_selector_bt_node, nav2_controller_cancel_bt_node, nav2_path_longer_on_approach_bt_node,
+      nav2_wait_cancel_bt_node, nav2_spin_cancel_bt_node, nav2_back_up_cancel_bt_node,
+      nav2_assisted_teleop_cancel_bt_node, nav2_drive_on_heading_cancel_bt_node, nav2_is_battery_charging_condition_bt_node
+    ]
+
+bt_navigator_navigate_through_poses_rclcpp_node:
+  ros__parameters:
+    use_sim_time: false 
+
+bt_navigator_navigate_to_pose_rclcpp_node:
+  ros__parameters:
+    use_sim_time: false 
+
+controller_server:
+  ros__parameters:
+    use_sim_time: false
+    # —— 控制器订阅的里程计话题（只取 twist 速度反馈，不取位姿；缺省为 /odom）——
+    odom_topic: "/mavros/gps_input/local"
+    # —— 控制器频率 (Hz)。20 为 Nav2 默认；水面扭动大时可试 10，与 smoothing_frequency 对齐 ——
+    controller_frequency: 20.0
+    # —— 里程计反馈噪声门限：odom twist 低于此值视为 0（作用于喂给控制器的速度反馈，
+    #    见 controller_server.hpp getThresholdedTwist；不是输出指令死区）——
+    # 设近默认值：GPS/INS 反馈静止时本就接近 0，无编码器漂移可滤；
+    # 0.05 会把真实慢速运动清零，导致原地旋转爬坡死锁（实测教训）——
+    min_x_velocity_threshold: 0.001
+    min_y_velocity_threshold: 0.001
+    min_theta_velocity_threshold: 0.001
+
+    progress_checker_plugin: "progress_checker"
+    # 2026-10-07：注册归港预泊点专用 checker，dock_mission 的 goal profile 切换用
+    goal_checker_plugins: ["general_goal_checker", "docking_goal_checker"]
+    controller_plugins: ["FollowPath"]
+
+    progress_checker:
+      plugin: "nav2_controller::SimpleProgressChecker"
+      # —— 在 movement_time_allowance 秒内至少移动 required_movement_radius 米，否则视为卡住 ——
+      # 只算平面位移、不计角运动：原地旋转（如到点对准朝向转不进 yaw 容差）超过
+      # 30s 也会判 FollowPath 失败 → 航点 missed → mission_bridge 升级 MISSION_FAILED。
+      # 无朝向要求的航点 yaw 填 65536 可避免终点原地打转触发本判定。
+      required_movement_radius: 2.0
+      movement_time_allowance: 30.0
+
+    general_goal_checker:
+      stateful: true
+      plugin: "nav2_controller::SimpleGoalChecker"
+      # —— 到达判定容差：xy (米) / yaw (弧度) ——
+      xy_goal_tolerance: 0.5
+      # 有意设为不约束终点朝向（3.14≈180°，任意 yaw 均判达标），勿按常规改小
+      yaw_goal_tolerance: 3.14
+    # 归港预泊点专用（dock_mission 切到此 profile）：预泊必须对准朝向（船尾朝坞），
+    # 否则交接给视觉归港时大艏偏会在 APPROACH 打转（2026-10-07 退化区打转的远因之一）
+    docking_goal_checker:
+      stateful: true
+      plugin: "nav2_controller::SimpleGoalChecker"
+      xy_goal_tolerance: 0.6
+      yaw_goal_tolerance: 0.15  # ≈8.6°
+    FollowPath:
+      plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
+      # —— 期望线速度 (m/s) = 导航最高速；下游桥另有限幅，不在本文件里 ——
+      # 2026-10-05 水测：船最大前进速度 ~1.0 m/s；桥直线限幅已按要求放到 ~1.0
+      desired_linear_vel: 1.0
+      # —— 角加速度上限 (rad/s²)，只用于原地旋转的爬坡：每周期 ω 最多变化 a×dt。
+      #    澄丰的 0.3 死锁教训：首步须越过静摩擦死区；兴飞实测 0.10 指令可达 0.078 rad/s，
+      #    死区在 0.1 以下 → 取 2.5（首步 0.125 > 死区，比澄丰的 5.0 平滑）；
+      #    实际爬坡由桥 0.5 rad/s² 斜率限制兜底 ——
+      max_angular_accel: 2.5
+      # —— 是否允许倒车。false：目标在船后时只能绕弧前进，无法倒车对准；全局路径会先向前再拐 ——
+      allow_reversing: false #与原地旋转不能同时开启
+
+      # —— 前瞻 (lookahead / carrot)，L≈clamp(v×lookahead_time, min, max) ——
+      # 船头在 base_link 前方约 2.8 m（footprint 2.7 + padding 0.1）：min 须 > 2.8，否则 carrot 落在船体内。
+      # 与最小转弯半径 R_min 匹配（宜 min ≥ R_min，与 regulated_linear_scaling_min_radius 同量级）：
+      #   min 过小：carrot 在弯内侧，船未转完前瞻点已到近处 → S 线、左右震荡，严重时像反向拧。
+      #   max 过大：沿路径直行过久 → 转弯滞后、有效半径大，目标在船后时先冲很远再拐。
+      # —— max 的硬上限：≤ 局部窗口半宽(20/2=10m) − 船头前伸(2.8m) = 7.2m ——
+      #   RPP 碰撞检测的仿真弧最远到 carrot，弧上 footprint 顶点一旦越过局部代价地图边界就按
+      #   LETHAL_OBSTACLE(254) 处理 → 无障碍物也会报 "detected collision ahead!" 急停
+      #   （2026-09-21 湖中心实测；见 docs/bug_debug/2026-09-21_RPP误报碰撞-局部代价地图窗口过小.md）。
+      #   要放宽：改小 max，或把 local_costmap 的 width/height 加到 24（半窗 12 → 上限 9.2）。
+      lookahead_dist: 7.0                     # 静态Fallback距离，use_velocity_scaled_lookahead_dist: true时无效
+      lookahead_time: 10.0                    # L=clamp(v×10, min, max)；≤10 才落在 nav2_tune_gui.py 可调范围(1~10)
+      use_velocity_scaled_lookahead_dist: true
+      min_lookahead_dist: 5.5                 # 2026-10-07 兴飞（重船大惯量）：5.0→5.5，更早切弯
+      max_lookahead_dist: 8.0                 # 7.0→8.0；巡航包络 R≈13m（0.9m/s 时 wz≤0.07），
+                                              # 上限 9.2m（24m 半窗 12 − 船头 2.8）留 1.2m 余量
+
+      # —— 曲率限速：路径转弯半径 < min_radius 时线速度向 min_speed 靠拢 ——
+      # min_radius 宜与船体最小转弯半径、min_lookahead_dist 同量级；过小 → 频繁压到 min_speed 走走停停
+      use_regulated_linear_velocity_scaling: true
+      regulated_linear_scaling_min_speed: 0.2       # 2026-10-07：0.1→0.2。水测风/流漂移 0.10~0.15 m/s，
+                                                    # min_speed 低于漂移下限=弯道失速失控
+      regulated_linear_scaling_min_radius: 6.0       # 触发减速的等效转弯半径 (m)。2026-10-07：
+                                                    # 巡航 0.9m/s 时包络允许 wz≈0.07 → R≈13m，
+                                                    # 提早减速给重船留转弯余量（原 5.0 偏晚）
+
+      # —— 代价减速（软限速，与碰撞弧急停是两套独立机制）——
+      # 由船位代价按膨胀衰减公式反算"到最近障碍距离" d；d < cost_scaling_dist 时
+      #   速度 ×= cost_scaling_gain × d / cost_scaling_dist
+      # gain=1.0 即线性：4.5m 全速、2.25m 半速、贴障趋于 0。只管"提前慢"，不管停。
+      use_cost_regulated_linear_velocity_scaling: true
+      # 开始减速的距离门槛 (m)：按 base_link 到障碍的距离算，须 ≤ local inflation_radius(5.0)。
+      # 船头前伸 2.8 m，故须 > 2.8，否则要等船头贴到障碍才开始减速；取 4.5 留约 1.7 m 余量。
+      cost_scaling_dist: 4.5
+      cost_scaling_gain: 1.0        # 减速强度：1.0 线性比例；调小更保守（同距离给速更少）
+      # 反算距离用的膨胀衰减系数，须与 local_costmap 膨胀层 cost_scaling_factor 一致（已对齐 1.0）
+      inflation_cost_scaling_factor: 1.0
+
+      # —— 接近目标时减速。距离须 ≥ 船头前伸量，否则到达前已全速冲过 ——
+      min_approach_linear_velocity: 0.0
+      approach_velocity_scaling_dist: 3.0   #剩余路径长度小于此值，开始线性降速，直到最小线速度min_approach_linear_velocity
+
+      # —— 转向控制 ——
+      use_rotate_to_heading: true              # 机器人航向与路径起点航向偏差过大（超过 rotate_to_heading_min_angle），或者在接近终点（在容差内）需要调整终态朝向时（rotate_to_heading_angular_vel调整速度），会停止线速度，进行原地旋转。对齐前瞻点方向
+      rotate_to_heading_angular_vel: 0.25   # 原地旋转目标角速度；2026-10-05 水测角速度上限 ~0.25 rad/s，
+                                            # 下游桥硬限幅 ±0.30，调大需同步改桥的 max_*_angular_z
+      rotate_to_heading_min_angle: 0.5  #1.57  90度     0.785    45度
+      # —— 碰撞检测（硬急停，与上面代价减速独立）——
+      # 沿当前 (vx, ω) 向前仿真一条弧，弧长 = min(v × 本参数, 前瞻距离 carrot_dist)，
+      # 弧上任何位姿 footprint 压到障碍 → 抛异常急停/恢复。RViz 看 /lookahead_collision_arc。
+      # 水面惯量大、制动慢，时间窗宜 ≥ 3s。本参数×当前速度 = 实际检查距离：
+      #   v=1.0(导航最高速)×5s = 5.0m，加船头 2.8m = 7.8m < 半窗 10m，仍有余量。
+      # ⚠ 不要照搬澄丰的 20s：弧长一旦超过 7.2m（= 半窗 − 船头）就会假报碰撞急停。
+      use_collision_detection: true
+      max_allowed_time_to_collision_up_to_carrot: 5.0
+      use_interpolation: true
+      transform_tolerance: 0.2
+      max_robot_pose_search_dist: 10.0
+      
+local_costmap:
+  local_costmap:
+    ros__parameters:
+      # —— 更新/发布频率 (Hz)。点云密时 CPU 偏高可适当降低 ——
+      update_frequency: 5.0
+      publish_frequency: 5.0
+      global_frame: odom
+      robot_base_frame: base_link
+      use_sim_time: false
+      rolling_window: true
+      # —— 窗口尺寸 (米)：宽 20 × 高 20，分辨率 0.1 m/格 ——
+      # 2026-10-07：20→24，lookahead max 硬上限从 7.2 提到 9.2m（半窗12−船头2.8）
+      width: 24
+      height: 24
+      resolution: 0.1
+      # —— 船体 footprint (米)：前向 2.7 / 后向 0.5 / 半宽 0.84（以 base_link 为原点）——
+      #    base_link = RTK/GI320 报告点（见 urdf/cleaning_boat_xingfei.xacro），船头在其前方 2.7 m
+      footprint: "[[2.7, 0.84], [2.7, -0.84], [-0.5, -0.84], [-0.5, 0.84]]"
+      # —— footprint 外扩安全边 (m)：现 0.1。膨胀层内切半径因此 ≈0.6 m（最近边是船尾，-0.5-0.1）——
+      footprint_padding: 0.1
+      # —— TF 外推容差 (s)：默认 0.3。定位 TF(odom→base_link) 低于 ~10Hz 时不要再调小，
+      #    否则代价地图更新会报 "Lookup would require extrapolation into the future" ——
+      transform_tolerance: 0.3
+      plugins: ["voxel_layer", "inflation_layer"]
+      # —— 膨胀层：在障碍物周围生成渐变代价。半径过大会让船绕行过远 ——
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        # —— 代价衰减系数：1.0 ≈ 线性衰减；>1 衰减更快,机器人越敢贴障碍
+        cost_scaling_factor: 1.0
+        # —— 未知格/未知区外圈是否膨胀：默认都 false。当前图无未知格 → 无影响；
+        #    换成带未知灰的新图时再看（与 global 的 track_unknown_space 配套）——
+        inflate_unknown: false
+        inflate_around_unknown: false
+        # —— 膨胀半径 (m)：从障碍格向外染色，RPP 代价减速能感知的最远距离 = 此值 ——
+        #    须 ≥ RPP cost_scaling_dist(4.5)。船头 2.8m，取 5.0 让船位在「船头距障 ~2.2m」时开始响应 ——
+        inflation_radius: 5.0
+      # —— Voxel 层：将 3D 点云投影为 2D 障碍标记 ——
+      voxel_layer:
+        plugin: "nav2_costmap_2d::VoxelLayer"
+        enabled: true
+        # —— 是否清空机器人 footprint 覆盖范围内的旧障碍标记（船体近距由本体遮挡/反光，清空更稳）——
+        footprint_clearing_enabled: true
+        # —— 发布体素网格 (RViz 可订阅 /local_costmap/voxel_grid 查看) ——调试时true,实船false
+        publish_voxel_map: true
+        # —— 体素 z 轴范围：origin_z=-0.42, z_res=0.1, z_voxels=12 → 覆盖 odom [-0.42, +0.78]。
+        #    底边(-0.42)在水面(≈-0.48)之上 0.06；顶边 +0.78 高于本层上限 0.6，不会提前截断。 ——
+        origin_z: -0.42      # odom z 区间：base_link≈0、水面≈-0.48、激光≈+0.28
+        z_resolution: 0.1   # z 轴分辨率 (米/层)
+        z_voxels: 12         # z 轴层数，硬上限 16（voxel_grid 用 16 bit 存一个 z 列，>16 会被截断并报错）
+        # —— 二次过滤上限 (m)：这是能实时调的「真正上限」，以 global_frame(odom) 的 z 原点为基准，
+        #    即 base_link 高度往上 0.6 m（激光在 +0.28，故比激光高 0.32 m）。
+        #    观测源上限(1.0)刻意留高，给在线调参留余量，本层才是卡点。
+        #    > 此值的点由本层直接跳过，不入体素格。 ——
+        max_obstacle_height: 0.6
+        # —— 标记阈值：一个体素列中至少 mark_threshold 个点被占据才标为障碍。0=首次点击即标记 (水面杂波多时可增大到 1~2) ——
+        mark_threshold: 2
+        # —— 体素列被判为 unknown 的点数阈值（源码默认 15，一般无需调整）——
+        unknown_threshold: 15
+        # —— 多层/多源叠加：1=max 取最大代价(推荐)；0=overwrite 直接覆盖 ——
+        combination_method: 1
+        observation_sources: livox_cloud
+        livox_cloud:
+          topic: /livox/lidar
+          data_type: "PointCloud2"
+          # —— 观测点保留时间：0=立即过期（动态环境建议 0，配合 clearing）——
+          observation_persistence: 0.0
+          # —— clearing: true → 射线穿过区域清除旧障碍 (动态环境需要) ——
+          clearing: true
+          marking: true
+          # —— 障碍距离与高度过滤（距离以点云坐标系原点 = 激光雷达光心为球心算 3D 斜距，含 z）——
+          #    雷达挂在船头（base_link 前 2.05m），半径 1.4m 的球覆盖船头本体 → 自反射不入图
+          obstacle_min_range: 1.4
+          # —— 最大检测距离 (m)：20×20 滚动窗口最多需要半对角 ≈14.1，取 15 即可覆盖；
+          #    更大的值只是让窗口外的点白算一遍（worldToMap 失败后丢弃），徒增 CPU ——
+          obstacle_max_range: 15.0
+          raytrace_min_range: 0.5
+          # —— 射线清除最大距离 (m)：比 obstacle_max_range 略大，保证能清到窗口边缘 ——
+          raytrace_max_range: 16.0
+          # —— 障碍高度筛选 (ObservationBuffer 裁剪，相对 odom z = 初始 base_link 位置) ——
+          #    min=-0.35：水面在 odom≈-0.48，取 -0.35 把水面及其反光挡在门外（余量 0.13m，下水复核 ghost）。
+          #    max=1.0：观测源刻意放宽，真正的上限交给 voxel_layer.max_obstacle_height(0.6，可在线调)。
+          min_obstacle_height: -0.35
+          max_obstacle_height: 1.0
+      always_send_full_costmap: true #稳定后改false
+      
+global_costmap:
+  global_costmap:
+    ros__parameters:
+      update_frequency: 1.0
+      publish_frequency: 1.0
+      global_frame: map
+      robot_base_frame: base_link
+      use_sim_time: false
+      rolling_window: false
+      # —— 船体 footprint：前向 2.7 / 后向 0.5 / 半宽 0.84（以 base_link 为原点），同 local ——
+      footprint: "[[2.7, 0.84], [2.7, -0.84], [-0.5, -0.84], [-0.5, 0.84]]"
+      # —— footprint 外扩安全边 (m)：0.1，同 local ——
+      footprint_padding: 0.1
+      # —— TF 外推容差 (s)：默认 0.3（keepout_filter 里那个 0.1 是过滤器自己的，别混）——
+      transform_tolerance: 0.3
+      # —— 全局代价地图分辨率 (m/格)。注意：static_layer 收到地图后会把整张代价地图 resize 成
+      #    "地图的"分辨率（现 0.2），此处只在地图到达前生效 ——
+      resolution: 0.2
+      # 未知格：true=保持未知（能否穿越看规划器 allow_unknown）；false=当 free（可通行）
+      track_unknown_space: True
+      # —— global 挂 voxel_layer 用于远距离障碍预判（obstacle_max_range 15m）。
+      #    注意：非滚动窗口下，动态物（行人/车辆）离开后其标记可能残留（clearing 需要射线穿过旧体素，
+      #    动态物走后无新射线穿过原位置则永久残留）。水上动态物少时影响不大；
+      #    若岸测/码头出现大量 ghost，可临时删掉 voxel_layer 或设 enabled: false ——
+      # —— keepout_filter 必须排在 inflation_layer 之前，膨胀才会覆盖禁行区边缘 ——
+      plugins: ["static_layer", "keepout_filter", "voxel_layer", "inflation_layer"]
+      # —— 禁行过滤层（作业区/禁止区/硬边界）——
+      #    掩码由 zone_manager 节点动态发布（经纬度区域 → 栅格化），
+      #    TRANSIENT_LOCAL，区域更新即时生效；未下发区域时掩码全自由，行为与原来一致
+      keepout_filter:
+        plugin: "nav2_costmap_2d::KeepoutFilter"
+        filter_info_topic: "/keepout_filter/costmap_filter_info"
+        transform_tolerance: 0.1
+      # —— Voxel 层（全局远距离） ——
+      #    默认关闭(enabled: false)，仅作远距离障碍预判备胎。全局走 static_layer + keepout_filter 即可；
+      #    若开启会引入动态物残留/水面 ghost(非滚动窗口下 clearing 需射线穿旧体素，水上难清除)。
+      #    下面各值已与 local_costmap 对齐（z 网格 / 高度带 / 盲区），启用后行为与 local 一致。
+      voxel_layer:
+        plugin: "nav2_costmap_2d::VoxelLayer"
+        enabled: false
+        publish_voxel_map: false
+        footprint_clearing_enabled: true
+        origin_z: -0.42    # 与 local 一致（odom z 底面）
+        z_resolution: 0.1
+        z_voxels: 12       # 与 local 一致，覆盖 odom [-0.42, +0.78]
+        # —— 高度上限 (m)：与 local_costmap 一致，滤高于 0.6 m 的点 ——
+        max_obstacle_height: 0.6
+        mark_threshold: 2
+        unknown_threshold: 15
+        combination_method: 1
+        observation_sources: livox_cloud
+        livox_cloud:
+          topic: /livox/lidar
+          data_type: "PointCloud2"
+          clearing: true
+          marking: true
+          obstacle_min_range: 1.4    # 同 local（以雷达光心为球心）
+          # —— 全局远距离检测 (m)：global 非滚动窗口，取 15 作远距预判 ——
+          obstacle_max_range: 15.0
+          raytrace_min_range: 0.5
+          raytrace_max_range: 16.0
+          # —— 高度筛选 (相对 odom z)：min=-0.35 滤水面反射，max=1.0，均与 local 一致 ——
+          min_obstacle_height: -0.35
+          max_obstacle_height: 1.0
+          observation_persistence: 0.0
+      # —— 静态地图层 ——
+      static_layer:
+        plugin: "nav2_costmap_2d::StaticLayer"
+        # —— 完整地图用 TRANSIENT_LOCAL 订阅：map_server 晚于 costmap 启动也能拿到图 ——
+        map_subscribe_transient_local: True
+        # —— 是否订阅增量更新 <map_topic>_updates（map_msgs/OccupancyGridUpdate），默认 false ——
+        #    只有"运行中地图会变"才需要：slam_toolbox 在线建图、地图编辑器持续发增量。
+        #    我们是静态海图（map_server 发一次），lightning SLAM 也不发 /map、/map_updates，
+        #    所以保持 false；改 true 前先确认真的有人发 /map_updates，否则只是多个空订阅。
+        #    收到 update 时只改写 StaticLayer 内部栅格，下一轮(global update_frequency=1Hz)合并进
+        #    代价地图；不改 /map 消息、不改磁盘 pgm/yaml。矩形须落在当前地图内且 frame=map。
+        subscribe_to_updates: false
+      # —— 膨胀层 ——
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        cost_scaling_factor: 1.0
+        # —— 未知格/未知区外圈是否膨胀：默认都是 false。当前图无未知格 → 无影响；
+        #    换成带未知灰的新图时再看（与上面 track_unknown_space 配套）——
+        inflate_unknown: false
+        inflate_around_unknown: false
+        # —— 全局膨胀半径 (m)：规划器按 base_link 点搜索，此值≈船离静态障碍多远 ——
+        #    ⚠ 硬禁区只到内切半径(≈0.6m)，填 2.0 这类小值等于让规划贴着障碍走、船头(2.8m)插进去。
+        #    外接半径(含 padding)≈2.93，取 3.5 ≈ 船身 + 0.6m 余量；再大窄道会被夹住甚至无解 ——
+        inflation_radius: 3.5
+      # —— true：每轮都发完整全局代价地图（RViz/上位机看得全，代价是带宽/CPU）——
+      always_send_full_costmap: True
+      
+map_server:
+  ros__parameters:
+    use_sim_time: false
+    yaml_filename: ""
+
+map_saver:
+  ros__parameters:
+    use_sim_time: false
+    save_map_timeout: 5.0
+    free_thresh_default: 0.25
+    occupied_thresh_default: 0.65
+    map_subscribe_transient_local: true
+
+planner_server:
+  ros__parameters:
+    expected_planner_frequency: 2.0
+    use_sim_time: false
+    planner_plugins: ["GridBased"]
+    GridBased:
+      plugin: "nav2_smac_planner/SmacPlanner2D"
+      # —— 路径终点容差 (m)。粗分辨率地图可适当加大 ——
+      # 路径曲折会加剧 RPP 曲率检测；换图后若 S 线/画圈，同步查 global resolution 与 RPP min_radius
+      tolerance: 0.5
+      # —— 代价穿越乘数：>1 时规划器更倾向绕开代价区而非穿越。水面避障建议 2.0~3.0 ——
+      cost_travel_multiplier: 3.0
+      downsample_costmap: false
+      downsampling_factor: 1
+      # —— 允许穿越未知区域 (true=允许，false=只有已知空闲可走) ——
+      allow_unknown: false
+      max_iterations: 1000000
+      max_on_approach_iterations: 1000
+      # —— 最大规划时间 (s)，超时则返回失败 ——
+      max_planning_time: 3.0
+      # —— 终点朝向策略(仅 SmacPlanner2D)：
+      #    true  = 末端沿最后一段路径方向(切向)靠近，避免临近终点原地扭头；
+      #    false = 终点姿态强制为 goal 朝向(适合要求精确纵/横对准的静态靠泊)。
+      #    归港对准建议 true；若要终点必须等于 goal 朝向则改 false。 ——
+      use_final_approach_orientation: true
+      smoother:
+        max_iterations: 1000
+        # —— 平滑权重：w_smooth 越大路径越平滑但可能偏离原始路径；w_data 保持接近原始 ——
+        w_smooth: 0.4
+        w_data: 0.2
+        tolerance: 1.0e-10
+        do_refinement: true
+        
+        
+# —— smoother_server —————————————————————————————————————————————————————————
+# Nav2 平滑服务（SmoothPath action）。当前未启用：
+#   - 不写 smoother_plugins → 用默认 simple_smoother（默认参数）；
+#   - 默认导航 BT 不含 SmoothPath 节点，实际导航不会调用，等效关闭。
+# 启用时取消下方注释；Humble 的 launch_ros 不支持空数组参数（smoother_plugins: [] 会报错）。
+# 注意与 planner_server 的 GridBased.smoother 区分：那是 SmacPlanner 规划时的内部平滑。
+# ————————————————————————————————————————————————————————————————————————————
+smoother_server:
+  ros__parameters:
+    use_sim_time: false
+    # 启用时取消注释：
+    # smoother_plugins: ["simple_smoother"]
+    # simple_smoother:
+    #   plugin: "nav2_smoother::SimpleSmoother"
+    #   tolerance: 1.0e-10
+    #   max_its: 1000
+    #   do_refinement: true
+
+behavior_server:
+  ros__parameters:
+    costmap_topic: local_costmap/costmap_raw
+    footprint_topic: local_costmap/published_footprint
+    cycle_frequency: 1.0
+    behavior_plugins: ["spin", "backup", "drive_on_heading", "assisted_teleop", "wait"]
+    spin:
+      plugin: "nav2_behaviors/Spin"
+    backup:
+      plugin: "nav2_behaviors/BackUp"
+    drive_on_heading:
+      plugin: "nav2_behaviors/DriveOnHeading"
+    wait:
+      plugin: "nav2_behaviors/Wait"
+    assisted_teleop:
+      plugin: "nav2_behaviors/AssistedTeleop"
+    # —— 必须与 costmap_topic 的坐标系一致：local_costmap 工作在 odom ——
+    #    设成 map 会导致恢复行为每次都在 1 s 内 "Pose Goes Off Grid." 中止。
+    #    见 docs/bug_debug/2026-09-17_航点卡顿与恢复行为失效.md
+    global_frame: odom
+    robot_base_frame: base_link
+    transform_tolerance: 0.1
+    use_sim_time: false
+
+    # —— Spin 恢复行为参数（本 fork 无插件名前缀，直接挂 behavior_server 顶层）——
+    simulate_ahead_time: 3.0
+    # —— 旋转恢复速度限制 (rad/s)；2026-10-05 水测角速度上限 ~0.25，加速度与桥 0.5 对齐 ——
+    max_rotational_vel: 0.25
+    min_rotational_vel: 0.2
+    rotational_acc_lim: 0.5
+
+waypoint_follower:
+  ros__parameters:
+    use_sim_time: false
+    loop_rate: 20
+    stop_on_failure: false  
+    waypoint_task_executor_plugin: "wait_at_waypoint"
+    wait_at_waypoint:
+      plugin: "nav2_waypoint_follower::WaitAtWaypoint"
+      enabled: true
+      waypoint_pause_duration: 50
+
+
+# —— velocity_smoother ——————————————————————————————————————————————————————
+# Nav2 bringup（navigation_launch.py）话题 remap：
+#   controller_server  → /cmd_vel_nav
+#   velocity_smoother  订阅 /cmd_vel_nav，发布 /cmd_vel
+#
+# 实船速度桥 ardupilot_velocity_bridge 订阅 /cmd_vel_nav（绕过本 smoother）。
+# 改 RPP 的 desired_linear_vel 时，须同步 ardupilot_velocity_bridge 的 max_linear_x / max_angular_z。
+# 若把桥输入改为 /cmd_vel，则以下限幅才会作用到飞控。
+# ————————————————————————————————————————————————————————————————————————————
+velocity_smoother:
+  ros__parameters:
+    use_sim_time: false
+    # —— 平滑频率 (Hz)，≥ controller_frequency ——
+    smoothing_frequency: 20.0
+    scale_velocities: true
+    # 反馈模式：OPEN_LOOP 按目标速度直接平滑（不依赖 odom 闭环反馈，实船保持此模式）
+    feedback: "OPEN_LOOP"
+
+    # —— [vx, vy, wz] 速度/加速度限幅，水面惯量大取小值抑制 cmd_vel 抖动 ——
+    #    2026-10-05 水测对齐：vx 最大 ~1.0，wz 上限 ~0.25；
+    #    实船速度桥订阅 /cmd_vel_nav 直连，本 smoother 只在仿真/走 /cmd_vel 时生效 ——
+    max_velocity: [1.0, 0.0, 0.25]
+    min_velocity: [0.0, 0.0, -0.25]
+    # —— 加速度上限 ([ax, ay, awz])。与桥生产配置 0.3/0.3/0.5 对齐 ——
+    max_accel: [0.3, 0.0, 0.5]
+    max_decel: [-0.3, 0.0, -0.5]   # 减速度 (<0)
+
+    odom_topic: "/mavros/gps_input/local"
+    odom_duration: 0.1
+    # —— 速度死区：低于此值输出 0 ——
+    deadband_velocity: [0.02, 0.0, 0.02]
+    velocity_timeout: 1.0

@@ -11,7 +11,7 @@ from std_msgs.msg import Bool, String
 from std_srvs.srv import Trigger
 
 from dock_mission.dock_mission_node import DockMissionNode
-from dock_mission.types import MissionState, SpeedAuthority
+from dock_mission.types import MissionState
 
 
 @pytest.fixture
@@ -25,7 +25,6 @@ def dock_node(ros_context, sample_dock_database, sample_map_yaml):
 
         mock_mission = MagicMock()
         mock_mission.wait_ready.return_value = True
-        mock_mission.send_staging.return_value = (True, "ok")
         mock_mission_cls.return_value = mock_mission
 
         node = DockMissionNode()
@@ -37,27 +36,9 @@ def dock_node(ros_context, sample_dock_database, sample_map_yaml):
         node.set_parameters([Parameter("settle_sec", value=0.4)])
         node._goal_switch = mock_switch
         node._mission = mock_mission
-        node._validate_cli = MagicMock()
-        node._validate_cli.service_is_ready.return_value = True
-        node._validate_cli.call_async.return_value = _ImmediateFuture(success=True)
 
         yield node, mock_switch, mock_mission
         node.destroy_node()
-
-
-class _ImmediateFuture:
-    def __init__(self, success: bool):
-        self._success = success
-        self._done = True
-
-    def done(self):
-        return self._done
-
-    def result(self):
-        resp = Trigger.Response()
-        resp.success = self._success
-        resp.message = "ok" if self._success else "fail"
-        return resp
 
 
 def test_begin_dock_mission_from_idle(dock_node):
@@ -131,27 +112,18 @@ def test_task_event_failed_retries_staging(dock_node):
     mock_switch.apply_cruise.assert_called()
 
 
-def test_settle_advances_to_entry_validate(dock_node):
+def test_settle_advances_to_handoff(dock_node):
     node, _, _ = dock_node
     node._state = MissionState.SETTLE
     node._settle_elapsed = 0.0
-
-    for _ in range(2):
-        node._tick()
-
-    assert node._state == MissionState.ENTRY_VALIDATE
-
-
-def test_entry_validate_success_handoff(dock_node):
-    node, _, _ = dock_node
-    node._state = MissionState.ENTRY_VALIDATE
     published = []
     node._dock_start_pub.publish = lambda m: published.append(m.data)
 
-    node._entry_validate_result = True
     node._tick()
     node._tick()
+    assert node._state == MissionState.DOCK_HANDOFF
 
+    node._tick()
     assert node._state == MissionState.MONITOR_DOCK
     assert published == [True]
 
@@ -168,6 +140,71 @@ def test_cancel_transitions_to_idle(dock_node):
     assert node._state == MissionState.IDLE
     assert node._dock_active is False
     mock_switch.apply_cruise.assert_called()
+
+
+def test_cancel_during_nav_cancels_bridge_goal(dock_node):
+    """NAV_TO_STAGING 阶段取消：必须让 mission_bridge 撤销 Nav2 goal。"""
+    node, _, mock_mission = dock_node
+    node._state = MissionState.NAV_TO_STAGING
+    node._pending_nav = True
+
+    resp = node._cancel_srv(Trigger.Request(), Trigger.Response())
+
+    assert resp.success is True
+    mock_mission.cancel_async.assert_called_once()
+
+
+def test_staging_retry_does_not_cancel_bridge_goal(dock_node):
+    """预泊重试（end_session=False）不发取消：新 goal 由 bridge 抢占替换旧 goal。"""
+    node, _, mock_mission = dock_node
+    node._state = MissionState.NAV_TO_STAGING
+    node._pending_nav = True
+
+    msg = String()
+    msg.data = json.dumps(
+        {
+            "event": "TASK_FAILED",
+            "detail": {"mission_id": "dock_staging", "reason": "planner failed"},
+        }
+    )
+    node._task_event_cb(msg)
+
+    assert node._state == MissionState.NAV_TO_STAGING
+    assert node._staging_retry == 1
+    mock_mission.cancel_async.assert_not_called()
+
+
+def test_staging_retry_exhausted_cancels_bridge_goal(dock_node):
+    """重试耗尽判失败：会话结束，必须撤销 Nav2 goal。"""
+    node, _, mock_mission = dock_node
+    node.set_parameters([Parameter("staging_retry_max", value=1)])
+    node._state = MissionState.NAV_TO_STAGING
+    node._pending_nav = True
+
+    msg = String()
+    msg.data = json.dumps(
+        {
+            "event": "TASK_FAILED",
+            "detail": {"mission_id": "dock_staging", "reason": "planner failed"},
+        }
+    )
+    node._task_event_cb(msg)
+
+    assert node._state == MissionState.FAILED
+    mock_mission.cancel_async.assert_called_once()
+
+
+def test_dock_monitor_failure_does_not_cancel_bridge_goal(dock_node):
+    """对接/出泊阶段失败没有 Nav2 goal：不发取消。"""
+    node, _, mock_mission = dock_node
+    node._state = MissionState.MONITOR_UNDOCK
+
+    msg = String()
+    msg.data = json.dumps({"state": "DOCK_ABORT", "abort_reason": "align lost"})
+    node._dock_status_cb(msg)
+
+    assert node._state == MissionState.FAILED
+    mock_mission.cancel_async.assert_not_called()
 
 
 def test_dock_status_success(dock_node):
