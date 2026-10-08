@@ -75,13 +75,14 @@ def test_seed_spread_gate_slides_window(est):
 
 
 def test_reject_cluster_unlock_adsorbs_ema(est):
-    """连续被拒且彼此一致的观测（锚点本身偏了）：解锁吸附到簇 EMA。"""
+    """连续被拒且彼此一致的观测（锚点本身偏了）：解锁吸附到簇 EMA。
+    2026-10-08：解锁帧数 5→12（远场噪声簇本就连续，5 帧等于稍持续就放行）。"""
     _seed_default_anchor(est)
-    for _ in range(4):
+    for _ in range(11):
         est._update_anchor((0.7, 0.05, 0.0))  # dp≈0.70 > 0.60
         assert est._reject_count >= 1
         assert est._anchor[0] == pytest.approx(0.0)  # 未解锁前不动
-    est._update_anchor((0.7, 0.05, 0.0))  # 第 5 帧 -> 解锁
+    est._update_anchor((0.7, 0.05, 0.0))  # 第 12 帧 -> 解锁
     assert est._anchor[0] == pytest.approx(0.7, abs=1e-6)
     assert est._anchor[1] == pytest.approx(0.05, abs=1e-6)
     assert est._reject_count == 0
@@ -94,12 +95,12 @@ def test_reloc_yaw_guard_rejects_grazing_cluster(est):
     （掠射角观测伪影：远距观测 yaw 系统性偏 20~33°，浮动坞真实朝向
     变化缓慢，瞬间大 yaw 跳变必是伪影），位置再偏也不重定位。"""
     _seed_default_anchor(est)  # 锚点 (0, 0, 0)
-    for _ in range(10):  # 位置/艏向双超差的成簇观测
+    for _ in range(24):  # 位置/艏向双超差的成簇观测（解锁帧数 12）
         est._update_anchor((0.7, 0.05, math.radians(25.0)))
     assert est._anchor[0] == pytest.approx(0.0, abs=1e-9)
     assert est._anchor[1] == pytest.approx(0.0, abs=1e-9)
     assert est._anchor[2] == pytest.approx(0.0, abs=1e-9)
-    # 守卫触发即清零计数（第 5/10 帧各触发一次，之后重新累计）
+    # 守卫触发即清零计数（第 12/24 帧各触发一次，之后重新累计）
     assert est._reject_count == 0
     assert est._reject_ema is None
     # 但簇首次出现时刻保留（持续窗口还在累积，供逃逸判定）
@@ -108,16 +109,17 @@ def test_reloc_yaw_guard_rejects_grazing_cluster(est):
 
 def test_reloc_yaw_guard_escape_releases_persistent_cluster(est):
     """守卫持续窗口逃逸（2026-10-07 评审）：伪影是一过性的，拒绝簇持续超
-    reloc_guard_escape_sec(3s) 判定真实移位（换泊位/重启），守卫放行重定位，
-    防锚点永久锁死在旧处（reset_anchor_on_start=false 时无人救）。"""
+    reloc_guard_escape_sec(8s) 判定真实移位（换泊位/重启），守卫放行重定位，
+    防锚点永久锁死在旧处（reset_anchor_on_start=false 时无人救）。
+    2026-10-08：逃逸窗口 3s→8s（缓转向伪影簇常持续 3s+ 被误放行）。"""
     from rclpy.duration import Duration
 
     _seed_default_anchor(est)
     est._update_anchor((0.7, 0.05, math.radians(25.0)))  # 簇首帧
     assert est._reject_cluster_start is not None
-    # 回拨簇首次出现时刻，模拟簇已持续 3.5s（> 3s 逃逸窗口）
-    est._reject_cluster_start = est.get_clock().now() - Duration(seconds=3.5)
-    for _ in range(4):  # 集满 5 帧触发解锁判定 -> 逃逸放行
+    # 回拨簇首次出现时刻，模拟簇已持续 8.5s（> 8s 逃逸窗口）
+    est._reject_cluster_start = est.get_clock().now() - Duration(seconds=8.5)
+    for _ in range(11):  # 集满 12 帧触发解锁判定 -> 逃逸放行
         est._update_anchor((0.7, 0.05, math.radians(25.0)))
     assert est._anchor[0] == pytest.approx(0.7, abs=1e-6)
     assert est._anchor[1] == pytest.approx(0.05, abs=1e-6)
@@ -130,7 +132,7 @@ def test_reloc_yaw_guard_escape_releases_persistent_cluster(est):
 def test_reloc_yaw_guard_allows_small_yaw_cluster(est):
     """簇 yaw 偏差在守卫门限内（5° < 10°）：正常重定位到簇 EMA（真实移位）。"""
     _seed_default_anchor(est)
-    for _ in range(5):
+    for _ in range(12):
         est._update_anchor((0.7, 0.05, math.radians(5.0)))  # dp>0.6，dyaw=5°
     assert est._anchor[0] == pytest.approx(0.7, abs=1e-6)
     assert est._anchor[1] == pytest.approx(0.05, abs=1e-6)
@@ -140,11 +142,12 @@ def test_reloc_yaw_guard_allows_small_yaw_cluster(est):
 
 
 def test_reloc_blocked_by_distance(est):
-    """可信度门-距离（2026-10-07 现场）：远场（dist > reloc_max_dist_m=6m）
-    的坞位姿不可信，拒绝改写锚点（实测远场重定位 dp 0.77~1.21m）。"""
+    """可信度门-距离（2026-10-07 现场）：远场（dist > reloc_max_dist_m=4m，
+    2026-10-08 由 6m 收紧）的坞位姿不可信，拒绝改写锚点
+    （实测远场重定位 dp 0.77~1.21m）。"""
     _seed_default_anchor(est)
-    for _ in range(5):
-        est._update_anchor((0.7, 0.05, math.radians(5.0)), dist=8.0)
+    for _ in range(12):
+        est._update_anchor((0.7, 0.05, math.radians(5.0)), dist=5.0)
     assert est._anchor[0] == pytest.approx(0.0, abs=1e-6), "远场不得重定位"
     assert est._reject_count == 0
     assert est._reject_ema is None
@@ -154,7 +157,7 @@ def test_reloc_blocked_when_single_tag(est, monkeypatch):
     """可信度门-双码：明确只看到一个码时拒绝重定位（单双码系统差可达 ~1m）。"""
     _seed_default_anchor(est)
     monkeypatch.setattr(est, "_visible_tag_count", lambda now: 1)
-    for _ in range(5):
+    for _ in range(12):
         est._update_anchor((0.7, 0.05, math.radians(5.0)), dist=3.0)
     assert est._anchor[0] == pytest.approx(0.0, abs=1e-6), "单码不得重定位"
 
@@ -163,7 +166,7 @@ def test_reloc_allowed_when_dual_tag_near(est, monkeypatch):
     """双码可见 + 近距离 ⇒ 允许重定位（真实移位场景不受影响）。"""
     _seed_default_anchor(est)
     monkeypatch.setattr(est, "_visible_tag_count", lambda now: 2)
-    for _ in range(5):
+    for _ in range(12):
         est._update_anchor((0.7, 0.05, math.radians(5.0)), dist=3.0)
     assert est._anchor[0] == pytest.approx(0.7, abs=1e-6)
 
@@ -178,11 +181,11 @@ def test_accepted_frame_resets_reject_cluster(est):
     assert est._reject_count == 0
     assert est._reject_ema is None
     assert est._anchor[0] == pytest.approx(0.025, abs=1e-6)
-    # 再来 4 帧跳变：不解锁（计数重新开始）
-    for _ in range(4):
+    # 再来 11 帧跳变：不解锁（计数重新开始，解锁帧数 12）
+    for _ in range(11):
         est._update_anchor((0.7, 0.0, 0.0))
     assert est._anchor[0] < 0.1
-    est._update_anchor((0.7, 0.0, 0.0))  # 第 5 帧解锁
+    est._update_anchor((0.7, 0.0, 0.0))  # 第 12 帧解锁
     assert est._anchor[0] == pytest.approx(0.7, abs=1e-6)
 
 

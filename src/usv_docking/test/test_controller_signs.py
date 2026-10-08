@@ -99,20 +99,27 @@ def test_approach_forward_crab_capped(ctrl):
 
 
 def test_approach_speed_tapers_near_axis(ctrl):
-    """锥形降速 + 先上轴 + 近坞口限速（2026-10-06 外八坞两轮现场迭代）：
+    """锥形降速 + 锥外上轴 + 近坞口限速（2026-10-06 外八坞两轮现场迭代；
+    2026-10-08 锥形漏斗：锥内不拉出直接倒，锥外才进上轴模式）：
 
-    - 大横偏（|e_y|>0.8）：进入上轴模式，前进弧线向外拉出收横偏（v>0）；
-    - 上轴模式回到 |e_y|<0.55 退出，恢复倒入；
+    x=-6 处锥半宽 = 0.25+tan(12°)·5 ≈ 1.31m（滞回沿 ×1.15 ≈ 1.51m）：
+
+    - 锥外大横偏（|e_y|=2.0 出锥）：进入上轴模式，前进弧线向外拉出（v>0）；
+    - 上轴模式回到锥内（|e_y|=1.0）退出，恢复倒入；
+    - 锥内大横偏（|e_y|=1.5 在锥内）：不拉出，直接倒退（v<0）；
     - 中小横偏远场（<0.8）：锥形正常给速。
     """
     import math as m
-    # 大横偏：前进拉出（上轴模式），v>0 且带转向
-    v_far, w_far = ctrl._compute_approach(-6.0, 1.5, 0.0, m.pi)
+    # 锥外大横偏：前进拉出（上轴模式），v>0 且带转向
+    v_far, w_far = ctrl._compute_approach(-6.0, 2.0, 0.0, m.pi)
     assert v_far > 0.0 and abs(w_far) > 0.05
-    # 上轴模式滞回：回到 |e_y|<0.55 退出，恢复倒入（v<0）
-    ctrl._compute_approach(-6.0, 1.5, 0.0, m.pi)   # 进上轴
-    v_back, _ = ctrl._compute_approach(-6.0, 0.3, 0.0, m.pi)
+    # 上轴模式滞回：回到锥内退出，恢复倒入（v<0）
+    ctrl._compute_approach(-6.0, 2.0, 0.0, m.pi)   # 进上轴
+    v_back, _ = ctrl._compute_approach(-6.0, 1.0, 0.0, m.pi)
     assert v_back < 0.0
+    # 锥内大横偏（2026-10-08 新语义）：不拉出，直接倒退
+    v_cone, _ = ctrl._compute_approach(-6.0, 1.5, 0.0, m.pi)
+    assert v_cone < 0.0
     # 中小横偏远场：锥形正常给速（非全速，0.15 地板之上）
     v_mid, _ = ctrl._compute_approach(-6.0, 0.7, 0.0, m.pi)
     assert v_mid < -0.15
@@ -120,6 +127,18 @@ def test_approach_speed_tapers_near_axis(ctrl):
     v_in_near, _ = ctrl._compute_approach(-1.5, 0.45, 0.0, m.pi)  # dist≈0.64m
     v_in_far, _ = ctrl._compute_approach(-1.1, 0.45, 0.0, m.pi)   # dist≈0.98m
     assert v_in_near < v_in_far
+
+
+def test_approach_cone_disabled_restores_legacy(ctrl):
+    """approach_cone_enabled=false 完全回到 10-08 前行为：
+    |e_y|>0.8 即进上轴模式（不看锥），拉出前进。"""
+    import math as m
+    from rclpy.parameter import Parameter
+    ctrl.set_parameters(
+        [Parameter("approach_cone_enabled", Parameter.Type.BOOL, False)]
+    )
+    v, _ = ctrl._compute_approach(-6.0, 1.5, 0.0, m.pi)
+    assert v > 0.0, "锥禁用后 |e_y|=1.5>0.8 应进上轴模式拉出（旧行为）"
 
 
 def test_approach_decelerates_before_half_boat_length(ctrl):

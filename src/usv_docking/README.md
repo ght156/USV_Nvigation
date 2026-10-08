@@ -146,6 +146,20 @@ python3 -m pytest src/usv_docking/test/ -q
   `install/arm/usv_docking/lib/python3.10/site-packages/usv_docking/`（**不是** `lib/usv_docking/`，
   后者只有可执行入口脚本）；拷错位置时 `ros2 param get` 会显示新参数 "not set"。
 
+- 2026-10-08（实船兴飞）：**逼近段"拉出纠偏↔倒退"拉锯**——远场（~9.5m）锚点被噪声簇拖着跳
+  （91s 重定位 25 次）→ e_y ±1m 跳变反复触发 axis_mode（|e_y|>0.8 即拉出上轴）→ 船在向前拉出
+  与倒退间拉锯，逼近段磨到 91s（正常 ~31s），另一次 150s GLOBAL_TIMEOUT。修复两层：
+  ①**锥形漏斗**（控制器 `_compute_approach`，新参数 `approach_cone_enabled`/`cone_apex_x`(-1.0)/
+  `cone_apex_half_width`(0.25)/`cone_half_angle_deg`(12°)）：|e_y| ≤ cone_w(x) 在锥内不拉出，
+  直接倒向预备点边倒边收敛（远处锥宽 ~1.9m 容忍横偏）；锥外保留 10-06 防斜插拉出保护；
+  锥边界带 15% 滞回；`approach_cone_enabled=false` 逐字节回旧行为。ALIGN/BACK_IN 入口对准
+  环节与门槛全部不动；
+  ②**估计器远场降噪**（纯参数）：`reloc_max_dist_m` 6.0→**4.0**（4~6m 中场噪声仍 ±0.5m）、
+  `jump_reject_unlock_frames` 5→**12**（8.5Hz 下 0.6s→1.4s，噪声簇不再秒解锁）、
+  `reloc_guard_escape_sec` 3.0→**8.0**（缓转向伪影簇常持续 3s+ 被误放行，当日 8 次）。
+  单测 109/109（含新增 `test_approach_cone_disabled_restores_legacy` 旧行为对照）。
+
+
 ---
 
 ## 约束

@@ -154,16 +154,20 @@ class DockingPoseEstimator(Node):
         # 守卫持续窗口逃逸（2026-10-07 评审）：伪影是船转过该方位的一过性现象，
         # 真实移位（换泊位/重启，reset_anchor_on_start=false 时无人救）会产生
         # 持续簇——拒绝簇持续存在超此秒数则判定真实移位，守卫放行重定位
-        self.declare_parameter("reloc_guard_escape_sec", 3.0)
+        # 2026-10-08：3.0→8.0，缓转向时伪影簇常持续 3s+ 被误放行（当日 8 次）
+        self.declare_parameter("reloc_guard_escape_sec", 8.0)
         # 重定位可信度门（2026-10-07 现场）：远场/单码观测的坞位姿不可信——
         # 实测远场重定位 dp 0.77~1.21m 而 dyaw < 10°（守卫只判 yaw，全放过），
         # 锚点被搬走 1m ⇒ 整个 dock 系错 ⇒ 报出 5~7m 假横偏把船带走。
         # ① 距离门：船-坞距离超此值不重定位（相机 9~10m 极限内也留余量）
-        self.declare_parameter("reloc_max_dist_m", 6.0)
+        # 2026-10-08：6.0→4.0，4~6m 中场噪声仍 ±0.5m（当日 91s 重定位 25 次）
+        self.declare_parameter("reloc_max_dist_m", 4.0)
         # ② 双码门：只在"明确只看到一个码"时拦（看不到码时观测本身也无效，
         # 不据此拦，避免影响离线单测与无 apriltag 节点的场景）
         self.declare_parameter("reloc_require_dual_tag", True)
-        self.declare_parameter("jump_reject_unlock_frames", 5)
+        # 2026-10-08：5→12（8.5Hz 下 0.6s→1.4s），远场噪声簇本就连续，
+        # 5 帧等于噪声稍持续就放行；真移位簇无限持续，12 帧照样解锁
+        self.declare_parameter("jump_reject_unlock_frames", 12)
         # 首锚共识：单码远距离噪声/单双码系统差可达 0.7m，首帧即锚会把偏差
         # 固化并被跳变拒绝自我强化（2026-07-29 实测 dp=0.62~0.72m 持续拒绝）
         self.declare_parameter("seed_frames", 8)

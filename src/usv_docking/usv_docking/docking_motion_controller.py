@@ -130,6 +130,14 @@ class DockingMotionController(Node):
         # 二维码检测极限，河道也没这个空间，且丢 Tag 后转成盲驾）。按船上传感器
         # 位置与河道空间，取 -8.0（可放宽到 -9.0，须 < 相机检测极限）
         self.declare_parameter("approach_axis_max_out_x", -8.0)
+        # 锥形漏斗（2026-10-08）：锥内 |e_y| ≤ cone_w(x) 不触发上轴拉出，直接
+        # 边倒边收敛到预备点（远处开阔水域横偏再大也能直退）；锥外维持原
+        # axis_mode 拉出保护（10-06 防斜插撞喇叭口）。诱因：远场锚点噪声致
+        # e_y ±1m 跳变反复触发 axis_mode，船在拉出纠偏与倒退间拉锯（10-08 现场）
+        self.declare_parameter("approach_cone_enabled", True)  # false=完全回到旧行为
+        self.declare_parameter("cone_apex_x", -1.0)            # 锥顶点（廊道口，dock 系）
+        self.declare_parameter("cone_apex_half_width", 0.25)   # 顶点处半宽（< gate2_y 留余量）
+        self.declare_parameter("cone_half_angle_deg", 12.0)    # 半顶角
         self.declare_parameter("approach_offaxis_speed", 0.15)
         # 大横偏限速只在坞口近处生效（x 大于此值，坞系）
         self.declare_parameter("approach_offaxis_x", -4.5)
@@ -300,6 +308,19 @@ class DockingMotionController(Node):
     def _pose_valid(self) -> bool:
         return self._pose_source != SRC_INVALID and self._pose_x is not None
 
+    def _cone_half_width(self, x) -> float:
+        """锥形漏斗半宽（dock 系）：cone_w(x) = apex_half_width
+        + tan(half_angle)·(apex_x − x)，x 越靠外（越负）越宽。
+        锥内 |e_y| ≤ cone_w 不拉出上轴；锥禁用返回 0（条件恒真/恒假，
+        行为完全等同旧版）。返回 0.0 表示禁用。"""
+        p = self.get_parameter
+        if not bool(p("approach_cone_enabled").value):
+            return 0.0
+        apex_x = float(p("cone_apex_x").value)
+        w0 = float(p("cone_apex_half_width").value)
+        tan_a = math.tan(math.radians(float(p("cone_half_angle_deg").value)))
+        return w0 + tan_a * max(0.0, apex_x - x)
+
     def _compute_approach(self, x, e_y, e_yaw, yaw_b):
         """APPROACH 双向就位，船尾相机全程朝坞：
 
@@ -315,11 +336,19 @@ class DockingMotionController(Node):
         # 用大蟹行角收拢横偏（船尾/相机始终朝坞），回轴后正常倒入。
         # 滞回：>|y_far| 进入，<|y_near| 退出，防边界抖动。
         # 教训：目标取固定远处点时，船在其外侧会"边倒边修 y"斜插（10-06 现场）。
+        # 锥形漏斗（2026-10-08）：锥内（|e_y| ≤ cone_w(x)，远处锥宽近处窄）不
+        # 进 axis_mode，直接倒向预备点边倒边收敛——远场锚点噪声引起的 e_y 跳变
+        # 不再触发拉出-倒退拉锯；锥外才保留拉出保护。锥边界带 15% 滞回防抖。
         y_far = float(p("approach_axis_y_far").value)
         y_near = float(p("approach_axis_y_near").value)
-        if self._axis_mode and abs(e_y) < y_near:
+        cone_w = self._cone_half_width(x)  # 0.0 = 锥禁用（等同旧行为）
+        if self._axis_mode and (abs(e_y) < y_near or abs(e_y) <= cone_w):
             self._axis_mode = False
-        elif not self._axis_mode and abs(e_y) > y_far:
+        elif (
+            not self._axis_mode
+            and abs(e_y) > y_far
+            and abs(e_y) > cone_w * 1.15
+        ):
             self._axis_mode = True
         staging = float(p("staging_x").value)
         crab_deg = float(p("approach_crab_deg").value)
