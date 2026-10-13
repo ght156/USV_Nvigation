@@ -60,6 +60,12 @@ def _setup(context, *args, **kwargs):
     param_rewrites = {
         'use_sim_time': use_sim_time,
         'yaml_filename': map_arg,
+        # 2026-10-09：注入带 goal_checker_id 的 BT（默认 BT 会让 FollowPath 空
+        # checker 立即 abort，船一步不动）。RewrittenYaml 只替换已存在的 key，
+        # params_file 里须有 default_nav_to_pose_bt_xml 占位。
+        'default_nav_to_pose_bt_xml': os.path.join(
+            package_share.perform(context),
+            'config', 'navigate_to_pose_w_goal_checker.xml'),
     }
     if odom_topic:
         param_rewrites['odom_topic'] = odom_topic

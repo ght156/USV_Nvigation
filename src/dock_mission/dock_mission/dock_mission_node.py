@@ -599,6 +599,15 @@ class DockMissionNode(Node):
             self._goal_switch.apply_cruise()
             self._set_authority(SpeedAuthority.FAILED)
             self._transition(MissionState.COMPLETE_SETTLE, "dock pose success")
+        elif status.get("needs_manual_takeover"):
+            # FSM 判定禁止自动重试（2026-10-09 夹爪半抓住保护：爪子已扣住船体，
+            # 驶出/重试会拉拽船坞）。FAILED 的状态 JSON 里 needs_reapproach 被
+            # 强制 true（防 MONITOR_DOCK 挂死的历史契约），所以必须抢在
+            # needs_reapproach 分支之前拦截：直接终局失败，等人工接管。
+            self._needs_manual_takeover = True
+            self._finish_failed(
+                str(status.get("abort_reason") or "manual takeover")
+            )
         elif status.get("needs_reapproach"):
             self._needs_reapproach = True
             self._on_staging_failed(status.get("abort_reason", "needs_reapproach"))
@@ -606,7 +615,7 @@ class DockMissionNode(Node):
     def _finish_failed(self, reason: str) -> None:
         self._last_fail_reason = reason
         self._release_docking_session(reason=reason, authority=SpeedAuthority.FAILED)
-        if self._staging_retry >= self._retry_max():
+        if self._needs_manual_takeover or self._staging_retry >= self._retry_max():
             self._needs_manual_takeover = True
             self._emit_event(
                 "MANUAL_TAKEOVER_REQUESTED",

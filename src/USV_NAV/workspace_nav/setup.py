@@ -17,7 +17,7 @@ def collect_files(dirpath, extensions):
                     break
     return files
 
-config_files = collect_files('config', ['.yaml'])
+config_files = collect_files('config', ['.yaml', '.xml'])
 launch_files = collect_files('launch', ['.launch.py'])
 script_files = collect_files('workspace_nav', ['.py'])
 map_files = collect_files('map', ['.pgm'])

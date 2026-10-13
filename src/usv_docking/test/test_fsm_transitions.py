@@ -729,9 +729,27 @@ def _enable_claw(fsm):
     )
 
 
+def _enable_claw_open_on_start(fsm):
+    """坞爪需电机主动打开才能进船的船坞（如澄丰）：
+    总开关 on + dock_claw_open_on_start=true。
+
+    兴飞不是这一类：2026-10-08 起兴飞归港靠机械撞开爪子
+    （dock_claw_open_on_start=false，config/docking.yaml 默认），只出港抬爪。
+    """
+    fsm.set_parameters(
+        [
+            Parameter("dock_claw_enabled", Parameter.Type.BOOL, True),
+            Parameter("dock_claw_open_on_start", Parameter.Type.BOOL, True),
+        ]
+    )
+
+
 def test_claw_disabled_paths_unchanged(fsm):
     """dock_claw_enabled=false（本文件 fixture 显式设定）：start 直进
-    ACQUIRE_TAG，undock 直进 UNDOCK_EXIT，BACK_IN 无位移停滞检测。
+    ACQUIRE_TAG，undock 直进 UNDOCK_EXIT，ACQUIRE/APPROACH/ALIGN/REACQUIRE
+    段由 FSM 点背光（BACK_IN 不管，交给驱动 WaitIO）。
+    注：本用例的 fsm fixture 已把 backlight_enabled 视为 True（与 yaml 一致），
+    SetDO 包不可导入时降级为只告警，不影响状态转移。
     FINAL_DOCK 自 2026-10-05 压紧段设计起不再以位置到位判 DOCKED
     （见 test_final_push_timeout_aborts）。"""
     _start(fsm)
@@ -749,14 +767,16 @@ def test_claw_disabled_paths_unchanged(fsm):
 
 
 def test_claw_enabled_gates_start_and_undock(fsm):
-    """dock_claw_enabled=true（兴飞生产配置）：
+    """坞爪需主动打开归港的船坞（dock_claw_enabled=true 且
+    dock_claw_open_on_start=true）：
     - /dock/start 必须先经 WAIT_DOCK_OPEN 等船坞开夹爪，成功才 ACQUIRE_TAG；
     - /dock/undock 必须先经 WAIT_DOCK_RELEASE，成功才 UNDOCK_EXIT；
     - usv_rs485_driver 不可用时降级：开夹爪超时回 IDLE 上报可重试（不盲动），
       松夹爪失败停 FAILED（爪子可能仍扣着）。
     回归背景：2026-10-07 代码默认值由 false 改 true 后，单测若仍假设"默认
-    无夹爪"，start 路径会被静默改道。"""
-    _enable_claw(fsm)
+    无夹爪"，start 路径会被静默改道；2026-10-08 方向拆分后，兴飞
+    （open_on_start=false）走不到这条路径，见 test_xingfei_start_skips_dock_open。"""
+    _enable_claw_open_on_start(fsm)
     _start(fsm)
     assert fsm._state == DockState.WAIT_DOCK_OPEN
     # Action 包在单测环境不可导入 -> 不会误进 ACQUIRE_TAG；超时后回 IDLE
@@ -786,12 +806,15 @@ def test_final_push_timeout_aborts(fsm):
     fsm._transitions(0.1)
     assert fsm._state == DockState.FINAL_DOCK
     assert fsm._final_push_start is not None
-    # 压紧 5.9s（< 6.0s）：保持 FINAL_DOCK（旧逻辑 1s 即 DOCKED）
-    for _ in range(58):
+    # 压紧段时长跟随参数（2026-10-08 晚 6.0 -> 15.0：DI 闭合比 6s 晚），
+    # 不写死秒数，免得参数一调测试就失效
+    push_limit = float(fsm.get_parameter("final_push_time_sec").value)
+    # 未到上限：保持 FINAL_DOCK（旧逻辑 1s 即 DOCKED）
+    for _ in range(int((push_limit - 0.1) / 0.1)):
         _feed(fsm, x=0.05, y=0.0, yaw=math.pi)
         fsm._transitions(0.1)
     assert fsm._state == DockState.FINAL_DOCK
-    # 累计 6.0s+：压紧超时 -> ABORT_EXIT
+    # 超过上限：压紧超时 -> ABORT_EXIT
     for _ in range(3):
         _feed(fsm, x=0.05, y=0.0, yaw=math.pi)
         fsm._transitions(0.1)
@@ -807,7 +830,7 @@ def test_final_push_timeout_aborts(fsm):
 
 def test_start_requests_dock_open_when_claw_enabled(fsm):
     """夹爪模式：/dock/start -> WAIT_DOCK_OPEN（HOLD），ControlDO 成功才归港。"""
-    _enable_claw(fsm)
+    _enable_claw_open_on_start(fsm)
     _start(fsm)
     assert fsm._state == DockState.WAIT_DOCK_OPEN
     assert fsm._compute_mode() == MODE_HOLD
@@ -818,7 +841,7 @@ def test_start_requests_dock_open_when_claw_enabled(fsm):
 
 def test_dock_open_failure_reports_reapproach(fsm):
     """夹爪打开失败：船尚未动，回 IDLE 上报 needs_reapproach（上层可重试）。"""
-    _enable_claw(fsm)
+    _enable_claw_open_on_start(fsm)
     _start(fsm)
     fsm._control_do_result = (False, "io error")
     fsm._transitions(0.1)
@@ -829,7 +852,7 @@ def test_dock_open_failure_reports_reapproach(fsm):
 
 def test_dock_open_timeout(fsm):
     """ControlDO server 长时间不就绪：dock_open_timeout_sec 超时回 IDLE。"""
-    _enable_claw(fsm)
+    _enable_claw_open_on_start(fsm)
     fsm._send_control_do = lambda: None  # 隔离 Action 环境依赖
     _start(fsm)
     _backdate(fsm, 16.0)
@@ -931,3 +954,249 @@ def test_wait_io_result_outside_corridor_ignored(fsm):
     fsm._enter(DockState.ABORT_EXIT)  # 非坞内状态
     fsm._on_wait_io_result_cb(_Future())
     assert fsm._claw_grabbed is False
+
+
+# ══════════════ 夹爪半抓住保护（2026-10-09）══════════════
+# 同事现场确认：一个夹爪抓住即爪子已扣住船体，此时驶出重试会拉拽船坞（危险）。
+# WaitIO 成功判据是两个夹爪同时置位；单个置位只出现在 feedback 的
+# digital_input。任一位置位后，坞内一切驶出路径一律改为就地 FAILED 不重试。
+
+
+def _wait_io_fb(di):
+    """构造 WaitIO feedback 回调参数（feedback.digital_input）。"""
+    return type(
+        "_FB", (), {"feedback": type("_F", (), {"digital_input": di})()}
+    )()
+
+
+def test_wait_io_feedback_records_partial_mask(fsm):
+    """WaitIO feedback：任一夹爪 DI 置位累计进 _claw_partial_mask；0 不记录，
+    已记录的位不因后续 feedback 清零（扣住事实不撤）。"""
+    fsm._wait_io_active = True  # feedback 只在 goal 在途时受理
+    fsm._on_wait_io_feedback(_wait_io_fb(0))
+    assert fsm._claw_partial_mask == 0
+    fsm._on_wait_io_feedback(_wait_io_fb(1))
+    assert fsm._claw_partial_mask == 1
+    fsm._on_wait_io_feedback(_wait_io_fb(2))
+    assert fsm._claw_partial_mask == 3
+    fsm._on_wait_io_feedback(_wait_io_fb(0))
+    assert fsm._claw_partial_mask == 3
+
+
+def test_wait_io_feedback_stale_frame_dropped(fsm):
+    """goal 不在途（取消途中/上一 goal 的迟到帧）的 feedback 直接丢弃，
+    不污染新会话的半抓住记录（2026-10-09 实船见过此类迟到帧）。"""
+    assert fsm._wait_io_active is False
+    fsm._on_wait_io_feedback(_wait_io_fb(1))
+    assert fsm._claw_partial_mask == 0
+
+
+def test_partial_claw_stuck_fails_instead_of_abort_exit(fsm):
+    """一个夹爪已抓住时 BACK_IN 停滞超时：就地 FAILED，禁止驶出（不重试）。
+    对照 test_back_in_stuck_aborts_when_claw_enabled（无夹爪置位=驶出）。"""
+    _enable_claw(fsm)
+    fsm._enter(DockState.BACK_IN)
+    fsm._claw_partial_mask = 1  # 模拟 WaitIO feedback 见过一个夹爪置位
+    for _ in range(160):  # 16s 无位移 > backin_stuck_timeout_sec(15s)
+        _feed(fsm, x=-1.0, y=0.0)
+        fsm._transitions(0.1)
+    assert fsm._state == DockState.FAILED
+    assert fsm._abort_reason == "BACK_IN_STUCK"
+    assert fsm._needs_manual_takeover is True
+
+
+def test_partial_claw_final_push_timeout_fails(fsm):
+    """一个夹爪已抓住时压紧超时：就地 FAILED 报失败，不驶出重试。"""
+    _enable_claw(fsm)
+    fsm._enter(DockState.FINAL_DOCK)
+    fsm._claw_partial_mask = 2
+    for _ in range(170):  # 17s 压在死位置 > final_push_time_sec(15s)
+        _feed(fsm, x=0.05, y=0.0, yaw=math.pi)
+        fsm._transitions(0.1)
+    assert fsm._state == DockState.FAILED
+    assert fsm._abort_reason == "FINAL_PUSH_TIMEOUT"
+    assert fsm._needs_manual_takeover is True
+
+
+def test_partial_claw_corridor_violation_fails(fsm):
+    """一个夹爪已抓住时走廊违规同样就地 FAILED（全部拦截，不允许驶出）。"""
+    _enable_claw(fsm)
+    fsm._enter(DockState.BACK_IN)
+    fsm._claw_partial_mask = 1
+    for _ in range(12):  # 连续违规 > violation_cycles(10)
+        _feed(fsm, x=-1.0, y=99.0)
+        fsm._transitions(0.1)
+    assert fsm._state == DockState.FAILED
+    assert fsm._abort_reason == "CORRIDOR_VIOLATION"
+    assert fsm._needs_manual_takeover is True
+
+
+def test_partial_claw_reset_on_new_session(fsm):
+    """新会话（/dock/start、/dock/undock 均经 _reset_flags）清零半抓住记录。"""
+    fsm._claw_partial_mask = 3
+    fsm._reset_flags()
+    assert fsm._claw_partial_mask == 0
+
+
+# ══════════════ 兴飞语义（2026-10-08 方向拆分 + 背光）══════════════
+# 硬件事实（2026-10-08 现场确认）：兴飞船坞的爪子，归港时**不用电机打开**
+# （船体靠机械结构自己把爪子撞开），只有出港必须主动抬爪；而傍晚/夜间找 Tag
+# 依赖船坞背光板（DO bit1），原来由驱动的 ControlDO 顺带点亮，方向拆分后
+# 归港不发 ControlDO，改由 FSM 在找 Tag 阶段自己点。
+
+
+def _enable_backlight(fsm, mask: int = 2):
+    fsm.set_parameters(
+        [
+            Parameter("backlight_enabled", Parameter.Type.BOOL, True),
+            Parameter("backlight_mask", Parameter.Type.INTEGER, mask),
+        ]
+    )
+
+
+def _record_set_do(fsm):
+    """把 _send_set_do 换成本地记录，返回调用列表（单测无 SetDO 服务）。"""
+    calls = []
+
+    def _fake(mask, reason):
+        calls.append((mask, reason))
+
+    fsm._send_set_do = _fake
+    return calls
+
+
+def test_xingfei_start_skips_dock_open(fsm):
+    """兴飞归港：dock_claw_open_on_start=false -> 直接 ACQUIRE_TAG，
+    不发 ControlDO（爪子靠机械撞开），因此不存在 DOCK_OPEN_FAILED/超时失败。
+    回归背景：10-06/10-07 共 11 次归港卡在 WAIT_DOCK_OPEN 失败。"""
+    _enable_claw(fsm)  # 总开关仍 true（坞内仍用 WaitIO 判抓住）
+    _start(fsm)
+    assert fsm._state == DockState.ACQUIRE_TAG
+    # 即使 Action 环境完全不可用也不会退回 IDLE/上报 reapproach
+    _backdate(fsm, 30.0)
+    fsm._transitions(0.1)
+    assert fsm._state != DockState.WAIT_DOCK_OPEN
+    assert "DOCK_OPEN" not in (fsm._abort_reason or "")
+
+
+def test_xingfei_undock_still_requests_release(fsm):
+    """兴飞出港：dock_claw_release_on_undock=true -> 仍必须先 WAIT_DOCK_RELEASE
+    抬爪，成功才 UNDOCK_EXIT。"""
+    _enable_claw(fsm)
+    fsm._state = DockState.DOCKED
+    fsm._undock_cb(Bool(data=True))
+    assert fsm._state == DockState.WAIT_DOCK_RELEASE
+    fsm._control_do_result = (True, "released")
+    fsm._transitions(0.1)
+    assert fsm._state == DockState.UNDOCK_EXIT
+
+
+def test_backlight_on_at_dock_start(fsm):
+    """归港开始即点亮背光 bit1（找 Tag 靠它）。"""
+    _enable_backlight(fsm)
+    calls = _record_set_do(fsm)
+    _start(fsm)
+    assert calls and calls[-1][0] == 2
+    assert fsm._backlight_session_active is True
+
+
+def test_backlight_stays_on_across_failure_and_retry(fsm):
+    """**失败/重试不关背光**（2026-10-08 现场要求）：归港失败驶出/回 IDLE 期间
+    灯保持亮，重试时相机立刻能看 Tag，不用重新等一个 60s 级超时。"""
+    _enable_backlight(fsm)
+    calls = _record_set_do(fsm)
+    _start(fsm)
+    # 坞内失败驶出 -> IDLE（dock_mission 会原地重试）
+    fsm._enter(DockState.ABORT_EXIT)
+    fsm._enter(DockState.IDLE)
+    assert fsm._backlight_session_active is True
+    assert all(mask != 0 for mask, _ in calls), calls
+    # 重试：再 /dock/start，灯已在且会再点亮一次
+    _start(fsm)
+    assert calls[-1][0] == 2
+    # 入口外失败直接回 IDLE 同样不关
+    fsm._enter(DockState.REACQUIRE_TAG)
+    fsm._enter(DockState.IDLE)
+    assert all(mask != 0 for mask, _ in calls), calls
+
+
+def test_backlight_off_on_dock_success(fsm):
+    """归港成功（DOCKED）关闭背光。"""
+    _enable_backlight(fsm)
+    calls = _record_set_do(fsm)
+    _start(fsm)
+    fsm._enter(DockState.DOCKED)
+    assert calls[-1][0] == 0
+    assert fsm._backlight_session_active is False
+
+
+def test_backlight_off_on_cancel_and_undock(fsm):
+    """/dock/cancel 与 /dock/undock 是会话的真正结束，关灯。
+
+    注：正常 DOCKED -> /dock/undock 路径上灯已经在 DOCKED 时关了，
+    undock 那次是兜底（会话仍亮着时请求出港，比如失败后人工取消再出港）。"""
+    _enable_backlight(fsm)
+    calls = _record_set_do(fsm)
+    _start(fsm)
+    fsm._cancel_cb(Empty())
+    assert calls[-1][0] == 0
+    assert fsm._backlight_session_active is False
+    # 会话仍亮灯时请求出港（IDLE/DOCKED 才接受 undock）
+    calls.clear()
+    fsm._backlight_session_begin("测试：点亮")
+    assert calls[-1][0] == 2
+    fsm._state = DockState.IDLE
+    fsm._undock_cb(Bool(data=True))
+    assert calls and calls[-1][0] == 0
+    assert fsm._backlight_session_active is False
+
+
+def test_backlight_not_touched_in_driver_states(fsm):
+    """驱动自己在驱动 bit1 的状态（ControlDO 的 WAIT_DOCK_*、WaitIO 的
+    BACK_IN/FINAL_DOCK）里 FSM 不得插手，否则两边互抢
+    （ControlDO 写 0x0001 会清 bit1；WaitIO 抓住后熄灯又被 FSM 点亮）。"""
+    _enable_backlight(fsm)
+    calls = _record_set_do(fsm)
+    _start(fsm)
+    calls.clear()
+    for state in (
+        DockState.WAIT_DOCK_OPEN,
+        DockState.WAIT_DOCK_RELEASE,
+        DockState.BACK_IN,
+        DockState.FINAL_DOCK,
+    ):
+        fsm._enter(state)
+        fsm._backlight_last_send_time = (
+            fsm.get_clock().now() - Duration(seconds=30.0)
+        )
+        fsm._backlight_tick()
+    assert calls == []
+
+
+def test_backlight_keepalive_resends(fsm):
+    """会话期间按 backlight_keepalive_sec 周期重发：驱动 ControlDO 成功后
+    60s 会 writeDO(0x0000) 全清 DO，只点一次会被抹掉。"""
+    _enable_backlight(fsm)
+    calls = _record_set_do(fsm)
+    _start(fsm)
+    assert len(calls) == 1
+    # 未到期：不重发
+    fsm._backlight_tick()
+    assert len(calls) == 1
+    # 超过保活周期：重发
+    fsm._backlight_last_send_time = fsm.get_clock().now() - Duration(seconds=30.0)
+    fsm._backlight_tick()
+    assert len(calls) == 2
+    assert calls[-1][0] == 2
+
+
+def test_backlight_disabled_no_calls(fsm):
+    """backlight_enabled=false（无背光船坞）：任何状态都不写 DO。"""
+    fsm.set_parameters(
+        [Parameter("backlight_enabled", Parameter.Type.BOOL, False)]
+    )
+    calls = _record_set_do(fsm)
+    _start(fsm)
+    fsm._backlight_tick()
+    fsm._enter(DockState.DOCKED)
+    assert calls == []

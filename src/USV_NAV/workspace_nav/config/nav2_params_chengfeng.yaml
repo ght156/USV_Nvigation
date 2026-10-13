@@ -26,6 +26,8 @@
 bt_navigator:
   ros__parameters:
     use_sim_time: false
+    # 2026-10-09：占位，实际路径由 nav2_boat.launch.py 注入（同 xingfei 版注释）
+    default_nav_to_pose_bt_xml: ''
     global_frame: map              # 与 global_costmap、规划目标一致，固定 map
     robot_base_frame: base_link   # gps_input/local odom 子帧
     odom_topic: "/mavros/gps_input/local"  # 与 mission_bridge、velocity_smoother、速度桥一致

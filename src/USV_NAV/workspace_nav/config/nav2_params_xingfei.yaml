@@ -34,6 +34,11 @@
 bt_navigator:
   ros__parameters:
     use_sim_time: false
+    # 2026-10-09：默认 BT 的 FollowPath 不带 goal_checker_id -> 控制器拿到空名
+    # current_goal_checker 每次立即 abort（船不动），见 bug_debug/2026-10-07。
+    # 这里只占位，实际路径由 nav2_boat.launch.py 用 FindPackageShare 注入
+    # （RewrittenYaml 只替换已存在的 key，所以此行必须有）。
+    default_nav_to_pose_bt_xml: ''
     global_frame: map              # 与 global_costmap、规划目标一致，固定 map
     robot_base_frame: base_link   # gps_input/local odom 子帧
     odom_topic: "/mavros/gps_input/local"  # 与 mission_bridge、velocity_smoother、速度桥一致
@@ -103,7 +108,9 @@ controller_server:
       stateful: true
       plugin: "nav2_controller::SimpleGoalChecker"
       # —— 到达判定容差：xy (米) / yaw (弧度) ——
-      xy_goal_tolerance: 0.5
+      # 2026-10-12：0.5→1.0。水测末段在水流中船位在 0.5m 圈沿反复骑线难 latch，
+      # 放宽到 1.0 后正常判到（末段精对准仍由 rotate_to_heading_min_angle=0.3 保证）
+      xy_goal_tolerance: 1.0
       # 有意设为不约束终点朝向（3.14≈180°，任意 yaw 均判达标），勿按常规改小
       yaw_goal_tolerance: 3.14
     # 归港预泊点专用（dock_mission 切到此 profile）：预泊必须对准朝向（船尾朝坞），
@@ -164,14 +171,21 @@ controller_server:
       inflation_cost_scaling_factor: 1.0
 
       # —— 接近目标时减速。距离须 ≥ 船头前伸量，否则到达前已全速冲过 ——
-      min_approach_linear_velocity: 0.0
-      approach_velocity_scaling_dist: 3.0   #剩余路径长度小于此值，开始线性降速，直到最小线速度min_approach_linear_velocity
+      #    2026-10-10：0.0 → 0.15。末段 v = desired×剩余/3 线性衰减到 0 时，0.5m 容差圈外
+      #    指令只剩 ~0.17 m/s，低于船的起步速度 → 爬不进容差圈 + 漂偏触发原地转 = 末点转圈。
+      #    0.15 保证末段指令始终过起步门槛（现场验证后若仍爬不动可再抬到 0.2）。
+      min_approach_linear_velocity: 0.15
+      # 2026-10-12：3.0→5.0。3.0 时 2.9m 外全速 1.0 冲点，重船（桥限 decel 0.3）末段刹不住、
+      # 视觉冲点凶；5.0 提前进线性区（3m 处 v≈0.6），实测记录见 /tmp/rpp_probe3.log。
+      approach_velocity_scaling_dist: 5.0   #剩余路径长度小于此值，开始线性降速，直到最小线速度min_approach_linear_velocity
 
       # —— 转向控制 ——
       use_rotate_to_heading: true              # 机器人航向与路径起点航向偏差过大（超过 rotate_to_heading_min_angle），或者在接近终点（在容差内）需要调整终态朝向时（rotate_to_heading_angular_vel调整速度），会停止线速度，进行原地旋转。对齐前瞻点方向
-      rotate_to_heading_angular_vel: 0.15   # 原地旋转目标角速度；2026-10-05 水测角速度上限 ~0.25 rad/s，
-                                            # 下游桥硬限幅 ±0.30，调大需同步改桥的 max_*_angular_z
-      rotate_to_heading_min_angle: 0.5  #1.57  90度     0.785    45度
+      rotate_to_heading_angular_vel: 0.25   # 原地旋转目标角速度；2026-10-12：0.15→0.25（= 10-05 水测角速度
+                                            # 上限 ~0.25 rad/s，缩短末段对准耗时）；下游桥硬限幅 ±0.30，调大需同步改桥的 max_*_angular_z
+      rotate_to_heading_min_angle: 0.3  # ≈17度；2026-10-12 水测：0.785(45°) 末段对准太糙就放线速度 →
+                                        # 横向误差被水流放大 → 绕目标点转圈进不了 0.5m 容差圈（绕 5 圈+）；
+                                        # 0.3 后"转够再直冲"，末段 2.86m→0.20m 一次 6 秒到位
       # —— 碰撞检测（硬急停，与上面代价减速独立）——
       # 沿当前 (vx, ω) 向前仿真一条弧，弧长 = min(v × 本参数, 前瞻距离 carrot_dist)，
       # 弧上任何位姿 footprint 压到障碍 → 抛异常急停/恢复。RViz 看 /lookahead_collision_arc。
@@ -244,13 +258,56 @@ local_costmap:
         #    观测源上限(1.0)刻意留高，给在线调参留余量，本层才是卡点。
         #    > 此值的点由本层直接跳过，不入体素格。 ——
         max_obstacle_height: 0.6
-        # —— 标记阈值：一个体素列中至少 mark_threshold 个点被占据才标为障碍。0=首次点击即标记 (水面杂波多时可增大到 1~2) ——
-        mark_threshold: 2
+        # —— 想让岸的上部也入图，可放到 1.0（观测源上限已是 1.0）；0.6 是压制水面杂波的当前选择 ——
+        #    本层没有 min_obstacle_height 的作用：voxel 标记路径不读它（2026-10-09 实测，
+        #    A/B 把它改 -0.35 致命格数完全不变）；下界由观测源的 min_obstacle_height(-0.35) 决定。
+        # —— 标记阈值：**不是"点数"**，而是"该格被标过的 z 体素数"，且比较是【严格大于】——
+        #    源码 nav2_voxel_grid/voxel_grid.hpp::markVoxelInMap() 取该列 16 位 z 掩码的置位数
+        #    （marked_bits = *col >> 16），条件是 popcount > mark_threshold（bitsBelowThreshold）。
+        #    ⇒ 0 = 单层即标（有一点就标）；1 = 需 ≥2 层；2 = 需 ≥3 层（2026-10-10 源码更正）。
+        #    同一列里的点若都在同一 10cm 高度层（水面/平岸）→ 只置 1 位 → 阈值 1 就不标；
+        #    但 voxel 位会跨帧累积（不清除不消失），船体微晃/波浪会让平面目标几帧内攒出第 2 层
+        #    → 阈值 1 时平面岸延迟片刻也能标上；远处掠射角的岸每列最多 1~2 层 → 阈值 2 直接没。
+        #    2026-10-09 现场实测（同一泊位，清图后等 7s）：阈值 2 → 致命格 281；阈值 1 → 1408（×5）。
+        #    解码 /local_costmap/voxel_grid 也印证：110 个被标列里 81 列只有 1 个 z 层（被阈值挡掉）、29 列 ≥2。
+        #    代价：1 = 有一点就标，水面杂波/自反射更易入图（当初设 2 就是为了压它）。
+        #    2026-10-10 补充（range 真生效 18 后水面噪点更显）：嫌噪点多，第一步把它在线调回 2
+        #    （本参数是少数【支持在线改】的，立即生效），代价是每列凑不齐 3 层的目标
+        #    （远岸/平岸/水面漂浮物，掠射角下再高也只有 1~2 层）也不标——2026-10-10 实测
+        #    阈值 2 时较高的岸边也丢了，故在线值已回到 1。
+        #    更治本的压噪是在下次重启前把观测源 min_obstacle_height 从 -0.35 抬到 -0.2~-0.25。
+        #    噪点来源之一还有【船行波/尾流】：舷侧和船尾的浪回波贴着水面（odom z≈-0.48±0.2）、
+        #    大多单层 z 体素、且跟着船走——rolling 窗口下它随船持续标新格，射线又清不干净
+        #    （浪在射线路径上时有时无）。压它的手段同上：阈值 2 或抬源级下界；
+        #    footprint_clearing 管不到它（只清船体投影+padding 0.1m 内，浪在舷外）。
+        mark_threshold: 1
         # —— 体素列被判为 unknown 的点数阈值（源码默认 15，一般无需调整）——
         unknown_threshold: 15
         # —— 多层/多源叠加：1=max 取最大代价(推荐)；0=overwrite 直接覆盖 ——
         combination_method: 1
         observation_sources: livox_cloud
+        # ===================== 观测源参数说明（livox_cloud 段） =====================
+        #   topic                    点云话题（Livox Mid360，PointCloud2，10 Hz）
+        #   data_type                PointCloud2 / LaserScan
+        #   marking                  该源是否用于「标障碍」（把点写入致命格）
+        #   clearing                 该源是否用于「射线清除」（射线穿过的格清为 free）；
+        #                            水上 ghost 全靠它磨掉，端点稀疏的位置清不动
+        #   observation_persistence  观测保留时间(s)：0=只用最新一帧（动态环境建议 0）
+        #   obstacle_min/max_range   标记距离窗口(m)：以雷达光心为球心的 3D 斜距（含 z）
+        #   raytrace_min/max_range   清除射线距离窗口(m)：端点超出 max 时按 max 截断再沿线清
+        #   min/max_obstacle_height  源级 z 裁剪(m，相对 odom)：在 bufferCloud 阶段执行，
+        #                            是 voxel 标记路径的【唯一下界】（层级 min_obstacle_height
+        #                            在 voxel 路径不生效，2026-10-09 实测）
+        #   （本配置未用：expected_update_rate / inf_is_valid / sensor_frame，保持默认）
+        #
+        # ⚠️ 2026-10-10 实测（ros-humble-nav2-costmap-2d 1.1.20）：本段所有参数
+        #    （marking / clearing / 距离窗口 / 高度带 / persistence）只在节点 configure 时
+        #    读一次构造 ObservationBuffer，ros2 param set 在线改【返回成功但不生效】
+        #    （param get 看到的是假值）。改这里必须重启栈 ~/start_xingfei_stack.sh stop/start。
+        #    能在线调的只有：voxel_layer.mark_threshold / voxel_layer.max_obstacle_height /
+        #    footprint_clearing_enabled / enabled。
+        #    详见 docs/bug_debug/2026-10-10_代价图与点云不吻合-观测源参数在线无效与栈重启生效.md
+        # ===========================================================================
         livox_cloud:
           topic: /livox/lidar
           data_type: "PointCloud2"
@@ -258,16 +315,18 @@ local_costmap:
           observation_persistence: 0.0
           # —— clearing: true → 射线穿过区域清除旧障碍 (动态环境需要) ——
           clearing: true
+          # —— marking: true → 该源点云写入致命格；⚠️ 在线改 false 不生效（见上方警告）——
           marking: true
           # —— 障碍距离与高度过滤（距离以点云坐标系原点 = 激光雷达光心为球心算 3D 斜距，含 z）——
           #    雷达挂在船头（base_link 前 2.05m），半径 1.4m 的球覆盖船头本体 → 自反射不入图
           obstacle_min_range: 1.4
-          # —— 最大检测距离 (m)：20×20 滚动窗口最多需要半对角 ≈14.1，取 15 即可覆盖；
-          #    更大的值只是让窗口外的点白算一遍（worldToMap 失败后丢弃），徒增 CPU ——
-          obstacle_max_range: 15.0
-          raytrace_min_range: 0.5
+          # —— 最大检测距离 (m)：24×24 滚动窗口（2026-10-07 由 20 提到 24）半对角 ≈17.0，
+          #    取 18 覆盖全窗；更大的值只是让窗口外的点白算一遍（worldToMap 失败后丢弃），徒增 CPU。
+          #    2026-10-09 由 15.0 提到 18.0：15 会丢掉窗口四角（改前实测 15~30m 有 1198 点/帧进不来）——
+          obstacle_max_range: 18.0
+          raytrace_min_range: 0.5  # 射线清除的起点半径：0.5m 内的段不清（防贴脸回波乱清近场）
           # —— 射线清除最大距离 (m)：比 obstacle_max_range 略大，保证能清到窗口边缘 ——
-          raytrace_max_range: 16.0
+          raytrace_max_range: 20.0
           # —— 障碍高度筛选 (ObservationBuffer 裁剪，相对 odom z = 初始 base_link 位置) ——
           #    min=-0.35：水面在 odom≈-0.48，取 -0.35 把水面及其反光挡在门外（余量 0.13m，下水复核 ghost）。
           #    max=1.0：观测源刻意放宽，真正的上限交给 voxel_layer.max_obstacle_height(0.6，可在线调)。
@@ -295,7 +354,7 @@ global_costmap:
       resolution: 0.2
       # 未知格：true=保持未知（能否穿越看规划器 allow_unknown）；false=当 free（可通行）
       track_unknown_space: True
-      # —— global 挂 voxel_layer 用于远距离障碍预判（obstacle_max_range 15m）。
+      # —— global 挂 voxel_layer 用于远距离障碍预判（obstacle_max_range 30m，2026-10-09 由 15 提到 30）。
       #    注意：非滚动窗口下，动态物（行人/车辆）离开后其标记可能残留（clearing 需要射线穿过旧体素，
       #    动态物走后无新射线穿过原位置则永久残留）。水上动态物少时影响不大；
       #    若岸测/码头出现大量 ghost，可临时删掉 voxel_layer 或设 enabled: false ——
@@ -322,20 +381,24 @@ global_costmap:
         z_voxels: 12       # 与 local 一致，覆盖 odom [-0.42, +0.78]
         # —— 高度上限 (m)：与 local_costmap 一致，滤高于 0.6 m 的点 ——
         max_obstacle_height: 0.6
-        mark_threshold: 2
+        # —— 同 local：mark_threshold 计的是"该格被标过的 z 体素数"，不是点数（见 local 段注释）——
+        mark_threshold: 1
         unknown_threshold: 15
         combination_method: 1
         observation_sources: livox_cloud
+        # ⚠️ 本段观测源参数同 local：在线 set 不生效，改完必须重启栈（见 local voxel_layer 段警告，
+        #    docs/bug_debug/2026-10-10_代价图与点云不吻合-观测源参数在线无效与栈重启生效.md）
         livox_cloud:
           topic: /livox/lidar
           data_type: "PointCloud2"
           clearing: true
           marking: true
           obstacle_min_range: 1.4    # 同 local（以雷达光心为球心）
-          # —— 全局远距离检测 (m)：global 非滚动窗口，取 15 作远距预判 ——
-          obstacle_max_range: 15.0
+          # —— 全局远距离检测 (m)：global 非滚动窗口可要更远（远处岸线/障碍预判），
+          #    2026-10-09 由 15.0 提到 30.0（远岸多在 15~30 m；本层默认 enabled=false，开启后生效）——
+          obstacle_max_range: 30.0
           raytrace_min_range: 0.5
-          raytrace_max_range: 16.0
+          raytrace_max_range: 32.0
           # —— 高度筛选 (相对 odom z)：min=-0.35 滤水面反射，max=1.0，均与 local 一致 ——
           min_obstacle_height: -0.35
           max_obstacle_height: 1.0

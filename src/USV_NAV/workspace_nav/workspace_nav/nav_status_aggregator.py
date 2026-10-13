@@ -464,7 +464,12 @@ class NavStatusAggregator(Node):
             self._loc_health = LocHealth.LOST
         elif (
             self._position_cov_max > self._cov_degraded
-            or (self._gps is not None and self._gps.status.status < 3)
+            # 2026-10-09：阈值 <3 是按 ArduPilot GPS fix_type（3=3D fix）写的，
+            # 但话题是 NavSatFix（-1=无定位，0=普通定位，1=SBAS，2=GBAS/RTK），
+            # mavros gps_input 把 3D/RTK 统一映射成 0 → 旧阈值把 RTK 固定解也误报
+            # DEGRADED（10-09 实船：lat/lon 稳定却全程 gps_fix=0 报警）。NavSatFix
+            # 语义下只有 -1（NO_FIX）是坏；RTK 质量由 cov_max 阈值负责。
+            or (self._gps is not None and self._gps.status.status < 0)
             # 定位 odom 频率下限（min_odom_hz 参数，默认 8Hz）。实船两类源都不到 20Hz ——
             #   MAVROS /mavros/gps_input/local：每条 INSPVAA 转发一条 ≈10Hz
             #   SLAM   /slam/localization：raw LIO odom（raw_odom_max_hz=20）≈20-29Hz

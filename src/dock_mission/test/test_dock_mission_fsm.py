@@ -232,3 +232,45 @@ def test_home_cb_arms_mission(dock_node):
     msg.data = True
     node._home_cb(msg)
     assert node._state == MissionState.ARMED
+
+
+def test_dock_status_manual_takeover_no_retry(dock_node):
+    """FSM 报 needs_manual_takeover（夹爪半抓住保护）：直接 FAILED 终局，
+    不走 staging retry。2026-10-09 实船回归：FAILED 的状态 JSON 里
+    needs_reapproach 被契约强制 true，dock_mission 只认 needs_reapproach
+    导致误判重试，把扣在坞里的船开了出去。"""
+    node, _, mock_mission = dock_node
+    node._state = MissionState.MONITOR_DOCK
+
+    msg = String()
+    msg.data = json.dumps(
+        {
+            "state": "DOCK_ABORT",
+            "needs_reapproach": True,  # FAILED 契约强制 true，必须被拦截
+            "needs_manual_takeover": True,
+            "abort_reason": "FINAL_PUSH_TIMEOUT",
+        }
+    )
+    node._dock_status_cb(msg)
+
+    assert node._state == MissionState.FAILED
+    assert node._needs_manual_takeover is True
+    assert node._staging_retry == 0  # 未走重试
+    mock_mission.cancel_async.assert_not_called()
+
+
+def test_dock_status_reapproach_still_retries(dock_node):
+    """普通 needs_reapproach（无 manual_takeover）：仍走 staging retry。"""
+    node, _, _ = dock_node
+    node._state = MissionState.MONITOR_DOCK
+    node._mode = "dock_only"
+
+    msg = String()
+    msg.data = json.dumps(
+        {"needs_reapproach": True, "abort_reason": "ALIGN_TIMEOUT"}
+    )
+    node._dock_status_cb(msg)
+
+    assert node._staging_retry == 1
+    assert node._state == MissionState.DOCK_HANDOFF
+    assert node._needs_manual_takeover is False
