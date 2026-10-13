@@ -48,6 +48,13 @@ config/
 docs/msg/
 docs/srv/
 
+# 本地不上传（pre-push 白名单外）：AI 说明 / rviz 视图 / 文档配图 / 运行日志
+AGENTS.md
+cyclonedds.log
+slam_nav_odom.rviz
+rviz2-1010.rviz
+docs/xingfei_tf_layout.png
+
 # 系统
 .DS_Store
 Thumbs.db
