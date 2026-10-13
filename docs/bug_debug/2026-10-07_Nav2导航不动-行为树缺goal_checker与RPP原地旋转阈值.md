@@ -143,10 +143,12 @@ if (fabs(angular_vel) > max_vel_to_stop) angular_vel = sign * max_vel_to_stop;
 
 ## 7. 待办 / 下一步
 
-1. **决定 goal_checker 走哪条路**（结构性问题，必须先定，否则调参无用）：
-   ① 写自定义 BT（`<GoalCheckerSelector>` 或直接给 `FollowPath` 加 `goal_checker_id`）并配
-   `default_nav_to_pose_bt_xml`；② 让 Nav2 的 selector action 真正起来（现在 `/goal_checker_selector`
-   这个名字被 dock_mission 的 String 话题占用）；③ 给控制器一个默认可用的 checker。
+1. ~~**决定 goal_checker 走哪条路**~~ **已固化（2026-10-09）**：新增
+   `workspace_nav/config/navigate_to_pose_w_goal_checker.xml`（默认 BT + FollowPath
+   显式 `goal_checker_id="general_goal_checker"`），`nav2_boat.launch.py` 用
+   FindPackageShare 注入 `default_nav_to_pose_bt_xml`（两份 params yaml 里占位的
+   空字符串会被 RewrittenYaml 替换成实际路径）。dock_mission 的 profile 切换继续走
+   nav2_goal_checker.py 的 Plan B 参数回落（与 10-07 以来实际生效路径一致）。
 2. **导航参数由现场自调**：`rotate_to_heading_min_angle`（建议不要 0，否则一步不走）、
    `rotate_to_heading_angular_vel`、`max_angular_accel`（关系见 §5）。当前在线值
    `0.12 / 0.12 / 0.1` 重启后会回到文件值 `0.0 / 0.25 / 2.5`。
