@@ -1,0 +1,2474 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>ROS 2 Nav Studio v3: Live Nav2 Map Editor</title>
+    <style>
+        :root { --bg: #1e1e1e; --panel: #252526; --accent: #007acc; --text: #cccccc; --border: #3e3e42; }
+        body { margin: 0; font-family: 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); height: 100vh; display: flex; overflow: hidden; user-select: none; }
+        
+        /* 布局框架 */
+        #sidebar { width: 340px; background: var(--panel); border-right: 1px solid var(--border); display: flex; flex-direction: column; z-index: 20; box-shadow: 2px 0 10px rgba(0,0,0,0.3); }
+        
+        /* 顶部大模式切换 */
+        .mode-tabs { display: flex; background: #2d2d30; border-bottom: 1px solid var(--border); }
+        .mode-tab { flex: 1; padding: 15px; text-align: center; cursor: pointer; font-size: 14px; font-weight: bold; color: #888; transition: 0.2s; border-bottom: 3px solid transparent; }
+        .mode-tab:hover { background: #333; color: #fff; }
+        .mode-tab.active { background: var(--panel); color: var(--accent); border-bottom-color: var(--accent); }
+
+        /* 内容区域 */
+        .workspace { flex: 1; overflow-y: auto; padding: 15px; display: none; }
+        .workspace.active { display: block; }
+
+        /* 组件样式 */
+        .group { background: #333; padding: 12px; border-radius: 6px; margin-bottom: 15px; border: 1px solid #444; }
+        h3 { margin: 0 0 10px 0; font-size: 12px; color: #fff; text-transform: uppercase; border-bottom: 1px solid #555; padding-bottom: 5px; display: flex; justify-content: space-between; }
+        label { display: block; font-size: 11px; margin-top: 8px; color: #aaa; }
+        input[type="number"], input[type="text"] { width: 95%; background: #1e1e1e; border: 1px solid #555; color: white; padding: 6px; margin-top: 2px; border-radius: 2px; }
+        input[type="file"] { width: 100%; font-size: 11px; margin-top: 5px; }
+        
+        /* 按钮组 */
+        button { width: 100%; padding: 8px; background: var(--accent); color: white; border: none; cursor: pointer; margin-top: 10px; font-weight: bold; border-radius: 3px; font-size: 12px; transition: 0.2s; }
+        button:hover { filter: brightness(1.1); }
+        button.secondary { background: #444; }
+        button.danger { background: #c586c0; }
+        
+        /* 工具栏 (Draw Tools) */
+        .tools-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; margin-top: 5px; }
+        .tool-btn { padding: 8px; background: #222; border: 1px solid #444; text-align: center; cursor: pointer; font-size: 12px; color: #aaa; border-radius: 3px; }
+        .tool-btn:hover { background: #2a2a2a; }
+        .tool-btn.active { background: var(--accent); color: white; border-color: var(--accent); }
+
+        /* 文本区域 */
+        textarea { width: 100%; height: 150px; background: #111; color: #9cdcfe; border: 1px solid #444; font-family: monospace; font-size: 11px; margin-top: 10px; resize: vertical; white-space: pre; }
+
+        /* 主画布区 */
+        #main-viewport { flex: 1; position: relative; background: #111; overflow: hidden; cursor: crosshair; }
+        
+        /* 叠加层 HUD */
+        .overlay-hud { position: absolute; top: 10px; left: 10px; background: rgba(0,0,0,0.7); padding: 8px; border-radius: 4px; color: #ddd; font-size: 12px; pointer-events: none; line-height: 1.5; border: 1px solid #444; z-index: 10; }
+        .key { color: var(--accent); font-weight: bold; }
+        
+        #coord-hud { position: absolute; bottom: 10px; right: 10px; background: rgba(0,0,0,0.8); padding: 5px 10px; border: 1px solid #444; border-radius: 3px; color: #4ec9b0; font-family: monospace; font-size: 12px; pointer-events: none; z-index: 10; }
+
+        /* 状态条 */
+        .status-msg { font-size: 11px; color: #ce9178; margin-top: 5px; min-height: 16px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .status-msg.ok { color: #6a9955; }
+
+        /* 航点列表（下发用） */
+        .wp-list { max-height: 190px; overflow-y: auto; margin-top: 6px; border: 1px solid #3a3a3a; border-radius: 3px; }
+        .wp-row { display: flex; align-items: center; gap: 6px; padding: 3px 5px; font-size: 11px; border-bottom: 1px solid #3a3a3a; }
+        .wp-row:hover { background: #3a3a3a; }
+        .wp-row .wp-idx { color: #888; width: 14px; text-align: right; }
+        .wp-row .wp-coord { font-family: monospace; color: #9cdcfe; }
+        .wp-row .wp-ll { font-family: monospace; color: #6a9955; font-size: 10px; margin-left: auto; }
+        .wp-row .wp-del { cursor: pointer; color: #c586c0; padding: 0 3px; }
+        .wp-empty { color: #777; font-size: 11px; padding: 6px; }
+        select { width: 95%; background: #1e1e1e; border: 1px solid #555; color: white; padding: 6px; margin-top: 2px; border-radius: 2px; }
+
+        /* 区域填充选择浮动面板 */
+        #region-actions { display: none; position: absolute; z-index: 30; background: #2d2d30; border: 1px solid #666; border-radius: 6px; padding: 6px; flex-direction: column; gap: 4px; box-shadow: 0 2px 8px rgba(0,0,0,0.5); }
+        #region-actions button { width: auto; padding: 4px 12px; margin-top: 0; font-size: 12px; }
+    </style>
+    <script type="importmap">
+        { "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js", "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/" } }
+    </script>
+</head>
+<body>
+
+<div id="sidebar">
+    <div class="mode-tabs">
+        <div class="mode-tab active" onclick="switchAppMode('editor')">🛠️ 地图编辑器</div>
+        <div class="mode-tab" onclick="switchAppMode('planner')">🚩 航点编辑器</div>
+        <div class="mode-tab" onclick="switchAppMode('live')">📡 Nav2 实时</div>
+    </div>
+
+    <div id="ws-editor" class="workspace active">
+        <div class="group">
+            <h3>数据源 (Source)</h3>
+            <div style="margin-bottom:10px; border-bottom:1px solid #444; padding-bottom:10px;">
+                <label>选项 A: 从 PCD 点云生成</label>
+                <input type="file" id="pcdFile" accept=".pcd">
+                <div class="status-msg" id="pcdStatus">等待文件...</div>
+                <div style="display:flex; gap:5px; margin-top:5px;">
+                    <div style="flex:1"><label>Res</label><input type="number" id="pcdRes" value="0.05" step="0.01"></div>
+                    <div style="flex:1"><label>Min Z</label><input type="number" id="pcdMinZ" value="0.2" step="0.1"></div>
+                    <div style="flex:1"><label>Max Z</label><input type="number" id="pcdMaxZ" value="2.0" step="0.1"></div>
+                </div>
+                <label>PCD 栅格策略</label>
+                <select id="pcdMode" style="width:100%;background:#1e1e1e;border:1px solid #555;color:white;padding:6px;margin-top:2px;">
+                    <option value="unknown" selected>障碍投影：其余保持 Unknown（安全）</option>
+                    <option value="free">障碍投影：其余全部 Free（仅已裁剪安全区域）</option>
+                    <option value="raycast">单雷达原点 Ray Casting（仅适合单站/已知原点）</option>
+                </select>
+                <div id="raycastOptions" style="display:none;gap:5px;margin-top:5px;">
+                    <div style="flex:1"><label>Sensor X</label><input type="number" id="rayOriginX" value="0" step="0.1"></div>
+                    <div style="flex:1"><label>Sensor Y</label><input type="number" id="rayOriginY" value="0" step="0.1"></div>
+                </div>
+                <div class="status-msg">Ray Casting 需要传感器观测原点；累计 PCD 只有点坐标时无法严格恢复 free space。</div>
+                <button onclick="processPCD()">⚡ 生成地图</button>
+            </div>
+            
+            <div>
+                <label>选项 B: 编辑现有地图 (YAML + PGM)</label>
+                <input type="file" id="yamlFile" accept=".yaml">
+                <input type="file" id="pgmFile" accept=".pgm,.png,.jpg">
+                <button class="secondary" onclick="loadExistingMap()">📂 加载地图</button>
+            </div>
+        </div>
+
+        <div class="group">
+            <h3>修图工具 (Tools)</h3>
+            <div class="tools-grid">
+                <div class="tool-btn active" id="tool-pan" onclick="setEditorTool('pan')">✋ 移动 (Q)</div>
+                <div class="tool-btn" id="tool-draw" onclick="setEditorTool('draw')">✏️ 补墙 (W)</div>
+                <div class="tool-btn" id="tool-erase" onclick="setEditorTool('erase')">⬜ 擦除 (E)</div>
+                <div class="tool-btn" id="tool-unknown" onclick="setEditorTool('unknown')">❓ 未知 (U)</div>
+                <div class="tool-btn" id="tool-rect" onclick="setEditorTool('rect')">▭ 区域 (R)</div>
+                <div class="tool-btn" id="tool-poly" onclick="setEditorTool('poly')">⬠ 多边形 (P)</div>
+                <div class="tool-btn" id="tool-line" onclick="setEditorTool('line')">📏 连线 (L)</div>
+            </div>
+            <div id="shape-commit" style="display:none; margin-top:6px;">
+                <div class="status-msg" id="shape-hint" style="white-space:normal;"></div>
+                <div style="display:flex; gap:5px;">
+                    <button style="margin-top:5px" onclick="commitShape()">✅ 生成 (Enter)</button>
+                    <button class="secondary" style="margin-top:5px" onclick="cancelShape()">✕ 清除点</button>
+                </div>
+            </div>
+            <div class="tools-grid" style="margin-top:5px">
+                <div class="tool-btn" id="btn-undo" onclick="undoEdit()">↩ 撤销</div>
+                <div class="tool-btn" id="btn-redo" onclick="redoEdit()">↪ 重做</div>
+                <div class="tool-btn" id="btn-clearhist" onclick="clearHistory()" style="color:#c66">清历史</div>
+            </div>
+            <label>笔刷大小: <span id="brushSizeTxt">2</span> px</label>
+            <input type="range" id="brushSize" min="1" max="20" value="2" style="width:100%" oninput="document.getElementById('brushSizeTxt').innerText=this.value">
+            <label style="margin-top:8px"><input type="checkbox" id="chkGrid" onchange="renderUI()"> 像素网格（放大时显示）</label>
+        </div>
+
+        <div class="group">
+            <h3>参数校准 (Calibration)</h3>
+            <label>分辨率 (Resolution)</label>
+            <input type="number" id="globalRes" value="0.05" step="0.001" onchange="updateGlobalParams()">
+            <div style="display:flex; gap:5px">
+                <div style="flex:1"><label>Origin X</label><input type="number" id="globalOrgX" value="-10.0" step="0.05" onchange="updateGlobalParams()"></div>
+                <div style="flex:1"><label>Origin Y</label><input type="number" id="globalOrgY" value="-10.0" step="0.05" onchange="updateGlobalParams()"></div>
+            </div>
+            <label>Origin Yaw (rad)</label>
+            <input type="number" id="globalOrgYaw" value="0.0" step="0.01" onchange="updateGlobalParams()">
+            <label><input type="checkbox" id="globalFlipY" checked onchange="updateGlobalParams()"> ROS PGM 标准 Y 映射（推荐保持勾选）</label>
+        </div>
+
+        <div class="group">
+            <h3>保存参数 (YAML)</h3>
+            <label>Image 文件名</label>
+            <input type="text" id="exportImage" value="map.pgm">
+            <div style="display:flex; gap:5px">
+                <div style="flex:1"><label>Mode</label><input type="text" id="exportMode" value="trinary"></div>
+                <div style="flex:1"><label>Negate</label><input type="number" id="exportNegate" value="0" step="1"></div>
+            </div>
+            <div style="display:flex; gap:5px">
+                <div style="flex:1"><label>Occupied Thresh</label><input type="number" id="exportOccupied" value="0.65" step="0.01"></div>
+                <div style="flex:1"><label>Free Thresh</label><input type="number" id="exportFree" value="0.196" step="0.001"></div>
+            </div>
+            <label>额外 YAML 字段（每行一个，可留空）</label>
+            <textarea id="exportExtraYaml" style="height:70px" placeholder="publish_frequency: 1.0&#10;static_map: true"></textarea>
+        </div>
+
+        <div class="group">
+            <button onclick="exportMapAssets()">💾 导出 PGM & YAML</button>
+        </div>
+    </div>
+
+    <div id="ws-planner" class="workspace">
+        <div class="group">
+            <h3>航点列表 (Waypoints)</h3>
+            <div style="color:#aaa; font-size:12px; margin-bottom:10px;">
+                <span id="wp-count">0</span> 个航点
+                <div id="map-diagnostic" class="status-msg" style="margin-top:6px;white-space:normal;">地图诊断：等待地图</div>
+            </div>
+            <button onclick="undoWaypoint()">↩️ 撤销上一步</button>
+            <button class="danger" onclick="clearWaypoints()">🗑️ 清空所有</button>
+        </div>
+
+        <div class="group">
+            <h3>选中航点 (Select)</h3>
+            <div style="display:flex; gap:5px;">
+                <button class="secondary" onclick="selectAllWaypoints(true)">全选</button>
+                <button class="secondary" onclick="selectAllWaypoints(false)">全不选</button>
+            </div>
+            <div id="wp-list" class="wp-list"><div class="wp-empty">还没有航点：在地图上左键点住并拖出朝向</div></div>
+        </div>
+
+        <div class="group">
+            <h3>📤 下发到船端</h3>
+            <label>桥接服务（本机，先启动 waypoint_dispatch_bridge.py）</label>
+            <input type="text" id="dispUrl" value="http://127.0.0.1:8770">
+            <label>船端 SSH（~/.ssh/config 里的别名）</label>
+            <input type="text" id="dispHost" value="hkzl">
+            <div style="display:flex; gap:5px">
+                <div style="flex:1">
+                    <label>下发方式</label>
+                    <select id="dispMode">
+                        <option value="service">服务 send_waypoints（带朝向，立即执行）</option>
+                        <option value="topic">话题 /waypoint（经纬度，≈0.45s 自动开始）</option>
+                    </select>
+                </div>
+                <div style="flex:1">
+                    <label>朝向</label>
+                    <select id="dispYaw">
+                        <option value="planned">用规划朝向</option>
+                        <option value="course">不指定（行进方向）</option>
+                    </select>
+                </div>
+            </div>
+            <label>datum 锚点 ref_gnss_10（自动：换 tab 时从加载的 map.yaml 读，或点下方按钮从船端读）</label>
+            <div style="display:flex; gap:5px">
+                <input type="number" id="dispDatumLat" step="0.00000001" placeholder="datum lat">
+                <input type="number" id="dispDatumLon" step="0.00000001" placeholder="datum lon">
+            </div>
+            <button class="secondary" onclick="dispFetchDatum(false)">📡 从船端读 datum（船端 map.yaml）</button>
+            <div class="status-msg" id="dispStatus" style="white-space:normal; overflow:auto; max-height:90px;">未连接：请先在本机启动下发桥</div>
+            <button class="secondary" onclick="dispCheck()">🔌 检查船端</button>
+            <button class="secondary" onclick="dispConvert()">🧮 只换算（不下发）</button>
+            <button onclick="dispSend()">📤 下发选中航点</button>
+            <div style="display:flex; gap:5px">
+                <button class="secondary" onclick="dispPause(true)">⏸ 暂停</button>
+                <button class="secondary" onclick="dispPause(false)">▶ 继续</button>
+            </div>
+            <button class="danger" onclick="dispCancel()">🛑 取消任务</button>
+            <label><input type="checkbox" id="dispAuto" onchange="dispAutoToggle()"> 每 10s 自动刷新船端状态</label>
+            <div class="status-msg" id="dispNav" style="white-space:normal; overflow:auto; max-height:110px;">船端状态：未读取</div>
+        </div>
+
+        <div class="group">
+            <h3>导出参数 (Export)</h3>
+            <textarea id="wp-output" readonly placeholder="数据将在此生成..."></textarea>
+            <button onclick="copyWaypoints()">📋 复制到剪贴板</button>
+        </div>
+        
+        <div class="group" style="background: #252526; border:none;">
+            <p style="font-size:11px; color:#666;">
+                * 提示：规划器直接使用编辑器中的地图作为底图。
+                <br>* 请先在编辑器中确保 Origin/Resolution 正确。
+            </p>
+        </div>
+    </div>
+
+    <div id="ws-live" class="workspace">
+        <div class="group">
+            <h3>ROS 2 / rosbridge</h3>
+            <label>WebSocket 地址</label>
+            <input type="text" id="rosbridgeUrl" value="ws://127.0.0.1:9090">
+            <button id="rosConnectBtn" onclick="toggleRosConnection()">🔌 连接 ROS</button>
+            <div class="status-msg" id="rosStatus">未连接</div>
+        </div>
+        <div class="group">
+            <h3>实时话题</h3>
+            <label>地图话题</label>
+            <input type="text" id="rosMapTopic" value="/map">
+            <label>船位话题（map 坐标系；2026-10-09 起 /usv_map_pose 停发，船位自动由 TF map→odom→base_link 合成，此项留空亦可）</label>
+            <input type="text" id="rosPoseTopic" value="/usv_map_pose">
+            <label>全局路径话题</label>
+            <input type="text" id="rosPlanTopic" value="/plan">
+            <label>局部代价图话题</label>
+            <input type="text" id="rosCostmapTopic" value="/local_costmap/costmap">
+            <label>Footprint 话题</label>
+            <input type="text" id="rosFootprintTopic" value="/local_costmap/published_footprint">
+            <label>TF 话题（map→odom）</label>
+            <input type="text" id="rosTFTopic" value="/tf">
+            <button class="secondary" onclick="resubscribeRosTopics()">↻ 重新订阅</button>
+        </div>
+        <div class="group">
+            <h3>RViz 式叠加</h3>
+            <label><input type="checkbox" id="showBoat" checked onchange="renderUI()"> 显示船位置与朝向</label>
+            <label>船图标(px) <input type="number" id="boatSize" value="28" min="8" max="120" step="2" onchange="renderUI()" style="width:56px"></label>
+            <label><input type="checkbox" id="showPlan" checked onchange="renderUI()"> 显示 Nav2 全局路径</label>
+            <label><input type="checkbox" id="showFootprint" checked onchange="renderUI()"> 显示船体 footprint（尺寸方框）</label>
+            <label><input type="checkbox" id="showTF" checked onchange="renderUI()"> 显示 TF 坐标轴（map + base_link）</label>
+            <label>TF 大小(m) <input type="number" id="tfSize" value="2" min="0.2" step="0.1" onchange="renderUI()" style="width:56px"></label>
+            <label><input type="checkbox" id="showCostmap" checked onchange="syncCostmapSubscription()"> 显示局部代价图（odom 系）</label>
+            <label>代价图不透明度: <span id="costmapAlphaTxt">0.6</span></label>
+            <input type="range" id="costmapAlpha" min="0" max="1" step="0.05" value="0.6" style="width:100%" oninput="document.getElementById('costmapAlphaTxt').innerText=this.value; rebuildCostmapCanvas()">
+            <label><input type="checkbox" id="followBoat"> 自动跟随船</label>
+            <label><input type="checkbox" id="trailFree" onchange="resetTrailPaint()"> 航迹擦除：船走过的地方设为可通行</label>
+            <label>擦除边距(m) <input type="number" id="trailMargin" value="0.3" min="0" max="2" step="0.1" style="width:56px"></label>
+            <div style="font-size:11px;color:#aaa;line-height:1.5">航迹擦除直接改当前编辑器里的地图副本，需“💾 导出 PGM & YAML”后才会持久化。</div>
+            <button onclick="loadRosMapIntoEditor()">🗺️ 将 /map 载入编辑器</button>
+            <div class="status-msg" id="rosMapStatus">尚未收到 /map</div>
+            <div class="status-msg" id="rosCostmapStatus">尚未收到局部代价图</div>
+            <div class="status-msg" id="rosPoseStatus">尚未收到船位</div>
+        </div>
+        <div class="group">
+            <h3>安全说明</h3>
+            <div style="font-size:11px;line-height:1.55;color:#aaa">
+                此页面只订阅 Nav2 数据，不会直接修改正在运行的 map_server。修图完成后导出 PGM/YAML，再由 Nav2 load_map 或重启地图服务器加载。
+            </div>
+        </div>
+    </div>
+
+</div>
+
+<div id="main-viewport">
+    <div class="overlay-hud" id="hud-tips">
+        <div id="tip-editor">
+            <span class="key">左键</span>：涂抹 / 打点 / 框选<br>
+            <span class="key">右键</span>：拖拽画布<br>
+            <span class="key">滚轮</span>：缩放<br>
+            <span class="key">Q W E U</span>：移动/补墙/擦除/未知<br>
+            <span class="key">R P L</span>：区域/多边形/连线<br>
+            <span class="key">Enter / Esc</span>：生成 / 取消
+        </div>
+        <div id="tip-planner" style="display:none">
+            <span class="key">左键</span>：按下定点，拖拽定方向<br>
+            <span class="key">右键</span>：拖拽画布<br>
+            <span class="key">滚轮</span>：缩放
+        </div>
+    </div>
+    
+    <div id="coord-hud">X: 0.00 Y: 0.00</div>
+
+    <!-- 区域/多边形生成后的填充选择 -->
+    <div id="region-actions">
+        <button onclick="applyPendingFill('draw')">🖊 填障碍</button>
+        <button onclick="applyPendingFill('erase')">⬜ 填空闲</button>
+        <button onclick="applyPendingFill('unknown')">❓ 填未知</button>
+        <button class="secondary" onclick="hidePendingRegion()">✕ 取消</button>
+    </div>
+
+    <div id="canvas-stack" style="transform-origin: 0 0;">
+        <canvas id="cvs-map" style="position:absolute; left:0; top:0; image-rendering: pixelated;"></canvas>
+    </div>
+    <!-- UI 叠加层独立于地图缩放：与视口同尺寸（含 devicePixelRatio），由 renderUI 手动施加视图变换，保证任意缩放下船标/线条都清晰 -->
+    <canvas id="cvs-ui" style="position:absolute; left:0; top:0; pointer-events:none; z-index:5;"></canvas>
+</div>
+
+<script type="module">
+// three.js 只在「PCD → 地图」这一步用到，改成按需动态 import：
+// 这样在没有外网 / CDN 不通的现场，页面其余功能（加载已有 yaml+pgm、航点规划、
+// 📤 下发到船端）照常可用；以前这里是静态 import，CDN 不通会导致整个模块不执行、所有按钮失灵。
+let THREE = null;
+let PCDLoader = null;
+async function ensureThree() {
+    if (PCDLoader) return;
+    const three = await import('three');
+    THREE = three;
+    const mod = await import('three/addons/loaders/PCDLoader.js');
+    PCDLoader = mod.PCDLoader;
+}
+
+// ==========================================
+// 1. 全局状态管理 (State)
+// ==========================================
+const state = {
+    mode: 'editor', // 'editor' | 'planner'
+    editorTool: 'pan', // 'pan' | 'draw' | 'erase'
+    history: [],        // 撤销栈：每次笔画开头的画布快照
+    redoHistory: [],    // 重做栈
+    strokeActive: false, // 当前是否在一次绘画笔画中（只在笔画开始时快照）
+    
+    // 地图数据
+    width: 800,
+    height: 800,
+    resolution: 0.05,
+    originX: -10.0,
+    originY: -10.0,
+    originYaw: 0.0,
+    flipY: true,
+
+    // 加载时保留的原始 YAML；导出时只更新关键参数，避免丢失其他字段
+    yamlText: null,
+    
+    // 视图变换
+    scale: 1.0,
+    panX: 0,
+    panY: 0,
+    
+    // 交互状态
+    isMouseDown: false,
+    lastMouseX: 0,
+    lastMouseY: 0,
+    
+    // 航点数据
+    waypoints: [] // {mapX, mapY, rosYaw, wx, wy}
+};
+
+// 形状工具状态（区域框选 / 多边形 / 连线，坐标均为地图像素）
+state.shape = {
+    polyPoints: [],   // 多边形打点 [{x,y}...]
+    linePoints: [],   // 连线端点（最多 2 个）
+    rectActive: false, rectX0: 0, rectY0: 0, rectX1: 0, rectY1: 0,
+    pending: null     // 已生成、等待选择填充类型的多边形
+};
+state.lastPaintPos = null; // 上一笔位置（Bresenham 补点用）
+state.mouseMapPos = null;  // 鼠标所在地图像素（笔刷预览用）
+
+// ROS / Nav2 实时可视化状态
+state.ros = {
+    ws: null, connected: false, lastMap: null, boatPose: null, plan: [], footprint: null,
+    costmap: null,        // 最新局部代价图 {info, frame, data}
+    costmapCanvas: null,  // 着色后的 offscreen canvas（buildCostmapCanvas 生成）
+    mapToOdom: null,      // 最新 /tf 中的 map→odom 变换 {x, y, yaw}
+    odomToBase: null,     // 最新 /tf 中的 odom→base_link（2026-10-09：/usv_map_pose
+    mapToBase: null,      // 停发后船位改由 TF 合成；map→base_link 直发时优先用）
+    subscriptions: [], fragBuf: {}
+};
+
+// YAML 导出参数
+state.exportImage = 'map.pgm';
+state.exportMode = 'trinary';
+state.exportNegate = 0;
+state.exportOccupied = 0.65;
+state.exportFree = 0.196;
+
+// DOM 引用
+const cvsMap = document.getElementById('cvs-map');
+const ctxMap = cvsMap.getContext('2d', {willReadFrequently: true});
+const cvsUI = document.getElementById('cvs-ui');
+const ctxUI = cvsUI.getContext('2d');
+const stack = document.getElementById('canvas-stack');
+const viewport = document.getElementById('main-viewport');
+
+// 初始化
+function init() {
+    resizeCanvas(800, 800);
+    resizeUICanvas();
+    resetView();
+    renderLoop();
+    
+    // 默认画个白底
+    ctxMap.fillStyle = '#cdcdcd'; // 未知区域颜色 (ROS 205)
+    ctxMap.fillRect(0,0,800,800);
+    syncGlobalInputs();
+    syncExportInputs();
+    const pcdMode = document.getElementById('pcdMode');
+    if (pcdMode) pcdMode.addEventListener('change', () => {
+        document.getElementById('raycastOptions').style.display = pcdMode.value === 'raycast' ? 'flex' : 'none';
+    });
+    updateMapDiagnostic();
+}
+
+// ==========================================
+// 2. 核心逻辑：模式切换与视图
+// ==========================================
+window.switchAppMode = (mode) => {
+    state.mode = mode;
+    // UI 切换
+    document.querySelectorAll('.mode-tab').forEach(el => el.classList.remove('active'));
+    document.querySelectorAll('.workspace').forEach(el => el.classList.remove('active'));
+    
+    if(mode === 'editor') {
+        document.querySelector('.mode-tab:nth-child(1)').classList.add('active');
+        document.getElementById('ws-editor').classList.add('active');
+        document.getElementById('tip-editor').style.display = 'block';
+        document.getElementById('tip-planner').style.display = 'none';
+    } else if(mode === 'planner') {
+        document.querySelector('.mode-tab:nth-child(2)').classList.add('active');
+        document.getElementById('ws-planner').classList.add('active');
+        document.getElementById('tip-editor').style.display = 'none';
+        document.getElementById('tip-planner').style.display = 'block';
+        generateWaypointOutput();
+        dispSyncDatum(false);       // 从加载的 map.yaml 里补 datum 锚点
+        renderWaypointList();
+    } else {
+        document.querySelector('.mode-tab:nth-child(3)').classList.add('active');
+        document.getElementById('ws-live').classList.add('active');
+        document.getElementById('tip-editor').style.display = 'none';
+        document.getElementById('tip-planner').style.display = 'none';
+    }
+    hidePendingRegion(); // 离开编辑器时收起因区域/多边形弹出的填充面板
+    renderUI(); // 立即刷新 UI 层
+};
+
+window.setEditorTool = (tool) => {
+    state.editorTool = tool;
+    document.querySelectorAll('.tool-btn').forEach(b => b.classList.remove('active'));
+    document.getElementById('tool-'+tool).classList.add('active');
+    // 切换工具时清理未完成的形状交互
+    state.shape.polyPoints = [];
+    state.shape.linePoints = [];
+    state.shape.rectActive = false;
+    hidePendingRegion();
+    updateShapeCommit();
+    renderUI();
+};
+
+function updateViewTransform() {
+    stack.style.transform = `translate(${state.panX}px, ${state.panY}px) scale(${state.scale})`;
+    // UI 叠加层不再随 CSS 缩放，视图变化后需按屏幕分辨率重绘
+    renderUI();
+}
+
+function resetView() {
+    // 居中显示
+    const viewW = viewport.clientWidth;
+    const viewH = viewport.clientHeight;
+    state.scale = Math.min(viewW / state.width, viewH / state.height) * 0.85;
+    state.panX = (viewW - state.width * state.scale) / 2;
+    state.panY = (viewH - state.height * state.scale) / 2;
+    updateViewTransform();
+}
+
+function resizeCanvas(w, h) {
+    state.width = w;
+    state.height = h;
+    cvsMap.width = w; cvsMap.height = h;
+    stack.style.width = w + 'px';
+    stack.style.height = h + 'px';
+}
+
+// UI 叠加层与视口同尺寸（乘 devicePixelRatio 保证高分屏清晰）
+function resizeUICanvas() {
+    const dpr = window.devicePixelRatio || 1;
+    cvsUI.width = Math.max(1, Math.round(viewport.clientWidth * dpr));
+    cvsUI.height = Math.max(1, Math.round(viewport.clientHeight * dpr));
+    cvsUI.style.width = viewport.clientWidth + 'px';
+    cvsUI.style.height = viewport.clientHeight + 'px';
+    renderUI();
+}
+window.addEventListener('resize', resizeUICanvas);
+
+// ==========================================
+// 3. 交互事件监听
+// ==========================================
+viewport.addEventListener('wheel', e => {
+    e.preventDefault();
+    const zoomSpeed = 0.1;
+    const delta = e.deltaY > 0 ? -1 : 1;
+    const factor = Math.exp(delta * zoomSpeed);
+    
+    // 鼠标中心缩放算法
+    const rect = viewport.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+    
+    const mapX = (mx - state.panX) / state.scale;
+    const mapY = (my - state.panY) / state.scale;
+    
+    let newScale = state.scale * factor;
+    if(newScale < 0.05) newScale = 0.05;
+    if(newScale > 50) newScale = 50;
+    
+    state.panX = mx - mapX * newScale;
+    state.panY = my - mapY * newScale;
+    state.scale = newScale;
+    
+    updateViewTransform();
+});
+
+// 鼠标按下
+let plannerStart = null; // 规划器拖拽起点
+
+viewport.addEventListener('mousedown', e => {
+    // 填充选择面板内的点击不触发画布交互，否则会先清掉待填充区域
+    if(e.target.closest && e.target.closest('#region-actions')) return;
+    state.isMouseDown = true;
+    state.lastMouseX = e.clientX;
+    state.lastMouseY = e.clientY;
+    
+    // 规划器模式：左键开始标点
+    if(state.mode === 'planner' && e.button === 0) {
+        const pos = getMapPos(e);
+        if(pos) plannerStart = pos;
+    }
+    
+    // 编辑器模式：左键按工具分发（涂抹 / 框选 / 打点）
+    if(state.mode === 'editor' && e.button === 0 && state.editorTool !== 'pan') {
+        const pos = getMapPos(e);
+        if(!pos) return;
+        const t = state.editorTool;
+        if(t === 'draw' || t === 'erase' || t === 'unknown') {
+            paintStrokeStart(pos);
+        } else if(t === 'rect') {
+            hidePendingRegion();
+            const s = state.shape;
+            s.rectActive = true;
+            s.rectX0 = s.rectX1 = pos.x;
+            s.rectY0 = s.rectY1 = pos.y;
+            renderUI();
+        } else if(t === 'poly') {
+            hidePendingRegion();
+            state.shape.polyPoints.push({x: pos.x, y: pos.y});
+            updateShapeCommit();
+            renderUI();
+        } else if(t === 'line') {
+            hidePendingRegion();
+            if(state.shape.linePoints.length >= 2) state.shape.linePoints = [];
+            state.shape.linePoints.push({x: pos.x, y: pos.y});
+            updateShapeCommit();
+            renderUI();
+        }
+    }
+});
+
+// 鼠标移动
+viewport.addEventListener('mousemove', e => {
+    // 1. 更新 HUD 坐标（含当前像素灰度值，便于核对 ROS 占用语义）
+    const pos = getMapPos(e);
+    if(pos) {
+        const world = mapPixelToWorld(pos.x, pos.y);
+        const ix = Math.floor(pos.x), iy = Math.floor(pos.y);
+        const v = ctxMap.getImageData(ix, iy, 1, 1).data[0];
+        document.getElementById('coord-hud').innerText = `X: ${world.x.toFixed(2)} Y: ${world.y.toFixed(2)}  像素(${ix},${iy}) 值:${v}`;
+    }
+    state.mouseMapPos = pos;
+
+    // 2. 处理拖拽画布 (右键 或 Pan模式)
+    const isRightClick = e.buttons === 2;
+    if(state.isMouseDown && (isRightClick || (state.mode === 'editor' && state.editorTool === 'pan' && (e.buttons & 1) === 1))) {
+        state.panX += e.clientX - state.lastMouseX;
+        state.panY += e.clientY - state.lastMouseY;
+        updateViewTransform();
+    }
+
+    // 3. 编辑器交互（涂抹 / 框选拖拽 / 笔刷预览）
+    if(state.mode === 'editor') {
+        const t = state.editorTool;
+        const isPaintTool = (t === 'draw' || t === 'erase' || t === 'unknown');
+        if(state.isMouseDown && !isRightClick) {
+            if(isPaintTool && state.strokeActive && pos) {
+                paintStrokePoint(pos);
+            } else if(t === 'rect' && state.shape.rectActive && pos) {
+                state.shape.rectX1 = pos.x;
+                state.shape.rectY1 = pos.y;
+            }
+        }
+        if(isPaintTool || (t === 'rect' && state.shape.rectActive)) renderUI();
+    }
+    
+    // 4. 规划器拖拽预览
+    if(state.isMouseDown && state.mode === 'planner' && plannerStart) {
+        // 只需触发重绘 UI
+        renderUI(pos); // 传入当前鼠标位置用于画临时箭头
+    }
+
+    state.lastMouseX = e.clientX;
+    state.lastMouseY = e.clientY;
+});
+
+// 鼠标松开
+window.addEventListener('mouseup', e => {
+    state.isMouseDown = false;
+    if(state.strokeActive) updateMapDiagnostic(); // 笔画结束统一刷新诊断，避免逐点全图扫描
+    state.strokeActive = false;
+
+    // 编辑器：区域框选完成 → 弹出填充选择
+    if(state.mode === 'editor' && state.editorTool === 'rect' && state.shape.rectActive) {
+        const s = state.shape;
+        s.rectActive = false;
+        const x0 = Math.min(s.rectX0, s.rectX1), x1 = Math.max(s.rectX0, s.rectX1);
+        const y0 = Math.min(s.rectY0, s.rectY1), y1 = Math.max(s.rectY0, s.rectY1);
+        if(x1 - x0 >= 1 && y1 - y0 >= 1) {
+            showPendingRegion([{x:x0,y:y0},{x:x1,y:y0},{x:x1,y:y1},{x:x0,y:y1}]);
+        }
+        renderUI();
+    }
+    
+    // 规划器：完成标点
+    if(state.mode === 'planner' && plannerStart) {
+        const endPos = getMapPos(e);
+        if(endPos) {
+            const dx = endPos.x - plannerStart.x;
+            const dy = endPos.y - plannerStart.y;
+            // 计算地图像素系的角度
+            let pixelYaw = (Math.abs(dx) > 1 || Math.abs(dy) > 1) ? Math.atan2(dy, dx) : 0;
+            
+            // Canvas 方向 -> 地图局部方向 -> ROS/world yaw。
+            // 标准 ROS PGM 中 Canvas Y 向下、地图局部 Y 向上，因此需要取反；
+            // 再叠加 YAML origin 的 yaw。
+            let rosYaw = pixelYawToWorldYaw(pixelYaw);
+            
+            const world = mapPixelToWorld(plannerStart.x, plannerStart.y);
+            
+            state.waypoints.push({
+                mapX: plannerStart.x,
+                mapY: plannerStart.y,
+                pixelYaw: pixelYaw,
+                wx: world.x,
+                wy: world.y,
+                rosYaw: rosYaw,
+                sel: true
+            });
+            updateWaypointCount();
+            generateWaypointOutput();
+        }
+        plannerStart = null;
+        renderUI();
+    }
+});
+
+// 阻止右键菜单
+viewport.addEventListener('contextmenu', e => e.preventDefault());
+
+// 辅助：获取鼠标在 Map 上的像素坐标
+function getMapPos(e) {
+    const rect = viewport.getBoundingClientRect();
+    // 计算相对于 viewport 的位置
+    const vx = e.clientX - rect.left;
+    const vy = e.clientY - rect.top;
+    // 反推 transform
+    const mx = (vx - state.panX) / state.scale;
+    const my = (vy - state.panY) / state.scale;
+    
+    if(mx >= 0 && mx < state.width && my >= 0 && my < state.height) {
+        return { x: mx, y: my };
+    }
+    return null;
+}
+
+// ==========================================
+// 4. 编辑器逻辑 (PCD / Map Load / Paint)
+// ==========================================
+
+// PCD 处理
+window.processPCD = async () => {
+    const file = document.getElementById('pcdFile').files[0];
+    if(!file) return alert("请先选择 PCD 文件");
+    
+    const status = document.getElementById('pcdStatus');
+    status.classList.remove('ok');
+    status.innerText = "正在加载 three.js（需要外网，仅 PCD 转图时用到）...";
+    try {
+        await ensureThree();
+    } catch(e) {
+        status.innerText = "three.js 加载失败：无外网/CDN 不通。加载已有 yaml+pgm 不受影响。";
+        console.error(e);
+        return;
+    }
+    status.innerText = "正在解析 PCD...";
+    
+    const loader = new PCDLoader();
+    loader.load(URL.createObjectURL(file), (points) => {
+        status.innerText = `点数: ${points.geometry.attributes.position.count}, 正在栅格化...`;
+        status.classList.add('ok');
+        
+        // 稍作延时让 UI 刷新
+        setTimeout(() => rasterizePCD(points), 50);
+    }, undefined, (err) => {
+        status.innerText = "加载失败";
+        console.error(err);
+    });
+};
+
+function rasterizePCD(points) {
+    const res = parseFloat(document.getElementById('pcdRes').value);
+    const minZ = parseFloat(document.getElementById('pcdMinZ').value);
+    const maxZ = parseFloat(document.getElementById('pcdMaxZ').value);
+    
+    const pos = points.geometry.attributes.position;
+    let minX=Infinity, maxX=-Infinity, minY=Infinity, maxY=-Infinity;
+    
+    // 1. 过滤 & 找边界
+    const validIndices = [];
+    for(let i=0; i<pos.count; i++) {
+        const z = pos.getZ(i);
+        if(z >= minZ && z <= maxZ) {
+            const x = pos.getX(i);
+            const y = pos.getY(i);
+            if(x < minX) minX = x; if(x > maxX) maxX = x;
+            if(y < minY) minY = y; if(y > maxY) maxY = y;
+            validIndices.push(i);
+        }
+    }
+    
+    if(validIndices.length === 0) return alert("指定高度范围内没有点云！");
+    
+    // Padding
+    const padding = 1.0; // 米
+    minX -= padding; maxX += padding; minY -= padding; maxY += padding;
+    
+    const w = Math.ceil((maxX - minX) / res);
+    const h = Math.ceil((maxY - minY) / res);
+    
+    // 更新全局状态
+    resizeCanvas(w, h);
+    state.resolution = res;
+    state.yamlText = null;
+    state.exportImage = 'map.pgm';
+    state.exportMode = 'trinary';
+    state.exportNegate = 0;
+    state.exportOccupied = 0.65;
+    state.exportFree = 0.196;
+    // Canvas 原点在左上角，对应 ROS 坐标系的 (minX, maxY) 因为 ROS Y轴向上
+    // 但通常 map_server 输出 origin 是左下角。
+    // 这里为了简化，我们设定 originX = minX, originY = minY.
+    // 在 Canvas 里，像素 (0,0) 对应 (minX, maxY).
+    // 像素 (col, row) -> ROS X = minX + col*res
+    //                   ROS Y = maxY - row*res
+    
+    state.originX = minX;
+    state.originY = minY;
+    state.originYaw = 0.0;
+    state.flipY = true;
+    
+    syncGlobalInputs();
+    syncExportInputs();
+
+    // 2. 绘制
+    const pcdMode = document.getElementById('pcdMode').value;
+    ctxMap.fillStyle = pcdMode === 'free' ? '#ffffff' : '#cdcdcd';
+    ctxMap.fillRect(0, 0, w, h);
+
+    // Ray Casting：只在用户明确给出单一传感器原点时使用。
+    // 对多帧累计点云，必须有每帧 pose / sensor origin 才能正确清空自由空间。
+    if(pcdMode === 'raycast') {
+        const sx = parseFloat(document.getElementById('rayOriginX').value);
+        const sy = parseFloat(document.getElementById('rayOriginY').value);
+        const scol = Math.floor((sx - minX) / res);
+        const srow = Math.floor((maxY - sy) / res);
+        if(scol >= 0 && scol < w && srow >= 0 && srow < h) {
+            ctxMap.strokeStyle = '#ffffff';
+            ctxMap.lineWidth = 1;
+            for(let i of validIndices) {
+                const col = Math.floor((pos.getX(i) - minX) / res);
+                const row = Math.floor((maxY - pos.getY(i)) / res);
+                if(col >=0 && col < w && row >= 0 && row < h) {
+                    ctxMap.beginPath();
+                    ctxMap.moveTo(scol + 0.5, srow + 0.5);
+                    ctxMap.lineTo(col + 0.5, row + 0.5);
+                    ctxMap.stroke();
+                }
+            }
+        }
+    }
+
+    // 终点统一标为 occupied，避免 ray clearing 把障碍端点覆盖掉。
+    ctxMap.fillStyle = '#000000';
+    for(let i of validIndices) {
+        const x = pos.getX(i);
+        const y = pos.getY(i);
+        const col = Math.floor((x - minX) / res);
+        const row = Math.floor((maxY - y) / res);
+        if(col >=0 && col < w && row >= 0 && row < h) ctxMap.fillRect(col, row, 1, 1);
+    }
+
+    resetView();
+    renderUI();
+    updateMapDiagnostic();
+}
+
+// 现有地图加载
+window.loadExistingMap = async () => {
+    const fy = document.getElementById('yamlFile').files[0];
+    const fp = document.getElementById('pgmFile').files[0];
+    if(!fy || !fp) return alert("请同时选择 .yaml 和图片文件");
+    
+    // 解析 YAML
+    const txt = await fy.text();
+    state.yamlText = txt;
+    const imageMatch = txt.match(/(^|\n)\s*image\s*:\s*([^\r\n#]+)/);
+    const modeMatch = txt.match(/(^|\n)\s*mode\s*:\s*([^\r\n#]+)/);
+    const negateMatch = txt.match(/(^|\n)\s*negate\s*:\s*([^\r\n#]+)/);
+    const occMatch = txt.match(/occupied_thresh\s*:\s*([\d\.]+)/);
+    const freeMatch = txt.match(/free_thresh\s*:\s*([\d\.]+)/);
+
+    if(imageMatch) state.exportImage = imageMatch[2].trim().replace(/^['"]|['"]$/g, '');
+    else state.exportImage = fp.name;
+    const resMatch = txt.match(/resolution\s*:\s*([-+\deE.]+)/);
+    const origin = parseYamlOrigin(txt);
+
+    if(resMatch) state.resolution = parseFloat(resMatch[1]);
+    if(origin) {
+        state.originX = origin[0];
+        state.originY = origin[1];
+        state.originYaw = origin[2];
+    }
+    if(modeMatch) state.exportMode = modeMatch[2].trim().replace(/^['"]|['"]$/g, '');
+    if(negateMatch) state.exportNegate = parseInt(negateMatch[2], 10);
+    if(occMatch) state.exportOccupied = parseFloat(occMatch[1]);
+    if(freeMatch) state.exportFree = parseFloat(freeMatch[1]);
+    
+    syncGlobalInputs();
+    syncExportInputs();
+    
+    // 解析图片
+    if(fp.name.endsWith('.pgm')) {
+        const buf = await fp.arrayBuffer();
+        parsePGM(buf);
+    } else {
+        const img = new Image();
+        img.onload = () => {
+            resizeCanvas(img.width, img.height);
+            ctxMap.drawImage(img, 0, 0);
+            resetView();
+            renderUI();
+            updateMapDiagnostic();
+        };
+        img.src = URL.createObjectURL(fp);
+    }
+};
+
+function parsePGM(buffer) {
+    const view = new DataView(buffer);
+    let offset = 0;
+    function next() {
+        let t = "";
+        let isComm = false;
+        while(offset < buffer.byteLength) {
+            const c = String.fromCharCode(view.getUint8(offset++));
+            if(c === '#') isComm = true;
+            if(c === '\n') isComm = false;
+            if(isComm) continue;
+            if(/\s/.test(c)) { if(t.length > 0) return t; }
+            else t += c;
+        }
+        return null;
+    }
+    
+    const type = next();
+    if(type !== 'P5' && type !== 'P2') return alert("不支持的 PGM 格式");
+    const w = parseInt(next());
+    const h = parseInt(next());
+    const max = parseInt(next());
+    
+    resizeCanvas(w, h);
+    const imgData = ctxMap.createImageData(w, h);
+    const d = imgData.data;
+    
+    for(let i=0; i<w*h; i++) {
+        let val;
+        if(type === 'P5') val = view.getUint8(offset++); // Binary
+        else val = parseInt(next()); // ASCII
+        
+        d[i*4] = val; d[i*4+1] = val; d[i*4+2] = val; d[i*4+3] = 255;
+    }
+    ctxMap.putImageData(imgData, 0, 0);
+    resetView();
+    renderUI();
+    updateMapDiagnostic();
+}
+
+// 绘画逻辑
+const MAX_HISTORY = 25; // 最多保留的撤销/重做步数
+
+// 工具 → ROS 地图灰度：补墙=0（黑/occupied），擦除=255（白/free），未知=205
+function paintColorFor(tool) {
+    if(tool === 'draw') return '#000';
+    if(tool === 'erase') return '#fff';
+    return '#cdcdcd';
+}
+
+// 一次编辑前快照画布（撤销栈），并清空重做栈
+function pushMapSnapshot() {
+    state.history.push(ctxMap.getImageData(0, 0, state.width, state.height));
+    if(state.history.length > MAX_HISTORY) state.history.shift();
+    state.redoHistory = [];
+}
+
+function paintBrushAt(x, y) {
+    const sz = parseInt(document.getElementById('brushSize').value);
+    ctxMap.fillStyle = paintColorFor(state.editorTool);
+    ctxMap.fillRect(x - sz/2, y - sz/2, sz, sz);
+}
+
+// 一次笔画的起点：快照 + 落笔
+function paintStrokeStart(pos) {
+    pushMapSnapshot();
+    state.strokeActive = true;
+    state.lastPaintPos = null;
+    paintStrokePoint(pos);
+}
+
+// 与上一点之间用 Bresenham 补点，快速拖动不会断线
+function paintStrokePoint(pos) {
+    const cx = Math.round(pos.x), cy = Math.round(pos.y);
+    const last = state.lastPaintPos;
+    if(!last) {
+        paintBrushAt(pos.x, pos.y);
+    } else {
+        let x0 = last.x, y0 = last.y;
+        const dx = Math.abs(cx - x0), dy = Math.abs(cy - y0);
+        const sx = x0 < cx ? 1 : -1, sy = y0 < cy ? 1 : -1;
+        let err = dx - dy;
+        while(true) {
+            paintBrushAt(x0, y0);
+            if(x0 === cx && y0 === cy) break;
+            const e2 = 2 * err;
+            if(e2 > -dy) { err -= dy; x0 += sx; }
+            if(e2 <  dx) { err += dx; y0 += sy; }
+        }
+    }
+    state.lastPaintPos = {x: cx, y: cy};
+}
+
+window.undoEdit = () => {
+    if(state.history.length === 0) return;
+    const snap = state.history[state.history.length - 1];
+    if(snap.width !== state.width || snap.height !== state.height) { clearHistory(); return; }
+    state.redoHistory.push(ctxMap.getImageData(0, 0, state.width, state.height));
+    if(state.redoHistory.length > MAX_HISTORY) state.redoHistory.shift();
+    state.history.pop();
+    ctxMap.putImageData(snap, 0, 0);
+    updateMapDiagnostic();
+};
+
+window.redoEdit = () => {
+    if(state.redoHistory.length === 0) return;
+    const snap = state.redoHistory[state.redoHistory.length - 1];
+    if(snap.width !== state.width || snap.height !== state.height) { clearHistory(); return; }
+    state.history.push(ctxMap.getImageData(0, 0, state.width, state.height));
+    if(state.history.length > MAX_HISTORY) state.history.shift();
+    state.redoHistory.pop();
+    ctxMap.putImageData(snap, 0, 0);
+    updateMapDiagnostic();
+};
+
+window.clearHistory = () => { state.history = []; state.redoHistory = []; };
+
+// ==========================================
+// 4.5 形状工具（区域 / 多边形 / 连线）
+// ==========================================
+
+// 凸包（Graham Scan）：多边形打点无需关心顺序
+function convexHull(pts) {
+    const p = pts.slice().sort((a, b) => a.x - b.x || a.y - b.y);
+    const cross = (o, a, b) => (a.x-o.x)*(b.y-o.y) - (a.y-o.y)*(b.x-o.x);
+    const lower = [], upper = [];
+    for(const pt of p) {
+        while(lower.length >= 2 && cross(lower[lower.length-2], lower[lower.length-1], pt) <= 0) lower.pop();
+        lower.push(pt);
+    }
+    for(let i = p.length-1; i >= 0; i--) {
+        const pt = p[i];
+        while(upper.length >= 2 && cross(upper[upper.length-2], upper[upper.length-1], pt) <= 0) upper.pop();
+        upper.push(pt);
+    }
+    upper.pop(); lower.pop();
+    return lower.concat(upper);
+}
+
+// 多边形/连线打点状态 → 侧栏确认区
+function updateShapeCommit() {
+    const t = state.editorTool;
+    const show = (t === 'poly' || t === 'line');
+    const box = document.getElementById('shape-commit');
+    if(box) box.style.display = show ? 'block' : 'none';
+    if(!show) return;
+    const n = t === 'poly' ? state.shape.polyPoints.length : state.shape.linePoints.length;
+    const hint = document.getElementById('shape-hint');
+    if(hint) hint.textContent = t === 'poly'
+        ? `已打 ${n} 个点（≥3 个可生成区域，自动取凸包）`
+        : `已打 ${n}/2 个点（生成黑色障碍线，宽度=笔刷）`;
+}
+
+window.cancelShape = () => {
+    state.shape.polyPoints = [];
+    state.shape.linePoints = [];
+    updateShapeCommit();
+    renderUI();
+};
+
+window.commitShape = () => {
+    const t = state.editorTool;
+    if(t === 'poly') {
+        if(state.shape.polyPoints.length < 3) return;
+        const hull = convexHull(state.shape.polyPoints);
+        state.shape.polyPoints = [];
+        updateShapeCommit();
+        showPendingRegion(hull); // 弹出“填障碍/填空闲/填未知”选择
+        return;
+    }
+    if(t === 'line') {
+        if(state.shape.linePoints.length < 2) return;
+        pushMapSnapshot();
+        const [a, b] = state.shape.linePoints;
+        const sz = parseInt(document.getElementById('brushSize').value);
+        ctxMap.save();
+        ctxMap.strokeStyle = '#000'; // 连线用于补墙，固定为障碍
+        ctxMap.lineWidth = sz;
+        ctxMap.lineCap = 'round';
+        ctxMap.beginPath();
+        ctxMap.moveTo(a.x, a.y);
+        ctxMap.lineTo(b.x, b.y);
+        ctxMap.stroke();
+        ctxMap.restore();
+        state.shape.linePoints = [];
+        updateShapeCommit();
+        updateMapDiagnostic();
+        renderUI();
+    }
+};
+
+// 待确认区域：浮动面板定位到区域形心的屏幕位置
+function showPendingRegion(pts) {
+    state.shape.pending = pts;
+    const panel = document.getElementById('region-actions');
+    const cx = pts.reduce((a, p) => a + p.x, 0) / pts.length;
+    const cy = pts.reduce((a, p) => a + p.y, 0) / pts.length;
+    panel.style.left = (state.panX + cx * state.scale + 12) + 'px';
+    panel.style.top = (state.panY + cy * state.scale - 10) + 'px';
+    panel.style.display = 'flex';
+    renderUI();
+}
+
+window.hidePendingRegion = () => {
+    state.shape.pending = null;
+    document.getElementById('region-actions').style.display = 'none';
+    renderUI();
+};
+
+window.applyPendingFill = (kind) => {
+    const pts = state.shape.pending;
+    if(!pts || pts.length < 3) { hidePendingRegion(); return; }
+    pushMapSnapshot();
+    ctxMap.save();
+    ctxMap.beginPath();
+    pts.forEach((p, i) => { if(i === 0) ctxMap.moveTo(p.x, p.y); else ctxMap.lineTo(p.x, p.y); });
+    ctxMap.closePath();
+    ctxMap.fillStyle = paintColorFor(kind); // 'draw'/'erase'/'unknown' 复用同一套灰度
+    ctxMap.fill();
+    ctxMap.restore();
+    hidePendingRegion();
+    updateMapDiagnostic();
+};
+
+// 键盘快捷键：Ctrl+Z 撤销 / Ctrl+Y 或 Ctrl+Shift+Z 重做（输入框聚焦时不触发）
+window.addEventListener('keydown', e => {
+    const tag = (e.target && e.target.tagName) || '';
+    if(tag === 'INPUT' || tag === 'TEXTAREA') return;
+    const mod = e.ctrlKey || e.metaKey;
+    const k = (e.key || '').toLowerCase();
+    if(mod && !e.shiftKey && k === 'z') { e.preventDefault(); undoEdit(); }
+    else if(mod && k === 'y') { e.preventDefault(); redoEdit(); }
+    else if(mod && e.shiftKey && k === 'z') { e.preventDefault(); redoEdit(); }
+    // 工具快捷键：Q 移动 / W 补墙 / E 擦除 / U 未知 / R 区域 / P 多边形 / L 连线
+    const toolMap = { q:'pan', w:'draw', e:'erase', u:'unknown', r:'rect', p:'poly', l:'line' };
+    if(!mod && toolMap[k]) { setEditorTool(toolMap[k]); return; }
+    if(!mod && k === 'enter' && (state.editorTool === 'poly' || state.editorTool === 'line')) commitShape();
+    if(k === 'escape') { cancelShape(); hidePendingRegion(); }
+});
+
+// ==========================================
+// 5. 规划器逻辑 (Waypoints)
+// ==========================================
+
+function updateWaypointCount() {
+    document.getElementById('wp-count').innerText = state.waypoints.length;
+    renderWaypointList();
+}
+
+window.undoWaypoint = () => {
+    state.waypoints.pop();
+    updateWaypointCount();
+    generateWaypointOutput();
+    renderUI();
+};
+
+window.clearWaypoints = () => {
+    if(confirm('清空所有航点？')) {
+        state.waypoints = [];
+        updateWaypointCount();
+        generateWaypointOutput();
+        renderUI();
+    }
+};
+
+window.generateWaypointOutput = () => {
+    if(state.waypoints.length === 0) {
+        document.getElementById('wp-output').value = "";
+        return;
+    }
+    
+    let txt = "patrol_sender:\n  ros__parameters:\n";
+    txt += `    num_waypoints: ${state.waypoints.length}\n`;
+    txt += `    # 格式: [x, y, yaw(弧度)]\n`;
+    
+    state.waypoints.forEach((wp, i) => {
+        txt += `    waypoint_${i}: [${wp.wx.toFixed(2)}, ${wp.wy.toFixed(2)}, ${wp.rosYaw.toFixed(2)}]  # 点${i}\n`;
+    });
+    
+    document.getElementById('wp-output').value = txt;
+};
+
+window.copyWaypoints = () => {
+    document.getElementById('wp-output').select();
+    document.execCommand("copy");
+    alert("已复制到剪贴板");
+};
+
+// ==========================================
+// 5.5 航点下发到船端（本机桥 + ssh）
+//     链路：本页 fetch → waypoint_dispatch_bridge.py（本机）
+//           → map 坐标转 WGS84 → ssh 船端 → mission_bridge → Nav2
+// ==========================================
+let dispTimer = null;
+let dispDatumAuto = { lat: null, lon: null };   // 上次自动填充值，用于避免覆盖手工输入
+let dispBoatAnchors = {};   // 从船端 map.yaml 读回的 ref_gnss_* 锚点（包围盒校验兜底）
+
+function dispEsc(s) {
+    return String(s === null || s === undefined ? '' : s)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function dispEl(id) { return document.getElementById(id); }
+
+function dispSelected() {
+    return state.waypoints.filter(wp => wp.sel !== false);
+}
+
+// ---- datum / 锚点：从加载的 map.yaml 里读 ref_gnss_* ----
+function dispParseAnchors() {
+    const txt = state.yamlText || '';
+    const out = {};
+    const re = /(?:^|\n)\s*(ref_gnss(?:_\d\d)?)\s*:\s*(?:\[\s*([-+\deE.]+)\s*,\s*([-+\deE.]+)\s*\]|\r?\n\s*-\s*([-+\deE.]+)\s*\r?\n\s*-\s*([-+\deE.]+))/g;
+    let m;
+    while ((m = re.exec(txt)) !== null) {
+        const lon = (m[2] !== undefined ? m[2] : m[4]);
+        const lat = (m[3] !== undefined ? m[3] : m[5]);
+        if (lon === undefined || lat === undefined) continue;
+        out[m[1]] = [parseFloat(lon), parseFloat(lat)];
+    }
+    return out;
+}
+
+function dispAllAnchors() {
+    // 浏览器加载的 map.yaml 优先；没加载时用船端读回的锚点（包围盒校验不空转）
+    const local = dispParseAnchors();
+    return Object.keys(local).length ? local : dispBoatAnchors;
+}
+
+function dispCurrentDatum() {
+    const lat = parseFloat(dispEl('dispDatumLat').value);
+    const lon = parseFloat(dispEl('dispDatumLon').value);
+    if (!isFinite(lat) || !isFinite(lon) || (lat === 0 && lon === 0)) return null;
+    return { lat: lat, lon: lon };
+}
+
+function dispSyncDatum(force) {
+    const anchors = dispParseAnchors();
+    const pick = anchors['ref_gnss_10'] || anchors['ref_gnss'];
+    if (!pick) return false;
+    const latEl = dispEl('dispDatumLat'), lonEl = dispEl('dispDatumLon');
+    const shown = parseFloat(latEl.value), shownLon = parseFloat(lonEl.value);
+    const untouched = !isFinite(shown) || !isFinite(shownLon) ||
+        (shown === dispDatumAuto.lat && shownLon === dispDatumAuto.lon);
+    if (force || untouched) {
+        latEl.value = pick[1];
+        lonEl.value = pick[0];
+        dispDatumAuto = { lat: pick[1], lon: pick[0] };
+    }
+    return true;
+}
+
+// ---- 航点列表 ----
+function renderWaypointList() {
+    const box = dispEl('wp-list');
+    if (!box) return;
+    if (!state.waypoints.length) {
+        box.innerHTML = '<div class="wp-empty">还没有航点：在地图上左键点住并拖出朝向</div>';
+        return;
+    }
+    const datum = dispCurrentDatum();
+    let html = '';
+    state.waypoints.forEach((wp, i) => {
+        let ll = '';
+        if (datum) {
+            const p = mapXYToLatLon(wp.wx, wp.wy, datum);
+            ll = `${p.lat.toFixed(7)}, ${p.lon.toFixed(7)}`;
+        }
+        html += `<div class="wp-row">
+            <input type="checkbox" ${wp.sel !== false ? 'checked' : ''} onchange="wpToggle(${i}, this.checked)">
+            <span class="wp-idx">${i + 1}</span>
+            <span class="wp-coord">x=${wp.wx.toFixed(1)} y=${wp.wy.toFixed(1)} yaw=${(wp.rosYaw * 180 / Math.PI).toFixed(0)}°</span>
+            <span class="wp-ll">${ll}</span>
+            <span class="wp-del" title="删除该点" onclick="wpDelete(${i})">✕</span>
+        </div>`;
+    });
+    box.innerHTML = html;
+}
+
+window.wpToggle = (i, checked) => {
+    if (state.waypoints[i]) state.waypoints[i].sel = !!checked;
+};
+
+window.wpDelete = (i) => {
+    state.waypoints.splice(i, 1);
+    updateWaypointCount();
+    generateWaypointOutput();
+    renderWaypointList();
+    renderUI();
+};
+
+window.selectAllWaypoints = (v) => {
+    state.waypoints.forEach(wp => { wp.sel = !!v; });
+    renderWaypointList();
+};
+
+// map 坐标 → WGS84（与桥/船端同一套 ENU + origin 换算）
+function mapXYToLatLon(x, y, datum) {
+    const R = 6378137.0;
+    const dx = x - state.originX, dy = y - state.originY;
+    const c = Math.cos(state.originYaw), s = Math.sin(state.originYaw);
+    const east = dx * c + dy * s;
+    const north = -dx * s + dy * c;
+    const lat = datum.lat + (north / R) * 180 / Math.PI;
+    const lon = datum.lon + (east / (R * Math.cos(datum.lat * Math.PI / 180))) * 180 / Math.PI;
+    return { lat: lat, lon: lon };
+}
+
+// ---- 与桥通信 ----
+function dispStatus(msg, ok) {
+    const el = dispEl('dispStatus');
+    el.innerHTML = msg;
+    el.className = 'status-msg' + (ok ? ' ok' : '');
+}
+
+async function dispPost(path, body, timeoutMs) {
+    const base = (dispEl('dispUrl').value || '').trim().replace(/\/+$/, '');
+    if (!base) throw new Error('没填桥接服务地址');
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs || 90000);
+    try {
+        const resp = await fetch(base + path, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body || {}),
+            signal: ctrl.signal
+        });
+        const txt = await resp.text();
+        try {
+            return JSON.parse(txt);
+        } catch (e) {
+            throw new Error('桥接服务返回非 JSON（' + resp.status + '）：' + txt.slice(0, 160));
+        }
+    } catch (e) {
+        if (e.name === 'AbortError') throw new Error('请求超时（船端无响应或 ssh 卡住）');
+        if (e instanceof TypeError) {
+            throw new Error('连不上桥接服务：请在本机执行 '
+                + 'python3 scripts/map_dispatch/waypoint_dispatch_bridge.py （或用 http://127.0.0.1:8770/ 打开本页）');
+        }
+        throw e;
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
+function dispExtractStatus(remote) {
+    const ns = remote && remote.nav_status;
+    if (!ns) return null;
+    return ns.typed || ns.json || null;
+}
+
+function dispRenderNav(remote) {
+    const st = dispExtractStatus(remote);
+    const el = dispEl('dispNav');
+    if (!st) {
+        el.innerHTML = '船端状态：读不到 /nav_status';
+        return;
+    }
+    const yawDeg = (st.pose_yaw !== undefined) ? (st.pose_yaw * 180 / Math.PI).toFixed(1) + '°' : '-';
+    el.innerHTML = [
+        `任务 <b>${dispEsc(st.task_state)}</b> / 相位 ${dispEsc(st.nav_phase)}`,
+        `航点 ${st.current_waypoint}/${st.total_waypoints}　进度 ${st.progress_percent}%　已跑 ${st.elapsed_sec}s`,
+        `定位 ${dispEsc(st.localization_overall)}（GPS fix ${st.localization_gps_fix}，odom ${st.localization_odom_hz}Hz，TF ${st.localization_tf_ok})`,
+        `船位 x=${(+st.pose_x).toFixed(2)} y=${(+st.pose_y).toFixed(2)} yaw=${yawDeg} v=${(+st.pose_v).toFixed(2)}m/s`,
+        `到点 ${st.distance_to_goal_m}m　错误码 ${dispEsc(st.last_error || '无')}`
+    ].join('<br>');
+}
+
+function dispReqBase() {
+    return {
+        host: (dispEl('dispHost').value || '').trim(),
+        mode: dispEl('dispMode').value,
+        yaw_mode: dispEl('dispYaw').value,
+        datum: dispCurrentDatum(),
+        origin: { x: state.originX, y: state.originY, yaw: state.originYaw },
+        anchors: dispAllAnchors(),
+        mission_id: 'maptool_' + new Date().toISOString().replace(/[-:T]/g, '').slice(0, 15)
+    };
+}
+
+window.dispFetchDatum = async (quiet) => {
+    // 从船端 map.yaml（mission_bridge 实际加载的那份）读 datum + 锚点；
+    // 不覆盖手工填过的值（quiet=检查船端后的自动调用，不动状态栏）
+    try {
+        if (!quiet) dispStatus('正在从船端读 map.yaml datum…', false);
+        const res = await dispPost('/api/datum', { host: dispEl('dispHost').value.trim() }, 40000);
+        const rm = res.remote || {};
+        if (!res.ok || !rm.ok || !rm.datum) {
+            if (!quiet) dispStatus('❌ 读船端 datum 失败：' + dispEsc(res.error || rm.error || '未知'), false);
+            return false;
+        }
+        dispBoatAnchors = rm.anchors || {};
+        const latEl = dispEl('dispDatumLat'), lonEl = dispEl('dispDatumLon');
+        const shown = parseFloat(latEl.value), shownLon = parseFloat(lonEl.value);
+        const untouched = !isFinite(shown) || !isFinite(shownLon) ||
+            (shown === dispDatumAuto.lat && shownLon === dispDatumAuto.lon);
+        if (untouched) {
+            latEl.value = rm.datum.lat;
+            lonEl.value = rm.datum.lon;
+            dispDatumAuto = { lat: rm.datum.lat, lon: rm.datum.lon };
+        }
+        if (!quiet) dispStatus('✅ 船端 datum：' + rm.datum.lat.toFixed(8) + ', ' + rm.datum.lon.toFixed(8)
+            + '<br>来源 ' + dispEsc(rm.path || '') + '<br>锚点 '
+            + Object.keys(dispBoatAnchors).length + ' 个（包围盒校验用）', true);
+        return true;
+    } catch (e) {
+        if (!quiet) dispStatus('❌ ' + dispEsc(e.message), false);
+        return false;
+    }
+};
+
+window.dispCheck = async () => {
+    dispSyncDatum(false);
+    dispStatus('正在 ssh 船端自检…（约 5s）', false);
+    try {
+        const res = await dispPost('/api/check', { host: dispEl('dispHost').value.trim() }, 90000);
+        const rm = res.remote || {};
+        if (!res.ok) {
+            dispStatus('❌ ' + dispEsc(res.error || (rm && rm.error) || '自检失败')
+                + (rm && rm.hint ? '<br>' + dispEsc(rm.hint) : ''), false);
+            return;
+        }
+        const svc = rm.services || {};
+        dispStatus('✅ 船端 ' + dispEsc(rm.hostname) + ' 可达　RMW=' + dispEsc(rm.rmw)
+            + '　domain=' + dispEsc((rm.env || {}).ROS_DOMAIN_ID)
+            + '<br>send_waypoints=' + (svc['/mission_bridge/send_waypoints'] ? '✅' : '❌')
+            + '　set_pause=' + (svc['/mission_bridge/set_pause'] ? '✅' : '❌')
+            + '　cancel=' + (svc['/mission_bridge/cancel_mission'] ? '✅' : '❌')
+            + '<br>耗时 ' + res.elapsed_sec + 's', true);
+        dispRenderNav(rm);
+        dispFetchDatum(true);   // 顺手把船端 map.yaml 的 datum/锚点读回来（不覆盖手工输入）
+    } catch (e) {
+        dispStatus('❌ ' + dispEsc(e.message), false);
+    }
+};
+
+window.dispConvert = async () => {
+    dispSyncDatum(false);
+    const wps = dispSelected();
+    if (!wps.length) return alert('没有选中航点');
+    if (!dispCurrentDatum()) return alert('datum 没设置：加载带 ref_gnss_10 的 map.yaml，或手工填 datum 经纬度');
+    const req = dispReqBase();
+    req.waypoints = wps.map(wp => ({ x: wp.wx, y: wp.wy, yaw: wp.rosYaw }));
+    try {
+        const res = await dispPost('/api/convert', req, 20000);
+        if (!res.ok) { dispStatus('❌ ' + dispEsc(res.error), false); return; }
+        const txt = res.latlon.map((p, i) =>
+            `${i + 1}. (${p.x.toFixed(1)}, ${p.y.toFixed(1)}) → ${p.lat.toFixed(7)}, ${p.lon.toFixed(7)}`).join('<br>');
+        dispStatus('🧮 只换算（未下发）：<br>' + txt, true);
+    } catch (e) {
+        dispStatus('❌ ' + dispEsc(e.message), false);
+    }
+};
+
+window.dispSend = async () => {
+    dispSyncDatum(false);
+    const wps = dispSelected();
+    if (!wps.length) return alert('没有选中航点：在列表里勾选要下发的点');
+    if (!dispCurrentDatum()) return alert('datum 没设置：加载带 ref_gnss_10 的 map.yaml，或手工填 datum 经纬度');
+
+    const host = (dispEl('dispHost').value || '').trim();
+    const modeTxt = dispEl('dispMode').value === 'service' ? '服务 send_waypoints（立即执行）' : '话题 /waypoint（≈0.45s 后自动开始）';
+    const list = wps.map((wp, i) =>
+        `${i + 1}. x=${wp.wx.toFixed(1)} y=${wp.wy.toFixed(1)} yaw=${(wp.rosYaw * 180 / Math.PI).toFixed(0)}°`).join('\n');
+    if (!confirm(`确认把 ${wps.length} 个航点下发到船端「${host}」？\n方式：${modeTxt}\n船会按顺序开始跑这条航线。\n\n${list}`)) return;
+
+    const req = dispReqBase();
+    req.waypoints = wps.map(wp => ({ x: wp.wx, y: wp.wy, yaw: wp.rosYaw }));
+    dispStatus('正在下发…（ssh 船端执行中）', false);
+    try {
+        const res = await dispPost('/api/dispatch', req, 120000);
+        const rm = res.remote || {};
+        if (res.ok) {
+            dispStatus(`✅ 已下发 ${res.count} 个航点（${dispEsc(res.mode)}）　mission_id=${dispEsc(res.mission_id)}`
+                + '<br>船端：' + dispEsc(rm.message || 'accepted')
+                + '<br>耗时 ' + res.elapsed_sec + 's', true);
+            window.dispRefreshNav();
+        } else {
+            dispStatus('❌ 下发失败：' + dispEsc(res.error || rm.message || '未知原因'), false);
+        }
+    } catch (e) {
+        dispStatus('❌ ' + dispEsc(e.message), false);
+    }
+};
+
+window.dispPause = async (pause) => {
+    try {
+        dispStatus(pause ? '正在暂停…' : '正在继续…', false);
+        const res = await dispPost('/api/pause', { host: dispEl('dispHost').value.trim(), pause: !!pause }, 60000);
+        const rm = res.remote || {};
+        dispStatus((res.ok ? '✅ ' : '❌ ') + dispEsc(rm.message || res.error || ''), !!res.ok);
+        window.dispRefreshNav();
+    } catch (e) {
+        dispStatus('❌ ' + dispEsc(e.message), false);
+    }
+};
+
+window.dispCancel = async () => {
+    if (!confirm('确认取消船端当前任务？')) return;
+    try {
+        dispStatus('正在取消…', false);
+        const res = await dispPost('/api/cancel', { host: dispEl('dispHost').value.trim() }, 60000);
+        const rm = res.remote || {};
+        dispStatus((res.ok ? '✅ ' : '❌ ') + dispEsc(rm.message || res.error || ''), !!res.ok);
+        window.dispRefreshNav();
+    } catch (e) {
+        dispStatus('❌ ' + dispEsc(e.message), false);
+    }
+};
+
+window.dispRefreshNav = async () => {
+    try {
+        const res = await dispPost('/api/status', { host: dispEl('dispHost').value.trim() }, 60000);
+        if (!res.ok) { dispEl('dispNav').innerHTML = '船端状态：' + dispEsc(res.error || '读取失败'); return; }
+        dispRenderNav(res.remote);
+    } catch (e) {
+        dispEl('dispNav').innerHTML = '船端状态：' + dispEsc(e.message);
+    }
+};
+
+window.dispAutoToggle = () => {
+    if (dispTimer) { clearInterval(dispTimer); dispTimer = null; }
+    if (dispEl('dispAuto').checked) {
+        window.dispRefreshNav();
+        dispTimer = setInterval(() => window.dispRefreshNav(), 10000);
+    }
+};
+
+// ==========================================
+// 6. 渲染 UI 层 (Overlay)
+// ==========================================
+function renderUI(currentMousePos = null) {
+    const dpr = window.devicePixelRatio || 1;
+    // 先按单位矩阵清空整张 UI 画布，再施加视图变换（平移+缩放）；
+    // 之后所有绘制仍使用地图像素坐标，线宽按 1/scale 折算即为恒定屏幕宽度。
+    ctxUI.setTransform(1, 0, 0, 1, 0, 0);
+    ctxUI.clearRect(0, 0, cvsUI.width, cvsUI.height);
+    ctxUI.setTransform(dpr * state.scale, 0, 0, dpr * state.scale, dpr * state.panX, dpr * state.panY);
+
+    // 0. 像素网格（勾选且放得足够大时，只画可视范围，避免密集线条拖慢渲染）
+    const gridEl = document.getElementById('chkGrid');
+    if(state.mode === 'editor' && gridEl && gridEl.checked && state.scale >= 3) {
+        const xMin = Math.max(0, Math.floor(-state.panX / state.scale));
+        const xMax = Math.min(state.width, Math.ceil((viewport.clientWidth - state.panX) / state.scale));
+        const yMin = Math.max(0, Math.floor(-state.panY / state.scale));
+        const yMax = Math.min(state.height, Math.ceil((viewport.clientHeight - state.panY) / state.scale));
+        ctxUI.beginPath();
+        for(let gx = xMin; gx <= xMax; gx++) { ctxUI.moveTo(gx, yMin); ctxUI.lineTo(gx, yMax); }
+        for(let gy = yMin; gy <= yMax; gy++) { ctxUI.moveTo(xMin, gy); ctxUI.lineTo(xMax, gy); }
+        ctxUI.strokeStyle = 'rgba(100,100,100,0.5)';
+        ctxUI.lineWidth = 1 / state.scale;
+        ctxUI.stroke();
+    }
+    
+    // 1. 局部代价图叠加（odom 系，经 map→odom 变换贴到底图上，位于路径/船标之下）
+    drawCostmapOverlay();
+
+    // 2. TF 坐标轴（map 原点 + 船体 base_link），大小可调
+    if(document.getElementById('showTF')?.checked) drawTFAxes();
+    
+    // 2. 绘制航点
+    state.waypoints.forEach((wp, i) => {
+        drawArrow(wp.mapX, wp.mapY, wp.pixelYaw, i, '#0f0');
+    });
+    
+    // 3. 绘制正在拖拽的航点
+    if(state.mode === 'planner' && plannerStart && currentMousePos) {
+        const dx = currentMousePos.x - plannerStart.x;
+        const dy = currentMousePos.y - plannerStart.y;
+        const angle = Math.atan2(dy, dx);
+        drawArrow(plannerStart.x, plannerStart.y, angle, state.waypoints.length, '#ff0');
+    }
+
+    // 4. Nav2 实时全局路径
+    const showPlanEl = document.getElementById('showPlan');
+    if(showPlanEl && showPlanEl.checked && state.ros.plan.length > 1) {
+        ctxUI.save();
+        ctxUI.beginPath();
+        state.ros.plan.forEach((pose, i) => {
+            const p = worldToMapPixel(pose.x, pose.y);
+            if(i === 0) ctxUI.moveTo(p.x, p.y); else ctxUI.lineTo(p.x, p.y);
+        });
+        ctxUI.strokeStyle = '#00bfff';
+        ctxUI.lineWidth = Math.max(2, 3 / Math.max(state.scale, 0.1));
+        ctxUI.stroke();
+        ctxUI.restore();
+    }
+
+    // 5. Nav2 实时船位
+    const showBoatEl = document.getElementById('showBoat');
+    if(showBoatEl && showBoatEl.checked && state.ros.boatPose) {
+        const b = state.ros.boatPose;
+        const p = worldToMapPixel(b.x, b.y);
+        const a = worldYawToPixelYaw(b.yaw);
+        drawBoatMarker(p.x, p.y, a);
+    }
+    // 5.1 船体 footprint（尺寸方框）
+    drawFootprint();
+
+    // 6. 形状工具预览（区域框选 / 多边形打点 / 连线 / 待确认区域 / 笔刷圈）
+    const sh = state.shape;
+    const lwUI = Math.max(1, 1.5 / Math.max(state.scale, 0.1));
+    if(state.mode === 'editor' && state.editorTool === 'rect' && sh.rectActive) {
+        const x = Math.min(sh.rectX0, sh.rectX1), y = Math.min(sh.rectY0, sh.rectY1);
+        const w = Math.abs(sh.rectX1 - sh.rectX0), h = Math.abs(sh.rectY1 - sh.rectY0);
+        ctxUI.fillStyle = 'rgba(255,200,0,0.15)';
+        ctxUI.fillRect(x, y, w, h);
+        ctxUI.strokeStyle = 'rgba(255,200,0,0.9)';
+        ctxUI.lineWidth = lwUI;
+        ctxUI.strokeRect(x, y, w, h);
+    }
+    if(sh.polyPoints.length > 0) {
+        const pts = sh.polyPoints.length >= 3 ? convexHull(sh.polyPoints) : sh.polyPoints;
+        ctxUI.beginPath();
+        ctxUI.moveTo(pts[0].x, pts[0].y);
+        for(let i = 1; i < pts.length; i++) ctxUI.lineTo(pts[i].x, pts[i].y);
+        if(pts.length >= 3) ctxUI.closePath();
+        ctxUI.strokeStyle = 'rgba(255,255,255,0.8)';
+        ctxUI.lineWidth = lwUI;
+        ctxUI.stroke();
+        sh.polyPoints.forEach(p => {
+            ctxUI.beginPath();
+            ctxUI.arc(p.x, p.y, 3 / Math.max(state.scale, 0.1), 0, Math.PI * 2);
+            ctxUI.fillStyle = '#4af';
+            ctxUI.fill();
+        });
+    }
+    if(sh.linePoints.length > 0) {
+        sh.linePoints.forEach((p, i) => {
+            ctxUI.beginPath();
+            ctxUI.arc(p.x, p.y, 4 / Math.max(state.scale, 0.1), 0, Math.PI * 2);
+            ctxUI.fillStyle = i === 0 ? '#4af' : '#f44';
+            ctxUI.fill();
+        });
+        if(sh.linePoints.length === 2) {
+            const sz = parseInt(document.getElementById('brushSize').value);
+            ctxUI.beginPath();
+            ctxUI.moveTo(sh.linePoints[0].x, sh.linePoints[0].y);
+            ctxUI.lineTo(sh.linePoints[1].x, sh.linePoints[1].y);
+            ctxUI.strokeStyle = 'rgba(255,80,80,0.9)';
+            ctxUI.lineWidth = sz; // 预览宽度与实际落笔一致
+            ctxUI.lineCap = 'round';
+            ctxUI.stroke();
+        }
+    }
+    if(sh.pending && sh.pending.length >= 3) {
+        ctxUI.beginPath();
+        ctxUI.moveTo(sh.pending[0].x, sh.pending[0].y);
+        for(let i = 1; i < sh.pending.length; i++) ctxUI.lineTo(sh.pending[i].x, sh.pending[i].y);
+        ctxUI.closePath();
+        ctxUI.fillStyle = 'rgba(255,200,0,0.12)';
+        ctxUI.fill();
+        ctxUI.strokeStyle = 'rgba(255,200,0,0.95)';
+        ctxUI.lineWidth = lwUI;
+        ctxUI.stroke();
+    }
+    // 笔刷预览圈（仅涂抹类工具）
+    if(state.mode === 'editor' && ['draw','erase','unknown'].includes(state.editorTool) && state.mouseMapPos) {
+        const sz = parseInt(document.getElementById('brushSize').value);
+        ctxUI.beginPath();
+        ctxUI.arc(state.mouseMapPos.x, state.mouseMapPos.y, Math.max(sz / 2, 0.5), 0, Math.PI * 2);
+        ctxUI.strokeStyle = 'rgba(0,255,100,0.85)';
+        ctxUI.lineWidth = lwUI;
+        ctxUI.stroke();
+    }
+}
+// module 脚本中的函数默认不是全局的，挂到 window 供 HTML 内联 onchange 调用
+window.renderUI = renderUI;
+
+function drawOriginAxis() {
+    // 显示 world/map 坐标系的 (0,0) 以及 +X/+Y 方向；支持 origin yaw。
+    const o = worldToMapPixel(0, 0);
+    const x1 = worldToMapPixel(state.resolution * 50, 0);
+    const y1 = worldToMapPixel(0, state.resolution * 50);
+    if(!o || !x1 || !y1) return;
+
+    ctxUI.lineWidth = 3;
+    ctxUI.beginPath(); ctxUI.strokeStyle = 'red';
+    ctxUI.moveTo(o.x, o.y); ctxUI.lineTo(x1.x, x1.y); ctxUI.stroke();
+
+    ctxUI.beginPath(); ctxUI.strokeStyle = '#0f0';
+    ctxUI.moveTo(o.x, o.y); ctxUI.lineTo(y1.x, y1.y); ctxUI.stroke();
+
+    ctxUI.fillStyle = 'yellow';
+    const z0 = Math.max(state.scale, 0.1);
+    ctxUI.font = `${14 / z0}px Arial`;
+    ctxUI.fillText('(0,0)', o.x + 5 / z0, o.y - 5 / z0);
+}
+
+function drawArrow(x, y, angle, label, color) {
+    const len = 40;
+    ctxUI.save();
+    ctxUI.translate(x, y);
+    ctxUI.rotate(angle);
+
+    ctxUI.beginPath();
+    ctxUI.moveTo(0, 0); ctxUI.lineTo(len, 0);
+    ctxUI.lineTo(len-10, -5); ctxUI.lineTo(len-10, 5); ctxUI.lineTo(len, 0);
+
+    ctxUI.strokeStyle = color; ctxUI.lineWidth = 2; ctxUI.stroke();
+    ctxUI.fillStyle = color; ctxUI.fill();
+    ctxUI.beginPath(); ctxUI.arc(0,0, 4, 0, Math.PI*2); ctxUI.fill();
+    ctxUI.restore();
+
+    // 标签文字保持屏幕恒定大小，不随缩放放大失真
+    const zl = Math.max(state.scale, 0.1);
+    ctxUI.fillStyle = 'white';
+    ctxUI.font = `${16 / zl}px Arial`;
+    ctxUI.strokeStyle = 'black';
+    ctxUI.lineWidth = 3 / zl;
+    ctxUI.strokeText(label, x + 10 / zl, y + 10 / zl);
+    ctxUI.fillText(label, x + 10 / zl, y + 10 / zl);
+}
+
+function normalizeAngle(a) {
+    while(a > Math.PI) a -= 2 * Math.PI;
+    while(a <= -Math.PI) a += 2 * Math.PI;
+    return a;
+}
+
+// Canvas 像素 -> YAML origin 定义的地图局部米制坐标 -> world/map 坐标。
+function mapPixelToWorld(px, py) {
+    const u = px * state.resolution;
+    const v = (state.flipY ? (state.height - py) : py) * state.resolution;
+    const c = Math.cos(state.originYaw), sn = Math.sin(state.originYaw);
+    return {
+        x: state.originX + c * u - sn * v,
+        y: state.originY + sn * u + c * v
+    };
+}
+
+// world/map 坐标 -> Canvas 像素。
+function worldToMapPixel(wx, wy) {
+    const dx = wx - state.originX;
+    const dy = wy - state.originY;
+    const c = Math.cos(state.originYaw), sn = Math.sin(state.originYaw);
+    const u = c * dx + sn * dy;
+    const v = -sn * dx + c * dy;
+    return {
+        x: u / state.resolution,
+        y: state.flipY ? state.height - v / state.resolution : v / state.resolution
+    };
+}
+
+function pixelYawToWorldYaw(pixelYaw) {
+    const localYaw = state.flipY ? -pixelYaw : pixelYaw;
+    return normalizeAngle(state.originYaw + localYaw);
+}
+
+function worldYawToPixelYaw(worldYaw) {
+    const localYaw = normalizeAngle(worldYaw - state.originYaw);
+    return state.flipY ? -localYaw : localYaw;
+}
+
+function refreshWaypointPixelsFromWorld() {
+    for(const wp of state.waypoints) {
+        const p = worldToMapPixel(wp.wx, wp.wy);
+        wp.mapX = p.x;
+        wp.mapY = p.y;
+        wp.pixelYaw = worldYawToPixelYaw(wp.rosYaw);
+    }
+}
+
+function refreshWaypointWorldFromPixels() {
+    for(const wp of state.waypoints) {
+        const w = mapPixelToWorld(wp.mapX, wp.mapY);
+        wp.wx = w.x;
+        wp.wy = w.y;
+        wp.rosYaw = pixelYawToWorldYaw(wp.pixelYaw);
+    }
+}
+
+function parseYamlOrigin(yaml) {
+    // 支持 origin: [x, y, yaw]
+    let m = yaml.match(/(?:^|\n)\s*origin\s*:\s*\[\s*([-+\deE.]+)\s*,\s*([-+\deE.]+)\s*,\s*([-+\deE.]+)\s*\]/);
+    if(m) return [parseFloat(m[1]), parseFloat(m[2]), parseFloat(m[3])];
+    // 支持块序列：origin:\n  - x\n  - y\n  - yaw
+    m = yaml.match(/(?:^|\n)\s*origin\s*:\s*\r?\n\s*-\s*([-+\deE.]+)\s*\r?\n\s*-\s*([-+\deE.]+)\s*\r?\n\s*-\s*([-+\deE.]+)/);
+    if(m) return [parseFloat(m[1]), parseFloat(m[2]), parseFloat(m[3])];
+    return null;
+}
+
+function updateMapDiagnostic() {
+    const el = document.getElementById('map-diagnostic');
+    if(!el || state.width <= 0 || state.height <= 0) return;
+    const d = ctxMap.getImageData(0,0,state.width,state.height).data;
+    let occ=0, free=0, unknown=0;
+    // 按 trinary / negate=0 的常见语义做直观统计：黑=occupied，白=free，中灰=unknown。
+    for(let i=0;i<d.length;i+=4) {
+        const v=d[i];
+        if(v < 65) occ++;
+        else if(v > 240) free++;
+        else unknown++;
+    }
+    const n=occ+free+unknown || 1;
+    el.textContent = `地图诊断：Free ${(100*free/n).toFixed(1)}% / Unknown ${(100*unknown/n).toFixed(1)}% / Occupied ${(100*occ/n).toFixed(1)}%`;
+}
+
+// ==========================================
+// 7. 导出地图 (PGM/YAML)
+// ==========================================
+window.exportMapAssets = () => {
+    const w = state.width;
+    const h = state.height;
+    
+    // 1. 生成 P5 Binary PGM：体积远小于 ASCII P2。
+    const imgData = ctxMap.getImageData(0,0,w,h).data;
+    const gray = new Uint8Array(w*h);
+    for(let i=0, j=0; i<imgData.length; i+=4, j++) gray[j] = imgData[i];
+    const imageNameInput = document.getElementById('exportImage').value.trim() || 'map.pgm';
+    const actualImageName = /\.pgm$/i.test(imageNameInput) ? imageNameInput : imageNameInput + '.pgm';
+    const header = new TextEncoder().encode(`P5\n${w} ${h}\n255\n`);
+    saveBlobParts([header, gray], actualImageName, 'image/x-portable-graymap');
+    
+    // 2. 生成 YAML。
+    // 加载过原始 YAML 时只覆盖关键字段，其他字段与注释原样保留；
+    // 新生成的地图使用标准 ROS map_server 参数作为基础模板。
+    let yaml = state.yamlText !== null ? state.yamlText : `image: map.pgm
+mode: trinary
+resolution: ${state.resolution}
+origin: [${state.originX}, ${state.originY}, 0.0]
+negate: 0
+occupied_thresh: 0.65
+free_thresh: 0.196
+`;
+
+    const imageName = actualImageName;
+    const mapMode = document.getElementById('exportMode').value.trim();
+    const negate = parseInt(document.getElementById('exportNegate').value, 10);
+    const occupied = parseFloat(document.getElementById('exportOccupied').value);
+    const free = parseFloat(document.getElementById('exportFree').value);
+
+    yaml = upsertYamlValue(yaml, 'image', imageName || 'map.pgm');
+    yaml = upsertYamlValue(yaml, 'mode', mapMode || 'trinary');
+    yaml = upsertYamlValue(yaml, 'resolution', formatNumber(state.resolution));
+    yaml = upsertYamlOrigin(yaml, state.originX, state.originY, state.originYaw);
+    yaml = upsertYamlValue(yaml, 'negate', Number.isNaN(negate) ? 0 : negate);
+    yaml = upsertYamlValue(yaml, 'occupied_thresh', formatNumber(occupied));
+    yaml = upsertYamlValue(yaml, 'free_thresh', formatNumber(free));
+    if(/(^|\n)\s*width\s*:/.test(yaml)) yaml = upsertYamlValue(yaml, 'width', w);
+    if(/(^|\n)\s*height\s*:/.test(yaml)) yaml = upsertYamlValue(yaml, 'height', h);
+
+    const extra = document.getElementById('exportExtraYaml').value;
+    for(let rawLine of extra.split(/\r?\n/)) {
+        const line = rawLine.trim();
+        if(!line || line.startsWith('#')) continue;
+        const match = line.match(/^([^:]+):\s*(.*)$/);
+        if(match) yaml = upsertYamlValue(yaml, match[1].trim(), match[2].trim());
+    }
+    
+    saveFile(yaml, 'map.yaml', 'text/yaml');
+};
+
+function upsertYamlValue(yaml, key, value) {
+    const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const pattern = new RegExp(`(^|\\n)${escapedKey}[ \\t]*:[^\\n]*(?:\\n|$)`);
+    if(pattern.test(yaml)) {
+        return yaml.replace(pattern, `$1${key}: ${value}\n`);
+    }
+    return yaml.replace(/\n*$/, '\n') + `${key}: ${value}\n`;
+}
+
+function upsertYamlOrigin(yaml, x, y, yaw) {
+    const value = `origin: [${formatNumber(x)}, ${formatNumber(y)}, ${formatNumber(yaw)}]`;
+    // inline style
+    let p = /(^|\n)\s*origin\s*:\s*\[[^\n]*\](?:\n|$)/;
+    if(p.test(yaml)) return yaml.replace(p, `$1${value}\n`);
+    // block sequence style (exactly 3 values)
+    p = /(^|\n)\s*origin\s*:\s*\r?\n\s*-\s*[-+\deE.]+\s*\r?\n\s*-\s*[-+\deE.]+\s*\r?\n\s*-\s*[-+\deE.]+\s*(?:\r?\n|$)/;
+    if(p.test(yaml)) return yaml.replace(p, `$1${value}\n`);
+    return yaml.replace(/\n*$/, '\n') + value + '\n';
+}
+
+function saveBlobParts(parts, name, type) {
+    const blob = new Blob(parts, {type});
+    const a = document.createElement('a');
+    const url = URL.createObjectURL(blob);
+    a.href = url;
+    a.download = name;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function formatNumber(value) {
+    return Number.isFinite(value) ? String(value) : '0';
+}
+
+function saveFile(content, name, type) {
+    const blob = new Blob([content], {type: type});
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = name;
+    a.click();
+}
+
+// 参数同步
+window.updateGlobalParams = () => {
+    const requestedRes = parseFloat(document.getElementById('globalRes').value);
+    const oldOriginX = state.originX, oldOriginY = state.originY, oldOriginYaw = state.originYaw, oldFlipY = state.flipY;
+
+    if(Number.isFinite(requestedRes) && requestedRes > 0 && requestedRes !== state.resolution) {
+        // 分辨率重采样保持物理地图与航点 world pose 不变。
+        resampleMapToResolution(requestedRes);
+        state.resolution = requestedRes;
+        refreshWaypointPixelsFromWorld();
+    }
+
+    const newOX = parseFloat(document.getElementById('globalOrgX').value);
+    const newOY = parseFloat(document.getElementById('globalOrgY').value);
+    const newYaw = parseFloat(document.getElementById('globalOrgYaw').value);
+    const newFlip = document.getElementById('globalFlipY').checked;
+
+    // Origin/坐标约定修改属于重新标定：地图上的航点仍贴在原像素位置，world pose 随标定更新。
+    state.originX = Number.isFinite(newOX) ? newOX : oldOriginX;
+    state.originY = Number.isFinite(newOY) ? newOY : oldOriginY;
+    state.originYaw = Number.isFinite(newYaw) ? newYaw : oldOriginYaw;
+    state.flipY = newFlip;
+    if(state.originX !== oldOriginX || state.originY !== oldOriginY || state.originYaw !== oldOriginYaw || state.flipY !== oldFlipY) {
+        refreshWaypointWorldFromPixels();
+    }
+    renderUI();
+    generateWaypointOutput();
+    updateMapDiagnostic();
+};
+
+function resampleMapToResolution(newResolution) {
+    if(!Number.isFinite(newResolution) || newResolution <= 0) return;
+
+    const physicalWidth = state.width * state.resolution;
+    const physicalHeight = state.height * state.resolution;
+    const newWidth = Math.max(1, Math.round(physicalWidth / newResolution));
+    const newHeight = Math.max(1, Math.round(physicalHeight / newResolution));
+
+    const source = document.createElement('canvas');
+    source.width = state.width;
+    source.height = state.height;
+    source.getContext('2d').drawImage(cvsMap, 0, 0);
+
+    resizeCanvas(newWidth, newHeight);
+    ctxMap.imageSmoothingEnabled = false;
+    ctxMap.drawImage(source, 0, 0, source.width, source.height, 0, 0, newWidth, newHeight);
+    resetView();
+}
+
+function syncGlobalInputs() {
+    document.getElementById('globalRes').value = state.resolution;
+    document.getElementById('globalOrgX').value = state.originX;
+    document.getElementById('globalOrgY').value = state.originY;
+    document.getElementById('globalOrgYaw').value = state.originYaw;
+    document.getElementById('globalFlipY').checked = state.flipY;
+}
+
+function syncExportInputs() {
+    document.getElementById('exportImage').value = state.exportImage;
+    document.getElementById('exportMode').value = state.exportMode;
+    document.getElementById('exportNegate').value = state.exportNegate;
+    document.getElementById('exportOccupied').value = state.exportOccupied;
+    document.getElementById('exportFree').value = state.exportFree;
+}
+
+function drawBoatMarker(x, y, angle) {
+    ctxUI.save();
+    // 随缩放保持屏幕上恒定尺寸；大小可在面板“船图标(px)”调整。
+    const z = Math.max(state.scale, 0.1);
+    const px = parseFloat(document.getElementById('boatSize')?.value) || 28;
+    const L = px / z, W = px * 0.55 / z;   // 船长 / 船宽
+    const head = px * 1.15 / z;            // 船头朝向指示线长度
+    ctxUI.translate(x, y);
+    ctxUI.rotate(angle);
+    ctxUI.lineJoin = 'round';
+    // 船体轮廓：尖头船型（船头尖、船身宽、船尾略收）
+    ctxUI.beginPath();
+    ctxUI.moveTo(L/2, 0);                    // 船头尖
+    ctxUI.lineTo(L*0.12, -W/2);              // 左舷肩
+    ctxUI.lineTo(-L/2, -W*0.42);             // 左后角
+    ctxUI.lineTo(-L*0.32, 0);                // 船尾内凹
+    ctxUI.lineTo(-L/2, W*0.42);              // 右后角
+    ctxUI.lineTo(L*0.12, W/2);               // 右舷肩
+    ctxUI.closePath();
+    // 黑色描边打底（halo），保证在白色/浅色底图上也清晰
+    ctxUI.strokeStyle = 'rgba(0,0,0,0.9)';
+    ctxUI.lineWidth = 5 / z;
+    ctxUI.stroke();
+    ctxUI.fillStyle = '#ff9800';
+    ctxUI.fill();
+    // 白色内描边，保证在黑色/深色障碍物上也清晰
+    ctxUI.strokeStyle = '#ffffff';
+    ctxUI.lineWidth = 1.4 / z;
+    ctxUI.stroke();
+    // 船头朝向指示线：黑底 + 黄色主线
+    ctxUI.beginPath(); ctxUI.moveTo(0,0); ctxUI.lineTo(head,0);
+    ctxUI.strokeStyle = 'rgba(0,0,0,0.9)'; ctxUI.lineWidth = 4.5 / z; ctxUI.stroke();
+    ctxUI.beginPath(); ctxUI.moveTo(0,0); ctxUI.lineTo(head,0);
+    ctxUI.strokeStyle = '#ffee00'; ctxUI.lineWidth = 2.2 / z; ctxUI.stroke();
+    // 中心点
+    ctxUI.beginPath(); ctxUI.arc(0, 0, 2.5 / z, 0, Math.PI*2);
+    ctxUI.fillStyle = '#000'; ctxUI.fill();
+    ctxUI.beginPath(); ctxUI.arc(0, 0, 1.4 / z, 0, Math.PI*2);
+    ctxUI.fillStyle = '#fff'; ctxUI.fill();
+    ctxUI.restore();
+}
+
+function quatToYaw(q) {
+    if(!q) return 0;
+    const siny = 2 * (q.w * q.z + q.x * q.y);
+    const cosy = 1 - 2 * (q.y * q.y + q.z * q.z);
+    return Math.atan2(siny, cosy);
+}
+
+// footprint 话题名由 UI 输入框 rosFootprintTopic 提供（默认 /local_costmap/published_footprint，全局/局部两种模式通吃）
+// 船体 footprint（base_link 系）：前 2.72 / 后 0.4 / 半宽 0.95（与实船 nav2 costmap 一致），订阅不到时兜底用。
+const BOAT_FOOTPRINT = [[2.72,0.95],[2.72,-0.95],[-0.4,-0.95],[-0.4,0.95]];
+
+// rosbridge 的 int8[] 可能是 JSON 数组，也可能是 base64 字符串（取决于编码器），统一解码为普通数组
+function decodeGridData(data) {
+    if(Array.isArray(data)) return data;
+    if(typeof data === 'string') {
+        try {
+            const bin = atob(data);
+            const bytes = new Uint8Array(bin.length);
+            for(let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+            return Array.from(new Int8Array(bytes.buffer)); // int8 语义：>127 的字节解释回负值
+        } catch(_) { return null; }
+    }
+    return null;
+}
+
+function rosSend(obj) {
+    if(state.ros.ws && state.ros.ws.readyState === WebSocket.OPEN) state.ros.ws.send(JSON.stringify(obj));
+}
+
+window.toggleRosConnection = () => {
+    if(state.ros.connected && state.ros.ws) { state.ros.ws.close(); return; }
+    const url = document.getElementById('rosbridgeUrl').value.trim();
+    const status = document.getElementById('rosStatus');
+    try {
+        const ws = new WebSocket(url);
+        state.ros.ws = ws;
+        state.ros.fragBuf = {};   // rosbridge 大消息分片缓冲：id -> {num: data}
+        status.textContent = '正在连接 ' + url + ' ...';
+        ws.onopen = () => {
+            state.ros.connected = true;
+            status.textContent = '已连接：' + url;
+            status.classList.add('ok');
+            document.getElementById('rosConnectBtn').textContent = '断开 ROS';
+            resubscribeRosTopics();
+        };
+        ws.onmessage = ev => {
+            let m; try { m = JSON.parse(ev.data); } catch(_) { return; }
+            // rosbridge 对超过 max_message_size 的消息会拆成 op:"fragment" 分片发送
+            // （/map 2.6M 格 → JSON ≈10MB，必然分片）。先按 id 重组再当普通 publish 处理。
+            if(m.op === 'fragment') {
+                const slot = state.ros.fragBuf[m.id] = state.ros.fragBuf[m.id] || {};
+                slot[m.num] = m.data;
+                if(Object.keys(slot).length < m.total) return;
+                delete state.ros.fragBuf[m.id];
+                const joined = Object.keys(slot)
+                    .sort((a, b) => Number(a) - Number(b))
+                    .map(k => slot[k]).join('');
+                try { m = JSON.parse(joined); } catch(_) { return; }
+            }
+            if(m.op !== 'publish') return;
+            const mapTopic = document.getElementById('rosMapTopic').value.trim();
+            const poseTopic = document.getElementById('rosPoseTopic').value.trim();
+            const planTopic = document.getElementById('rosPlanTopic').value.trim();
+            const costmapTopic = document.getElementById('rosCostmapTopic').value.trim();
+            const footprintTopic = document.getElementById('rosFootprintTopic').value.trim();
+            const tfTopic = (document.getElementById('rosTFTopic')?.value.trim()) || '/tf';
+            if(m.topic === footprintTopic) { handleRosFootprint(m.msg); return; }
+            if(m.topic === costmapTopic) { handleRosCostmap(m.msg); return; }
+            if(m.topic === tfTopic) { handleRosTF(m.msg); return; }
+            if(m.topic === mapTopic) handleRosMap(m.msg);
+            else if(m.topic === poseTopic) handleRosPose(m.msg);
+            else if(m.topic === planTopic) handleRosPlan(m.msg);
+        };
+        ws.onerror = () => { status.textContent = '连接错误：请确认 rosbridge WebSocket 已启动且端口可达'; status.classList.remove('ok'); };
+        ws.onclose = () => {
+            state.ros.connected = false; state.ros.ws = null;
+            status.textContent = 'ROS 已断开'; status.classList.remove('ok');
+            document.getElementById('rosConnectBtn').textContent = '🔌 连接 ROS';
+        };
+    } catch(e) { status.textContent = '连接失败：' + e.message; }
+};
+
+window.resubscribeRosTopics = () => {
+    if(!state.ros.connected) return;
+    for(const t of state.ros.subscriptions) rosSend({op:'unsubscribe', topic:t});
+    const mapTopic = document.getElementById('rosMapTopic').value.trim();
+    const poseTopic = document.getElementById('rosPoseTopic').value.trim();
+    const planTopic = document.getElementById('rosPlanTopic').value.trim();
+    const costmapTopic = document.getElementById('rosCostmapTopic').value.trim();
+    const footprintTopic = document.getElementById('rosFootprintTopic').value.trim();
+    const tfTopic = (document.getElementById('rosTFTopic')?.value.trim()) || '/tf';
+    const showCostmap = document.getElementById('showCostmap')?.checked;
+    state.ros.subscriptions = [mapTopic, poseTopic, planTopic, footprintTopic, tfTopic].filter(Boolean);
+    if(showCostmap && costmapTopic) state.ros.subscriptions.push(costmapTopic);
+    // map 使用 transient-local / latched 语义时 rosbridge 通常能收到当前地图；throttle 0 表示不节流。
+    if(mapTopic) rosSend({op:'subscribe', topic:mapTopic, type:'nav_msgs/msg/OccupancyGrid', throttle_rate:0, queue_length:1});
+    if(poseTopic) rosSend({op:'subscribe', topic:poseTopic, type:'geometry_msgs/msg/PoseStamped', throttle_rate:100, queue_length:1});
+    if(planTopic) rosSend({op:'subscribe', topic:planTopic, type:'nav_msgs/msg/Path', throttle_rate:100, queue_length:1});
+    if(footprintTopic) rosSend({op:'subscribe', topic:footprintTopic, type:'geometry_msgs/msg/PolygonStamped', throttle_rate:100, queue_length:1});
+    // 局部代价图 1Hz 节流 + 只保留最新一帧，避免占用 rosbridge 带宽
+    if(showCostmap && costmapTopic) rosSend({op:'subscribe', topic:costmapTopic, type:'nav_msgs/msg/OccupancyGrid', throttle_rate:1000, queue_length:1});
+    // /tf 用于取 map→odom，把 odom 系的局部代价图贴到 map 系画布上
+    rosSend({op:'subscribe', topic:tfTopic, type:'tf2_msgs/msg/TFMessage', throttle_rate:200, queue_length:1});
+};
+
+// 代价图开关切换：关闭时退订并清空缓存，打开时重新订阅
+window.syncCostmapSubscription = () => {
+    const on = document.getElementById('showCostmap')?.checked;
+    if(!on) {
+        state.ros.costmap = null;
+        state.ros.costmapCanvas = null;
+        const st = document.getElementById('rosCostmapStatus');
+        if(st) { st.textContent = '局部代价图：已关闭'; st.classList.remove('ok'); }
+    }
+    if(state.ros.connected) resubscribeRosTopics();
+    renderUI();
+};
+
+function handleRosMap(msg) {
+    if(!msg || !msg.info) return;
+    const data = decodeGridData(msg.data);
+    if(!data) return;
+    msg.data = data; // 统一成数组，供 loadRosMapIntoEditor 使用
+    state.ros.lastMap = msg;
+    const st = document.getElementById('rosMapStatus');
+    st.textContent = `/map: ${msg.info.width}×${msg.info.height}, ${(msg.info.resolution||0).toFixed(3)} m/px`;
+    st.classList.add('ok');
+}
+
+function handleRosPose(msg) {
+    if(!msg || !msg.pose || !msg.pose.position) return;
+    const p=msg.pose.position, q=msg.pose.orientation;
+    state.ros.boatPose = {x:p.x, y:p.y, yaw:quatToYaw(q)};
+    const st=document.getElementById('rosPoseStatus');
+    st.textContent=`船位 map: X ${p.x.toFixed(2)}  Y ${p.y.toFixed(2)}  Yaw ${(state.ros.boatPose.yaw*180/Math.PI).toFixed(1)}°`;
+    st.classList.add('ok');
+    if(document.getElementById('followBoat')?.checked) centerViewOnWorld(p.x,p.y);
+    if(document.getElementById('trailFree')?.checked) paintTrailFree();
+    renderUI();
+}
+
+function handleRosPlan(msg) {
+    if(!msg || !Array.isArray(msg.poses)) return;
+    state.ros.plan = msg.poses.map(ps=>({x:ps.pose.position.x,y:ps.pose.position.y}));
+    renderUI();
+}
+
+// 把带 frame 标注的点列换算到 map 系；无法换算（缺 TF/未知系）时返回 null
+function rosPtsToMapFrame(pts, frame) {
+    if(!frame || frame === 'map') return pts;
+    if(frame === 'base_link' || frame === 'base_footprint') {
+        const b = state.ros.boatPose;
+        if(!b) return null;
+        const c = Math.cos(b.yaw), s = Math.sin(b.yaw);
+        return pts.map(p => ({x: b.x + c*p.x - s*p.y, y: b.y + s*p.x + c*p.y}));
+    }
+    if(frame === 'odom' && state.ros.mapToOdom) {
+        const T = state.ros.mapToOdom;
+        const c = Math.cos(T.yaw), s = Math.sin(T.yaw);
+        return pts.map(p => ({x: T.x + c*p.x - s*p.y, y: T.y + s*p.x + c*p.y}));
+    }
+    return null;
+}
+
+function handleRosFootprint(msg) {
+    if(!msg || !msg.polygon || !Array.isArray(msg.polygon.points)) return;
+    // Nav2 的 published_footprint 发在代价图 global_frame 里：local_costmap 是
+    // rolling window（global_frame=odom），点坐标是 odom 系而非 map 系，
+    // 必须经 map→odom 换算，否则船形框会显示在 odom 原点附近而不是跟着船走。
+    state.ros.footprint = {
+        frame: (msg.header && msg.header.frame_id) || 'map',
+        pts: msg.polygon.points.map(p=>({x:p.x, y:p.y}))
+    };
+    renderUI();
+}
+
+function handleRosCostmap(msg) {
+    if(!msg || !msg.info) return;
+    const data = decodeGridData(msg.data);
+    if(!data) return;
+    state.ros.costmap = {
+        info: msg.info,
+        frame: (msg.header && msg.header.frame_id) || 'odom',
+        data: data
+    };
+    buildCostmapCanvas();
+    const st = document.getElementById('rosCostmapStatus');
+    if(st) {
+        st.textContent = `代价图: ${msg.info.width}×${msg.info.height} @ ${(msg.info.resolution||0).toFixed(3)} m/px (${state.ros.costmap.frame})`;
+        st.classList.add('ok');
+    }
+    renderUI();
+}
+
+function handleRosTF(msg) {
+    if(!msg || !Array.isArray(msg.transforms)) return;
+    for(const t of msg.transforms) {
+        const parent = t.header && t.header.frame_id;
+        const child = t.child_frame_id;
+        if(!t.transform) continue;
+        const tr = t.transform.translation, q = t.transform.rotation;
+        if(parent === 'map' && child === 'odom') {
+            // T_map_odom：odom 原点在 map 系中的位姿
+            state.ros.mapToOdom = {x: tr.x, y: tr.y, yaw: quatToYaw(q)};
+        } else if(parent === 'odom' && child === 'map') {
+            // 反向广播时取逆：R' = R(-θ)，t' = -R(-θ)·t
+            const yaw = quatToYaw(q);
+            const c = Math.cos(yaw), s = Math.sin(yaw);
+            state.ros.mapToOdom = {x: -(c*tr.x + s*tr.y), y: s*tr.x - c*tr.y, yaw: normalizeAngle(-yaw)};
+        } else if(parent === 'odom' && child === 'base_link') {
+            state.ros.odomToBase = {x: tr.x, y: tr.y, yaw: quatToYaw(q)};
+        } else if(parent === 'map' && child === 'base_link') {
+            state.ros.mapToBase = {x: tr.x, y: tr.y, yaw: quatToYaw(q)};
+        }
+    }
+    // 2026-10-09：/usv_map_pose 已停发（定位改版），船位改由 TF 合成：
+    // map→base_link = T_map_odom ∘ T_odom_base（有 map→base_link 直发时优先）
+    let mp = state.ros.mapToBase;
+    if(!mp && state.ros.mapToOdom && state.ros.odomToBase) {
+        const A = state.ros.mapToOdom, B = state.ros.odomToBase;
+        const c = Math.cos(A.yaw), s = Math.sin(A.yaw);
+        mp = {x: A.x + c*B.x - s*B.y,
+              y: A.y + s*B.x + c*B.y,
+              yaw: normalizeAngle(A.yaw + B.yaw)};
+    }
+    if(mp) {
+        state.ros.boatPose = mp;
+        const st = document.getElementById('rosPoseStatus');
+        if(st) {
+            st.textContent = `船位 map(TF): X ${mp.x.toFixed(2)}  Y ${mp.y.toFixed(2)}  Yaw ${(mp.yaw*180/Math.PI).toFixed(1)}°`;
+            st.classList.add('ok');
+        }
+        if(document.getElementById('followBoat')?.checked) centerViewOnWorld(mp.x, mp.y);
+        if(document.getElementById('trailFree')?.checked) paintTrailFree();
+    }
+    if(state.ros.mapToOdom || mp) renderUI();
+}
+
+// 把 costmap 按 Nav2 语义着色到 offscreen canvas（透明度在着色时烘焙，滑块变化后重建）
+function buildCostmapCanvas() {
+    const cm = state.ros.costmap;
+    if(!cm) { state.ros.costmapCanvas = null; return; }
+    const w = cm.info.width, h = cm.info.height;
+    if(!w || !h || cm.data.length < w*h) { state.ros.costmapCanvas = null; return; }
+    const alpha = Math.max(0, Math.min(1, parseFloat(document.getElementById('costmapAlpha')?.value) || 0.6));
+    if(!state.ros.costmapCanvas) state.ros.costmapCanvas = document.createElement('canvas');
+    const cvs = state.ros.costmapCanvas;
+    cvs.width = w; cvs.height = h;
+    const c = cvs.getContext('2d');
+    const img = c.createImageData(w, h);
+    const d = img.data;
+    // OccupancyGrid row 0 从 origin（左下）开始；canvas row 0 在顶部，垂直翻转（与 /map 处理一致）
+    for(let gy = 0; gy < h; gy++) {
+        const cy = h - 1 - gy;
+        for(let gx = 0; gx < w; gx++) {
+            const v = cm.data[gy*w + gx];
+            const i = (cy*w + gx) * 4;
+            let r = 0, g = 0, b = 0, a = 0;
+            if(v < 0) { r = 128; g = 128; b = 128; a = 38; }          // 未知：固定 ~0.15 半透明灰
+            else if(v === 0) { a = 0; }                                 // 空闲：全透明
+            else if(v >= 100) { r = 139; b = 139; a = alpha * 255; }    // 100 致命：深红/紫
+            else if(v === 99) { r = 255; a = alpha * 255; }             // 99 膨胀障碍：红
+            else {                                                      // 1~98：绿→黄→红渐变
+                const t = v / 98;
+                r = 255 * Math.min(1, 2 * t);
+                g = 255 * Math.min(1, 2 * (1 - t));
+                a = alpha * 255;
+            }
+            d[i] = r; d[i+1] = g; d[i+2] = b; d[i+3] = a;
+        }
+    }
+    c.putImageData(img, 0, 0);
+}
+
+// 不透明度滑块变化时重建着色并重绘
+window.rebuildCostmapCanvas = () => {
+    buildCostmapCanvas();
+    renderUI();
+};
+
+// 把 odom 系代价图经最新 map→odom 变换贴到 map 系画布上（没有 TF 时按 odom≈map 画）
+function drawCostmapOverlay() {
+    const show = document.getElementById('showCostmap');
+    if(!show || !show.checked) return;
+    const cm = state.ros.costmap, cvs = state.ros.costmapCanvas;
+    if(!cm || !cvs) return;
+    const info = cm.info;
+    let ox = info.origin.position.x, oy = info.origin.position.y;
+    let oyaw = quatToYaw(info.origin.orientation);
+    if(cm.frame === 'odom' && state.ros.mapToOdom) {
+        // 代价图 origin（odom 系位姿）经 T_map_odom 组合到 map 系
+        const T = state.ros.mapToOdom;
+        const c = Math.cos(T.yaw), s = Math.sin(T.yaw);
+        const nx = T.x + c*ox - s*oy;
+        const ny = T.y + s*ox + c*oy;
+        ox = nx; oy = ny;
+        oyaw = normalizeAngle(oyaw + T.yaw);
+    }
+    const p = worldToMapPixel(ox, oy);
+    if(!p) return;
+    const cellPx = info.resolution / state.resolution; // 每格对应的地图像素数
+    ctxUI.save();
+    ctxUI.imageSmoothingEnabled = false;
+    ctxUI.translate(p.x, p.y);
+    ctxUI.rotate(worldYawToPixelYaw(oyaw));
+    ctxUI.scale(cellPx, cellPx);
+    // offscreen 已做 y 翻转，image 顶部对应代价图最大 y，故向上偏移一个图高
+    ctxUI.drawImage(cvs, 0, -info.height);
+    ctxUI.restore();
+}
+
+// ==========================================
+// 航迹擦除：船走过的地方设为可通行（free / 白色）
+// ==========================================
+let lastTrailPaint = null;
+window.resetTrailPaint = () => { lastTrailPaint = null; };
+
+function paintTrailFree() {
+    const b = state.ros.boatPose;
+    if(!b) return;
+    // 去抖：移动不足一个栅格且转角 < ~3° 时跳过，避免原地重复填充
+    if(lastTrailPaint) {
+        const dx = b.x - lastTrailPaint.x, dy = b.y - lastTrailPaint.y;
+        const dyaw = Math.abs(normalizeAngle(b.yaw - lastTrailPaint.yaw));
+        if(Math.hypot(dx, dy) < state.resolution && dyaw < 0.05) return;
+    }
+    lastTrailPaint = {x: b.x, y: b.y, yaw: b.yaw};
+
+    const margin = parseFloat(document.getElementById('trailMargin')?.value) || 0;
+    let pts;
+    if(state.ros.footprint && state.ros.footprint.pts && state.ros.footprint.pts.length >= 3) {
+        // 订阅到的 footprint 按其 header.frame_id 换算到 map 系（local_costmap 发在 odom 系）
+        pts = rosPtsToMapFrame(state.ros.footprint.pts, state.ros.footprint.frame);
+        if(!pts) return; // TF 还没到时宁可不画，也不能把 odom 坐标当 map 涂白
+    } else {
+        // 兜底：配置的船体 footprint（base_link 系）按当前船位旋转平移
+        const c = Math.cos(b.yaw), s = Math.sin(b.yaw);
+        pts = BOAT_FOOTPRINT.map(([lx, ly]) => ({x: b.x + lx*c - ly*s, y: b.y + lx*s + ly*c}));
+    }
+    if(margin > 0) {
+        // 以形心为中心向外扩 margin 米
+        const cx = pts.reduce((a, p) => a + p.x, 0) / pts.length;
+        const cy = pts.reduce((a, p) => a + p.y, 0) / pts.length;
+        pts = pts.map(p => {
+            const dx = p.x - cx, dy = p.y - cy, l = Math.hypot(dx, dy) || 1;
+            return {x: p.x + dx / l * margin, y: p.y + dy / l * margin};
+        });
+    }
+    const pix = pts.map(p => worldToMapPixel(p.x, p.y));
+    ctxMap.save();
+    ctxMap.beginPath();
+    pix.forEach((q, i) => { if(i === 0) ctxMap.moveTo(q.x, q.y); else ctxMap.lineTo(q.x, q.y); });
+    ctxMap.closePath();
+    ctxMap.fillStyle = '#ffffff'; // free（可通行）
+    ctxMap.fill();
+    ctxMap.restore();
+}
+
+function drawFootprint() {
+    const show = document.getElementById('showFootprint');
+    if(!show || !show.checked) return;
+    let pts = null;
+    if(state.ros.footprint && state.ros.footprint.pts && state.ros.footprint.pts.length >= 3) {
+        // 订阅到的 footprint 按其 header.frame_id 换算到 map 系（local_costmap 发在 odom 系）
+        pts = rosPtsToMapFrame(state.ros.footprint.pts, state.ros.footprint.frame);
+    } else if(state.ros.boatPose) {
+        // 兜底：用配置的船体 footprint（base_link 系）按船位+朝向旋转平移
+        const b = state.ros.boatPose;
+        const c = Math.cos(b.yaw), s = Math.sin(b.yaw);
+        pts = BOAT_FOOTPRINT.map(([lx, ly]) => ({x: b.x + lx*c - ly*s, y: b.y + lx*s + ly*c}));
+    }
+    if(!pts || pts.length < 3) return;
+    const pix = pts.map(p => worldToMapPixel(p.x, p.y));
+    if(pix.some(q => !q)) return;
+    ctxUI.save();
+    ctxUI.beginPath();
+    pix.forEach((q, i) => {
+        if(i === 0) ctxUI.moveTo(q.x, q.y); else ctxUI.lineTo(q.x, q.y);
+    });
+    ctxUI.closePath();
+    ctxUI.fillStyle = 'rgba(255,152,0,0.15)';
+    ctxUI.fill();
+    ctxUI.strokeStyle = '#ff9800';
+    ctxUI.lineWidth = Math.max(1.5, 2.5 / Math.max(state.scale, 0.1));
+    ctxUI.stroke();
+    ctxUI.restore();
+}
+
+function drawTFAxes() {
+    const size = parseFloat(document.getElementById('tfSize')?.value) || 2.0;
+    // map 原点坐标轴（map 系 X/Y，随缩放、大小由滑块控制）
+    drawAxisFrame(0, 0, 0, size, 'map');
+    // 船体 base_link 坐标轴（map 系位姿，X=船头方向）
+    if(state.ros.boatPose) drawAxisFrame(state.ros.boatPose.x, state.ros.boatPose.y, state.ros.boatPose.yaw, size, 'base_link');
+}
+
+function drawAxisFrame(wx, wy, worldYaw, size, label) {
+    const origin = worldToMapPixel(wx, wy);
+    if(!origin) return;
+    const c = Math.cos(worldYaw), s = Math.sin(worldYaw);
+    const ex = worldToMapPixel(wx + size * c, wy + size * s);
+    const ey = worldToMapPixel(wx - size * s, wy + size * c);
+    if(!ex || !ey) return;
+    const lw = Math.max(1, 2 / Math.max(state.scale, 0.1));
+    ctxUI.save();
+    ctxUI.globalAlpha = 1;
+    // X（红，前向）
+    ctxUI.strokeStyle = 'red'; ctxUI.lineWidth = lw;
+    ctxUI.beginPath(); ctxUI.moveTo(origin.x, origin.y); ctxUI.lineTo(ex.x, ex.y); ctxUI.stroke();
+    // Y（绿，左向）
+    ctxUI.strokeStyle = '#0f0'; ctxUI.lineWidth = lw;
+    ctxUI.beginPath(); ctxUI.moveTo(origin.x, origin.y); ctxUI.lineTo(ey.x, ey.y); ctxUI.stroke();
+    // Z 指示（蓝点，出平面）
+    ctxUI.fillStyle = '#00f';
+    ctxUI.beginPath(); ctxUI.arc(origin.x, origin.y, Math.max(2, 3 / Math.max(state.scale, 0.1)), 0, Math.PI * 2); ctxUI.fill();
+    if(label) {
+        // 标签文字保持屏幕恒定大小，不随缩放放大失真
+        const zt = Math.max(state.scale, 0.1);
+        ctxUI.fillStyle = 'white'; ctxUI.font = `${11 / zt}px Arial`;
+        ctxUI.strokeStyle = 'black'; ctxUI.lineWidth = 3 / zt;
+        ctxUI.strokeText(label, origin.x + 4 / zt, origin.y - 4 / zt);
+        ctxUI.fillText(label, origin.x + 4 / zt, origin.y - 4 / zt);
+    }
+    ctxUI.restore();
+}
+
+function centerViewOnWorld(wx, wy) {
+    const p = worldToMapPixel(wx, wy);
+    const vw=viewport.clientWidth, vh=viewport.clientHeight;
+    state.panX = vw/2 - p.x*state.scale;
+    state.panY = vh/2 - p.y*state.scale;
+    updateViewTransform();
+}
+
+window.loadRosMapIntoEditor = () => {
+    const msg = state.ros.lastMap;
+    if(!msg) return alert('尚未收到 /map');
+    const info=msg.info, w=info.width, h=info.height;
+    resizeCanvas(w,h);
+    state.resolution=info.resolution;
+    state.originX=info.origin.position.x;
+    state.originY=info.origin.position.y;
+    state.originYaw=quatToYaw(info.origin.orientation);
+    state.flipY=true;
+    state.yamlText=null;
+    const img=ctxMap.createImageData(w,h), d=img.data;
+    // OccupancyGrid row 0 从 map 原点（左下）开始；Canvas row 0 在顶部，所以垂直翻转。
+    for(let gy=0; gy<h; gy++) {
+        const cy=h-1-gy;
+        for(let gx=0; gx<w; gx++) {
+            const occ=msg.data[gy*w+gx];
+            const v = occ < 0 ? 205 : (occ >= 65 ? 0 : (occ <= 25 ? 255 : 205));
+            const i=(cy*w+gx)*4; d[i]=d[i+1]=d[i+2]=v; d[i+3]=255;
+        }
+    }
+    ctxMap.putImageData(img,0,0);
+    syncGlobalInputs(); syncExportInputs(); refreshWaypointPixelsFromWorld();
+    resetView(); updateMapDiagnostic(); renderUI();
+    alert('已将 Nav2 /map 复制到编辑器。当前编辑只作用于本地副本，不会修改正在运行的 map_server。');
+};
+
+function renderLoop() {
+    requestAnimationFrame(renderLoop);
+    // 可以在这里添加连续渲染逻辑，目前按需刷新即可
+}
+
+// 启动
+init();
+
+</script>
+<script type="module" src="https://static.cloudflareinsights.com/beacon.min.js/v4513226cdae34746b4dedf0b4dfa099e1781791509496" integrity="sha512-ZE9pZaUXND66v380QUtch/5sE9tPFh2zg45pR2PB0CVkCtOREv2AJKkSidISWkysEuQ0EH8faUU5du78bx87UQ==" data-cf-beacon='{"version":"2024.11.0","token":"7939e04a4baf43c8b86a560f74aac60e"}' crossorigin="anonymous"></script>
+</body>
+</html>
