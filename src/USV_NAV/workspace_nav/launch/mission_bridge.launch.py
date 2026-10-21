@@ -178,7 +178,7 @@ def generate_launch_description():
     pkg = FindPackageShare("workspace_nav")
     default_map_yaml = PathJoinSubstitution([pkg, "config", "map.yaml"])
     default_mission_params = PathJoinSubstitution(
-        [pkg, "config", "mission_stack.chengfeng.yaml"]
+        [pkg, "config", "mission_stack.xingfei.yaml"]
     )
 
     return LaunchDescription(
@@ -188,7 +188,7 @@ def generate_launch_description():
                 "mission_stack_params_file",
                 default_mission_params,
                 "mission_bridge / nav_status_aggregator 参数 YAML；"
-                "默认 mission_stack.chengfeng.yaml。"
+                "默认 mission_stack.xingfei.yaml（兴飞船）。"
                 "勿与 Nav2 的 params_file 同名，避免 launch 参数冲突。",
             ),
             _decl(

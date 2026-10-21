@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 # ----------------------------------------------------------------------------------------------- #
-# 实船 Nav2：默认 nav2_params_chengfeng.yaml + map.yaml。
+# 实船 Nav2：默认 nav2_params_xingfei.yaml + mission_stack.xingfei.yaml + map.yaml（兴飞船）。
 #
 # 与官方 nav2_bringup/bringup_launch.py 的区别：
 #   - 不启动 amcl。官方 bringup 会无条件 include localization_launch.py（map_server + amcl），
@@ -128,6 +128,10 @@ def _setup(context, *args, **kwargs):
             'use_sim_time': use_sim_time,
             'map_yaml_path': map_arg,
             'mission_stack_params_file': mission_params_file,
+            # 兴飞：把 Nav2 实际加载的 params_file 传给 mission_bridge，
+            # 使 waypoint_tolerance_m 自动读取与 Nav2 goal checker 同源
+            # （否则回退到 nav2_params_chengfeng.yaml）。
+            'nav2_params_path': params_file,
             'odom_topic': odom_topic,
         }.items(),
         condition=IfCondition(enable_mission_bridge),
@@ -142,17 +146,28 @@ def _setup(context, *args, **kwargs):
         output='screen',
     )
 
-    return [container, load_map_server, navigation, mission_bridge, rviz]
+    # 点云自用回波遮蔽：清扫杆/水雾区滤除后再喂给代价图（观测源 topic 已改 /livox/lidar_filtered）。
+    # 2026-10-21 加入；节点挂掉代价图将无观测（无标记无清除），故 respawn。
+    livox_filter = Node(
+        package='workspace_nav',
+        executable='livox_cloud_filter',
+        name='livox_cloud_filter',
+        output='screen',
+        respawn=True,
+        respawn_delay=2.0,
+    )
+
+    return [container, load_map_server, navigation, mission_bridge, rviz, livox_filter]
 
 
 def generate_launch_description():
     package_share = FindPackageShare('workspace_nav')
 
     real_nav2_config = PathJoinSubstitution(
-        [package_share, 'config', 'nav2_params_chengfeng.yaml'])
+        [package_share, 'config', 'nav2_params_xingfei.yaml'])
     map_default = PathJoinSubstitution([package_share, 'config', 'map.yaml'])
     mission_params_default = PathJoinSubstitution(
-        [package_share, 'config', 'mission_stack.chengfeng.yaml'])
+        [package_share, 'config', 'mission_stack.xingfei.yaml'])
 
     nav2_bringup_share = get_package_share_directory('nav2_bringup')
     default_rviz_config = os.path.join(nav2_bringup_share, 'rviz', 'nav2_default_view.rviz')
@@ -172,7 +187,7 @@ def generate_launch_description():
     declare_params_file = DeclareLaunchArgument(
         'params_file',
         default_value=real_nav2_config,
-        description='Nav2 params; default is nav2_params_chengfeng.yaml (MAVROS odom).',
+        description='Nav2 params; default is nav2_params_xingfei.yaml (MAVROS odom).',
     )
 
     declare_autostart = DeclareLaunchArgument(
@@ -208,7 +223,7 @@ def generate_launch_description():
     declare_mission_params_file = DeclareLaunchArgument(
         'mission_params_file',
         default_value=mission_params_default,
-        description='mission 栈参数 YAML（mission_stack.chengfeng.yaml）',
+        description='mission 栈参数 YAML（mission_stack.xingfei.yaml）',
     )
 
     declare_odom_topic = DeclareLaunchArgument(

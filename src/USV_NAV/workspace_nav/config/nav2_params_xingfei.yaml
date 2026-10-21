@@ -110,7 +110,9 @@ controller_server:
       # —— 到达判定容差：xy (米) / yaw (弧度) ——
       # 2026-10-12：0.5→1.0。水测末段在水流中船位在 0.5m 圈沿反复骑线难 latch，
       # 放宽到 1.0 后正常判到（末段精对准仍由 rotate_to_heading_min_angle=0.3 保证）
-      xy_goal_tolerance: 1.0
+      # 2026-10-19：1.0→2.0。现场在 1m 圈沿持续转圈，放宽到 2.0 后由 Nav2 判到，
+      # 上层 mission_bridge 继续下一航点；归港预泊用 docking_goal_checker（见下）。
+      xy_goal_tolerance: 2.0
       # 有意设为不约束终点朝向（3.14≈180°，任意 yaw 均判达标），勿按常规改小
       yaw_goal_tolerance: 3.14
     # 归港预泊点专用（dock_mission 切到此 profile）：预泊必须对准朝向（船尾朝坞），
@@ -118,8 +120,10 @@ controller_server:
     docking_goal_checker:
       stateful: true
       plugin: "nav2_controller::SimpleGoalChecker"
-      xy_goal_tolerance: 0.5
-      yaw_goal_tolerance: 0.15  # ≈8.6°
+      # 2026-10-20：0.5/0.15→1.0/0.4。预泊交接位置/艏向放宽，交给 usv_docking
+      # 的 APPROACH/ALIGN 收（dock_mission.yaml 同名参数须保持一致，运行时会覆盖本文件）
+      xy_goal_tolerance: 1.0
+      yaw_goal_tolerance: 0.4
     FollowPath:
       plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
       # —— 期望线速度 (m/s) = 导航最高速；下游桥另有限幅，不在本文件里 ——
@@ -184,8 +188,7 @@ controller_server:
       rotate_to_heading_angular_vel: 0.25   # 原地旋转目标角速度；2026-10-12：0.15→0.25（= 10-05 水测角速度
                                             # 上限 ~0.25 rad/s，缩短末段对准耗时）；下游桥硬限幅 ±0.30，调大需同步改桥的 max_*_angular_z
       rotate_to_heading_min_angle: 0.3  # ≈17度；2026-10-12 水测：0.785(45°) 末段对准太糙就放线速度 →
-                                        # 横向误差被水流放大 → 绕目标点转圈进不了 0.5m 容差圈（绕 5 圈+）；
-                                        # 0.3 后"转够再直冲"，末段 2.86m→0.20m 一次 6 秒到位
+     
       # —— 碰撞检测（硬急停，与上面代价减速独立）——
       # 沿当前 (vx, ω) 向前仿真一条弧，弧长 = min(v × 本参数, 前瞻距离 carrot_dist)，
       # 弧上任何位姿 footprint 压到障碍 → 抛异常急停/恢复。RViz 看 /lookahead_collision_arc。
@@ -243,7 +246,10 @@ local_costmap:
       # —— Voxel 层：将 3D 点云投影为 2D 障碍标记 ——
       voxel_layer:
         plugin: "nav2_costmap_2d::VoxelLayer"
-        enabled: true
+        # 2026-10-21：水面 ghost 尚未调好，联调期间暂时关闭点云局部障碍源。
+        # 恢复时把 enabled 改回 true 即可（支持在线改）：观测源已接 livox_cloud_filter
+        # 过滤云（见下方 topic 注释），船头清扫杆/水雾不会再入图。
+        enabled: false
         # —— 是否清空机器人 footprint 覆盖范围内的旧障碍标记（船体近距由本体遮挡/反光，清空更稳）——
         footprint_clearing_enabled: true
         # —— 发布体素网格 (RViz 可订阅 /local_costmap/voxel_grid 查看) ——调试时true,实船false
@@ -260,7 +266,7 @@ local_costmap:
         max_obstacle_height: 0.6
         # —— 想让岸的上部也入图，可放到 1.0（观测源上限已是 1.0）；0.6 是压制水面杂波的当前选择 ——
         #    本层没有 min_obstacle_height 的作用：voxel 标记路径不读它（2026-10-09 实测，
-        #    A/B 把它改 -0.35 致命格数完全不变）；下界由观测源的 min_obstacle_height(-0.35) 决定。
+        #    A/B 把它改 -0.35 致命格数完全不变）；下界由观测源的 min_obstacle_height(-0.30) 决定。
         # —— 标记阈值：**不是"点数"**，而是"该格被标过的 z 体素数"，且比较是【严格大于】——
         #    源码 nav2_voxel_grid/voxel_grid.hpp::markVoxelInMap() 取该列 16 位 z 掩码的置位数
         #    （marked_bits = *col >> 16），条件是 popcount > mark_threshold（bitsBelowThreshold）。
@@ -275,7 +281,7 @@ local_costmap:
         #    （本参数是少数【支持在线改】的，立即生效），代价是每列凑不齐 3 层的目标
         #    （远岸/平岸/水面漂浮物，掠射角下再高也只有 1~2 层）也不标——2026-10-10 实测
         #    阈值 2 时较高的岸边也丢了，故在线值已回到 1。
-        #    更治本的压噪是在下次重启前把观测源 min_obstacle_height 从 -0.35 抬到 -0.2~-0.25。
+        #    更治本的压噪是把观测源 min_obstacle_height 提高；2026-10-21 已从 -0.35 抬到 -0.30。
         #    噪点来源之一还有【船行波/尾流】：舷侧和船尾的浪回波贴着水面（odom z≈-0.48±0.2）、
         #    大多单层 z 体素、且跟着船走——rolling 窗口下它随船持续标新格，射线又清不干净
         #    （浪在射线路径上时有时无）。压它的手段同上：阈值 2 或抬源级下界；
@@ -309,7 +315,11 @@ local_costmap:
         #    详见 docs/bug_debug/2026-10-10_代价图与点云不吻合-观测源参数在线无效与栈重启生效.md
         # ===========================================================================
         livox_cloud:
-          topic: /livox/lidar
+          # —— 2026-10-21 改：原始 /livox/lidar 经 livox_cloud_filter 节点滤除船头正前
+          #    清扫杆/水雾区（base_link x 2.70~3.70 / y -1.20~+1.40 / z -0.40~0.65）后再入图。
+          #    该杆随船动且是射线端点，标上的格子永远清不掉（开阔水面无回波→无清除射线），
+          #    是局部代价图"水面全是鬼影障碍"的最大持续标记源。左右舷侧真实物体不在盒内，不受影响。
+          topic: /livox/lidar_filtered
           data_type: "PointCloud2"
           # —— 观测点保留时间：0=立即过期（动态环境建议 0，配合 clearing）——
           observation_persistence: 0.0
@@ -328,9 +338,9 @@ local_costmap:
           # —— 射线清除最大距离 (m)：比 obstacle_max_range 略大，保证能清到窗口边缘 ——
           raytrace_max_range: 20.0
           # —— 障碍高度筛选 (ObservationBuffer 裁剪，相对 odom z = 初始 base_link 位置) ——
-          #    min=-0.35：水面在 odom≈-0.48，取 -0.35 把水面及其反光挡在门外（余量 0.13m，下水复核 ghost）。
+          #    min=-0.30：水面在 odom≈-0.48，从 -0.35 再提高 5cm，减少船体翘头时水面被误标。
           #    max=1.0：观测源刻意放宽，真正的上限交给 voxel_layer.max_obstacle_height(0.6，可在线调)。
-          min_obstacle_height: -0.35
+          min_obstacle_height: -0.30
           max_obstacle_height: 1.0
       always_send_full_costmap: true #稳定后改false
       
@@ -399,7 +409,7 @@ global_costmap:
           obstacle_max_range: 30.0
           raytrace_min_range: 0.5
           raytrace_max_range: 32.0
-          # —— 高度筛选 (相对 odom z)：min=-0.35 滤水面反射，max=1.0，均与 local 一致 ——
+          # —— 高度筛选 (相对 odom z)：local=-0.30，global=-0.35，max=1.0 ——
           min_obstacle_height: -0.35
           max_obstacle_height: 1.0
           observation_persistence: 0.0

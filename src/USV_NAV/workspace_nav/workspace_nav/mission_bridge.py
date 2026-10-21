@@ -24,6 +24,7 @@ from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Odometry
 from nav2_msgs.action import FollowWaypoints
+from nav2_msgs.srv import ClearEntireCostmap
 from rclpy.action import ActionClient, ActionServer, CancelResponse, GoalResponse
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallbackGroup
 from rclpy.duration import Duration as RDuration
@@ -231,6 +232,12 @@ class MissionBridgeNode(Node):
         self.declare_parameter("map_datum_ref_key", "ref_gnss_10")
         self.declare_parameter("projection", "enu")
         self.declare_parameter("odom_topic", "/odometry/filtered")
+        # 定位超时看门狗（2026-10-20）：odom 话题超过此秒数无新帧 → 终止当前
+        # NavigateTask（RESULT_LOCALIZATION_LOST/2009），不再让任务挂死。
+        # 与 nav_status_aggregator.odom_timeout(2s) 同源但略宽，避免抖动误杀。
+        self.declare_parameter("localization_timeout_sec", 3.0)
+        # 任务启动后等第一帧 odom 的宽限（ROS 发现/定位源启动）
+        self.declare_parameter("localization_startup_grace_sec", 5.0)
         # <=0 = 自动读 Nav2 参数文件的 xy_goal_tolerance（见 _resolve_waypoint_tolerance）
         self.declare_parameter("waypoint_tolerance_m", 0.0)
         self.declare_parameter("nav2_params_path", "")
@@ -244,6 +251,13 @@ class MissionBridgeNode(Node):
         self.declare_parameter("suppress_passive_waypoints_after_cancel", True)
         self.declare_parameter("target_buoy_min_write_period_sec", 0.0)
         self.declare_parameter("nav_zones_topic", "/nav_zones/current")
+        # 新任务开始前清空局部代价图（2026-10-21）：清掉上次任务/调试期间积累的鬼影
+        # 障碍（斜装雷达在开阔水面无回波→无清除射线，误标格不会自行消失，见
+        # docs/bug_debug/2026-10-21_局部代价图水面鬼影-清扫杆遮蔽与观测源改话题.md）。
+        self.declare_parameter("clear_costmap_on_mission_start", True)
+        # >0 时任务运行期间按此周期（秒）再清，默认 0=关。整清会把真障碍也抹掉、
+        # 重新标回需若干帧，只有长跑任务实测仍在缓慢积鬼影时才开。
+        self.declare_parameter("costmap_clear_period_sec", 0.0)
 
         self._dbg = bool(self.get_parameter("debug_mode").value)
         wf_param = (
@@ -343,8 +357,18 @@ class MissionBridgeNode(Node):
             self.get_parameter("follow_waypoints_action").value,
             callback_group=cg,
         )
+        self._clear_costmap_client = self.create_client(
+            ClearEntireCostmap, "/local_costmap/clear_entirely_local_costmap"
+        )
+        self._costmap_clear_timer = None
 
         self._odom_topic = self.get_parameter("odom_topic").value
+        self._localization_timeout_sec = max(
+            0.0, float(self.get_parameter("localization_timeout_sec").value)
+        )
+        self._localization_startup_grace_sec = max(
+            0.0, float(self.get_parameter("localization_startup_grace_sec").value)
+        )
         self._tolerance = self._resolve_waypoint_tolerance(map_path)
 
         self._sm_lock = threading.RLock()
@@ -388,6 +412,8 @@ class MissionBridgeNode(Node):
         self._current_command_id: Optional[str] = None
         self._mission_start_wall: float = 0.0
         self._have_odom = False
+        self._odom_last_mono: float = 0.0        # 最近一帧 odom 的单调时钟
+        self._odom_sub_started_mono: float = 0.0  # 本次订阅建立时刻（启动宽限用）
         self._pose_lock = threading.Lock()
         self._odom_sub: Optional[Any] = None
         self._send_timer: Optional[Any] = None
@@ -578,8 +604,16 @@ class MissionBridgeNode(Node):
         with self._sm_lock:
             self.navigating = False
 
-    def _on_system_not_ready(self) -> None:
-        """TF or Nav2 action unavailable — stop execution and enter WAITING_SYSTEM."""
+    def _on_system_not_ready(self, reason: str = "SYSTEM_NOT_READY") -> None:
+        """TF/Nav2 action/定位超时 — 终止当前任务并进入 WAITING_SYSTEM。"""
+        loc_timeout = reason == "LOCALIZATION_TIMEOUT"
+        error_code = "LOC_LOST" if loc_timeout else "SYSTEM_NOT_READY"
+        detail = (
+            "Localization odom timeout (%.1fs)"
+            % self._localization_timeout_sec
+            if loc_timeout
+            else "TF or FollowWaypoints unavailable during mission"
+        )
         with self._sm_lock:
             prev = self._state
             if prev == MissionState.WAITING_SYSTEM:
@@ -589,14 +623,14 @@ class MissionBridgeNode(Node):
         self._cancel_active_nav2_goal()
         self._nt_terminate(
             NavigateTask.Result.RESULT_LOCALIZATION_LOST,
-            "SYSTEM_NOT_READY",
-            "TF or FollowWaypoints unavailable during mission",
+            error_code,
+            detail,
             "abort",
         )
         with self._sm_lock:
             self._transition_state(MissionState.WAITING_SYSTEM)
         self.get_logger().warning(
-            "System not ready (TF or FollowWaypoints) — STATE -> WAITING_SYSTEM"
+            "System not ready (%s) — STATE -> WAITING_SYSTEM" % error_code
         )
 
     def _tick_ready(self) -> None:
@@ -606,8 +640,17 @@ class MissionBridgeNode(Node):
         with self._sm_lock:
             state = self._state
 
+        # 定位看门狗：任务执行中 odom 断流 → 立即终止 NavigateTask，避免
+        # Nav2 原地卡死而任务侧一直挂 RUNNING（只有 /nav_status 告警）。
+        # WAITING_SYSTEM 恢复时也要求 odom 已恢复，否则会立刻再次失败。
+        odom_ok = (
+            self._odom_fresh()
+            if state in (MissionState.RUNNING, MissionState.WAITING_SYSTEM)
+            else True
+        )
+
         if state == MissionState.WAITING_SYSTEM:
-            if tf_ok and action_ok:
+            if tf_ok and action_ok and odom_ok:
                 self._transition_state(MissionState.IDLE)
                 self._log_green(f"TF ready: {self._global_frame} -> {self._robot_frame}")
                 self.get_logger().info("FollowWaypoints action server ready")
@@ -623,6 +666,24 @@ class MissionBridgeNode(Node):
             ):
                 self._on_system_not_ready()
             return
+
+        if not odom_ok:
+            self._on_system_not_ready("LOCALIZATION_TIMEOUT")
+            return
+
+    def _odom_fresh(self) -> bool:
+        """odom 话题是否仍在更新；未建立订阅时视为正常（IDLE 等）。"""
+        if self._odom_sub is None or self._localization_timeout_sec <= 0.0:
+            return True
+        now = time.monotonic()
+        if self._odom_last_mono <= 0.0:
+            if self._odom_sub_started_mono <= 0.0:
+                return True
+            return (
+                now - self._odom_sub_started_mono
+                <= self._localization_startup_grace_sec
+            )
+        return now - self._odom_last_mono <= self._localization_timeout_sec
 
     def _tf_ok(self) -> bool:
         try:
@@ -1025,6 +1086,12 @@ class MissionBridgeNode(Node):
             self._mission_start_wall = time.time()
             self._publish_status_detail()
 
+            # 先清掉历史鬼影障碍再发第一个航点（清图服务异步返回，2s 的
+            # _send_timer 首次触发前已完成，时序上先于任何 Nav2 目标下发）
+            if bool(self.get_parameter("clear_costmap_on_mission_start").value):
+                self._clear_local_costmap("新任务开始")
+            self._setup_costmap_clear_timer()
+
             self._start_nav_stack()
 
         except Exception as e:
@@ -1033,6 +1100,40 @@ class MissionBridgeNode(Node):
                 self._transition_state(MissionState.FAILED)
                 self._running_mission_hash = None
             self._state_to_idle_relaxed()
+
+    def _clear_local_costmap(self, why: str) -> None:
+        if not self._clear_costmap_client.service_is_ready():
+            self.get_logger().warn(f"清局部代价图（{why}）：服务未就绪，跳过")
+            return
+        fut = self._clear_costmap_client.call_async(ClearEntireCostmap.Request())
+
+        def _done(f: Future) -> None:
+            try:
+                f.result()
+                self.get_logger().info(f"局部代价图已清空（{why}）")
+            except Exception as e:
+                self.get_logger().warn(f"清局部代价图失败（{why}）：{e}")
+
+        fut.add_done_callback(_done)
+
+    def _setup_costmap_clear_timer(self) -> None:
+        if self._costmap_clear_timer is not None:
+            try:
+                self._costmap_clear_timer.cancel()
+            except Exception:
+                pass
+            self._costmap_clear_timer = None
+        period = max(0.0, float(self.get_parameter("costmap_clear_period_sec").value))
+        if period <= 0.0:
+            return
+
+        def _periodic() -> None:
+            with self._sm_lock:
+                running = self._state == MissionState.RUNNING
+            if running:
+                self._clear_local_costmap(f"周期 {period:.0f}s")
+
+        self._costmap_clear_timer = self.create_timer(period, _periodic)
 
     def _start_nav_stack(self) -> None:
         try:
@@ -1046,6 +1147,8 @@ class MissionBridgeNode(Node):
             pass
 
         if self._odom_sub is None:
+            self._odom_last_mono = 0.0
+            self._odom_sub_started_mono = time.monotonic()
             self._odom_sub = self.create_subscription(
                 Odometry, self._odom_topic, self._odom_cb, 10
             )
@@ -1053,6 +1156,7 @@ class MissionBridgeNode(Node):
         self._send_timer = self.create_timer(2.0, self._send_next_waypoint)
 
     def _odom_cb(self, msg: Odometry) -> None:
+        self._odom_last_mono = time.monotonic()
         self._have_odom = True
         with self._pose_lock:
             self._current_pose_xy = (

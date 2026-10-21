@@ -58,6 +58,7 @@ setup(
             'nav_status_aggregator = workspace_nav.nav_status_aggregator:main',
             'zone_manager = workspace_nav.zone_manager:main',
             'zone_monitor = workspace_nav.zone_monitor:main',
+            'livox_cloud_filter = workspace_nav.livox_cloud_filter:main',
         ],
     },
 )
