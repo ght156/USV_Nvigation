@@ -1,11 +1,42 @@
 #!/usr/bin/env python3
 
+import os
+import sys
+
+from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
+
+
+def _default_app_map_yaml() -> str:
+    """统一地图来源：部署根 app/map/map.yaml（船端即 ~/usv-test/app/map）。
+
+    与 nav2_boat.launch.py 同一解析顺序：USV_HOME → 安装位置向上查找 →
+    包内 config/map.yaml 兜底。
+    """
+    candidates = []
+    usv_home = os.environ.get('USV_HOME', '').strip()
+    if usv_home:
+        candidates.append(os.path.join(usv_home, 'app', 'map', 'map.yaml'))
+    here = os.path.abspath(get_package_share_directory('workspace_nav'))
+    while True:
+        candidates.append(os.path.join(here, 'app', 'map', 'map.yaml'))
+        parent = os.path.dirname(here)
+        if parent == here:
+            break
+        here = parent
+    for candidate in candidates:
+        if os.path.isfile(candidate):
+            return candidate
+    print(
+        '[mission_bridge] app/map/map.yaml 未找到（USV_HOME=%r），回退包内 config/map.yaml'
+        % usv_home, file=sys.stderr)
+    return os.path.join(
+        get_package_share_directory('workspace_nav'), 'config', 'map.yaml')
 
 
 def _decl(name: str, default_value, description: str) -> DeclareLaunchArgument:
@@ -176,7 +207,7 @@ def _setup_nodes(context, *args, **kwargs):
 
 def generate_launch_description():
     pkg = FindPackageShare("workspace_nav")
-    default_map_yaml = PathJoinSubstitution([pkg, "config", "map.yaml"])
+    default_map_yaml = _default_app_map_yaml()
     default_mission_params = PathJoinSubstitution(
         [pkg, "config", "mission_stack.xingfei.yaml"]
     )

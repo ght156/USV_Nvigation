@@ -181,7 +181,7 @@ controller_server:
       min_approach_linear_velocity: 0.15
       # 2026-10-12：3.0→5.0。3.0 时 2.9m 外全速 1.0 冲点，重船（桥限 decel 0.3）末段刹不住、
       # 视觉冲点凶；5.0 提前进线性区（3m 处 v≈0.6），实测记录见 /tmp/rpp_probe3.log。
-      approach_velocity_scaling_dist: 5.0   #剩余路径长度小于此值，开始线性降速，直到最小线速度min_approach_linear_velocity
+      approach_velocity_scaling_dist: 8.0   #剩余路径长度小于此值，开始线性降速，直到最小线速度min_approach_linear_velocity
 
       # —— 转向控制 ——
       use_rotate_to_heading: true              # 机器人航向与路径起点航向偏差过大（超过 rotate_to_heading_min_angle），或者在接近终点（在容差内）需要调整终态朝向时（rotate_to_heading_angular_vel调整速度），会停止线速度，进行原地旋转。对齐前瞻点方向
@@ -199,9 +199,9 @@ controller_server:
       max_allowed_time_to_collision_up_to_carrot: 5.0
       # 碰撞弧上按 footprint 插值补点再查代价，false 会漏查大步长中间的栅格；保持 true
       use_interpolation: true
-      # 控制器查路径 TF 的外推容差 (s)：odom→base_link ≥10Hz 时 0.2 足够；
-      # TF 降频/抖动时不要调小（否则 FollowPath 抛外推异常中断任务）
-      transform_tolerance: 0.2
+      # 控制器查路径 TF 的外推容差 (s)：2026-10-21 实测 map→odom 中位延迟
+      # 约 0.39s，0.2 会持续 FollowPath abort；先放宽到 0.5。
+      transform_tolerance: 0.5
       # 沿全局路径双向搜索"船当前在路径上的最近点"的最大距离 (m)：船被吹偏/从
       # 路径中段恢复时，搜索范围外会认为不在路径上直接报错；10m 对开阔河道够用
       max_robot_pose_search_dist: 10.0

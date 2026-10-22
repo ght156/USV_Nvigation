@@ -19,6 +19,14 @@ mission_bridge:
     # 切 SLAM 时改这一行；运行时也可用 launch 参数统一覆盖（Nav2/mission 两侧同源）：
     #   ros2 launch workspace_nav nav2_boat.launch.py odom_topic:=/slam/localization
     odom_topic: "/mavros/gps_input/local"
+    # 定位看门狗：任务执行中 odom 超过该秒数无新帧 → 终止 NavigateTask
+    # （RESULT_LOCALIZATION_LOST，上层 2009），避免 Nav2 卡死而任务挂 RUNNING。
+    localization_timeout_sec: 3.0
+    localization_startup_grace_sec: 5.0    # 任务启动后等首帧 odom 的宽限
+    # CTRL_STUCK 持续该秒数后，mission_bridge 主动取消 FollowWaypoints 并上报
+    # TASK_FAILED（error_code=CTRL_STUCK，RESULT_CONTROLLER_FAILED）。<=0 关闭。
+    ctrl_stuck_timeout_sec: 30.0
+    nav_status_topic: "/nav_status"
     global_frame: "map"
     robot_frame: "base_link"
     map_datum_ref_key: "ref_gnss_10"       # map.yaml 里的经纬度锚点键（ENU 投影原点）

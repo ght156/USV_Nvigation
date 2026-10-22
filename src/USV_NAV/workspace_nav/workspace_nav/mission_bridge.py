@@ -39,6 +39,7 @@ from tf2_ros.buffer import Buffer
 from tf2_ros.transform_listener import TransformListener
 
 from m_common.action import NavigateTask
+from m_common.msg import NavStatus
 from m_common.srv import CancelMission, SendWaypoints, SetPause
 
 from workspace_nav.gps_map_conversion import (
@@ -238,6 +239,11 @@ class MissionBridgeNode(Node):
         self.declare_parameter("localization_timeout_sec", 3.0)
         # 任务启动后等第一帧 odom 的宽限（ROS 发现/定位源启动）
         self.declare_parameter("localization_startup_grace_sec", 5.0)
+        # Nav2 controller_status=STUCK 持续此秒数后，mission_bridge 主动终止
+        # FollowWaypoints 并上报 TASK_FAILED。CTRL_STUCK 本身只是告警；若 BT
+        # 持续重试而 FollowWaypoints 不返回终态，需要任务级看门狗兜底。
+        self.declare_parameter("ctrl_stuck_timeout_sec", 30.0)
+        self.declare_parameter("nav_status_topic", "/nav_status")
         # <=0 = 自动读 Nav2 参数文件的 xy_goal_tolerance（见 _resolve_waypoint_tolerance）
         self.declare_parameter("waypoint_tolerance_m", 0.0)
         self.declare_parameter("nav2_params_path", "")
@@ -369,6 +375,9 @@ class MissionBridgeNode(Node):
         self._localization_startup_grace_sec = max(
             0.0, float(self.get_parameter("localization_startup_grace_sec").value)
         )
+        self._ctrl_stuck_timeout_sec = max(
+            0.0, float(self.get_parameter("ctrl_stuck_timeout_sec").value)
+        )
         self._tolerance = self._resolve_waypoint_tolerance(map_path)
 
         self._sm_lock = threading.RLock()
@@ -414,6 +423,8 @@ class MissionBridgeNode(Node):
         self._have_odom = False
         self._odom_last_mono: float = 0.0        # 最近一帧 odom 的单调时钟
         self._odom_sub_started_mono: float = 0.0  # 本次订阅建立时刻（启动宽限用）
+        self._ctrl_stuck_since: Optional[float] = None
+        self._ctrl_stuck_last_seen_mono: float = 0.0
         self._pose_lock = threading.Lock()
         self._odom_sub: Optional[Any] = None
         self._send_timer: Optional[Any] = None
@@ -464,6 +475,22 @@ class MissionBridgeNode(Node):
                 self._cb_mission_cancel,
                 10,
             )
+
+        # CTRL_STUCK 任务级看门狗：独立 callback group，避免被任务服务或
+        # FollowWaypoints client 回调阻塞。
+        self._watchdog_cb_group = MutuallyExclusiveCallbackGroup()
+        self.create_subscription(
+            NavStatus,
+            self.get_parameter("nav_status_topic").value,
+            self._cb_nav_status_watchdog,
+            10,
+            callback_group=self._watchdog_cb_group,
+        )
+        self.create_timer(
+            0.5,
+            self._tick_ctrl_stuck_watchdog,
+            callback_group=self._watchdog_cb_group,
+        )
 
         # Publish internal state so GCS can monitor true mission progress (vs dispatch-only state)
         self._state_pub = self.create_publisher(String, '/mission_bridge/state', 10)
@@ -579,6 +606,10 @@ class MissionBridgeNode(Node):
         with self._sm_lock:
             prev = self._state
             self._state = new_state
+            if new_state != prev:
+                # 任何任务状态切换都重新计算 CTRL_STUCK 持续窗口。
+                self._ctrl_stuck_since = None
+                self._ctrl_stuck_last_seen_mono = 0.0
         if new_state != prev:
             msg = String()
             msg.data = str(new_state.value)
@@ -684,6 +715,81 @@ class MissionBridgeNode(Node):
                 <= self._localization_startup_grace_sec
             )
         return now - self._odom_last_mono <= self._localization_timeout_sec
+
+    def _cb_nav_status_watchdog(self, msg: NavStatus) -> None:
+        """记录 CTRL_STUCK 持续起点；只在本任务 RUNNING 时生效。"""
+        if self._ctrl_stuck_timeout_sec <= 0.0:
+            return
+        now = time.monotonic()
+        stuck = (
+            str(msg.task_state) == "RUNNING"
+            and (
+                str(msg.last_error) == "CTRL_STUCK"
+                or str(msg.controller_status) == "STUCK"
+            )
+        )
+        with self._sm_lock:
+            state = self._state
+            if state != MissionState.RUNNING:
+                self._ctrl_stuck_since = None
+                self._ctrl_stuck_last_seen_mono = 0.0
+                return
+            if not stuck:
+                if self._ctrl_stuck_since is not None:
+                    self.get_logger().info(
+                        "[ctrl_stuck_watchdog] CTRL_STUCK cleared before timeout"
+                    )
+                self._ctrl_stuck_since = None
+                self._ctrl_stuck_last_seen_mono = 0.0
+                return
+            if self._ctrl_stuck_since is None:
+                self._ctrl_stuck_since = now
+                self.get_logger().warning(
+                    "[ctrl_stuck_watchdog] CTRL_STUCK detected; "
+                    f"failure in {self._ctrl_stuck_timeout_sec:.1f}s if not recovered"
+                )
+            self._ctrl_stuck_last_seen_mono = now
+
+    def _tick_ctrl_stuck_watchdog(self) -> None:
+        """CTRL_STUCK 持续超时后取消 FollowWaypoints 并上报任务失败。"""
+        if self._ctrl_stuck_timeout_sec <= 0.0:
+            return
+        now = time.monotonic()
+        with self._sm_lock:
+            if self._state != MissionState.RUNNING:
+                return
+            since = self._ctrl_stuck_since
+            last_seen = self._ctrl_stuck_last_seen_mono
+            if since is None or last_seen <= 0.0:
+                return
+            if now - last_seen > 2.0:
+                # /nav_status 自身断流时不误判；由 readiness 链路处理节点异常。
+                self._ctrl_stuck_since = None
+                self._ctrl_stuck_last_seen_mono = 0.0
+                return
+            elapsed = now - since
+            if elapsed < self._ctrl_stuck_timeout_sec:
+                return
+            # 先递增 token，确保取消后的旧 goal result 被 _goal_result_cb 丢弃。
+            self._mission_token += 1
+            self._ctrl_stuck_since = None
+            self._ctrl_stuck_last_seen_mono = 0.0
+
+        self.get_logger().error(
+            "[ctrl_stuck_watchdog] CTRL_STUCK persisted for "
+            f"{elapsed:.1f}s (>= {self._ctrl_stuck_timeout_sec:.1f}s); "
+            "canceling FollowWaypoints and failing mission"
+        )
+        self._cancel_active_nav2_goal()
+        self._on_nav_fatal(
+            error_code="CTRL_STUCK",
+            nav2_error_code=0,
+            nav2_error_msg=(
+                f"CTRL_STUCK persisted for {elapsed:.1f}s "
+                f"(threshold {self._ctrl_stuck_timeout_sec:.1f}s)"
+            ),
+            nt_result_code=NavigateTask.Result.RESULT_CONTROLLER_FAILED,
+        )
 
     def _tf_ok(self) -> bool:
         try:

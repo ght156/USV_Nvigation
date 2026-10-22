@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 
 # ----------------------------------------------------------------------------------------------- #
-# 实船 Nav2：默认 nav2_params_xingfei.yaml + mission_stack.xingfei.yaml + map.yaml（兴飞船）。
+# 实船 Nav2：默认 nav2_params_xingfei.yaml + mission_stack.xingfei.yaml + app/map/map.yaml（兴飞船）。
+# 地图统一从部署根 app 目录读：<USV_HOME>/app/map/map.yaml（船端 ~/usv-test/app/map/map.yaml）。
 #
 # 与官方 nav2_bringup/bringup_launch.py 的区别：
 #   - 不启动 amcl。官方 bringup 会无条件 include localization_launch.py（map_server + amcl），
@@ -20,6 +21,7 @@
 # ----------------------------------------------------------------------------------------------- #
 
 import os
+import sys
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
@@ -31,6 +33,34 @@ from launch_ros.actions import LoadComposableNodes, Node
 from launch_ros.descriptions import ComposableNode, ParameterFile
 from launch_ros.substitutions import FindPackageShare
 from nav2_common.launch import RewrittenYaml
+
+
+def _default_app_map_yaml() -> str:
+    """统一地图来源：部署根 app/map/map.yaml（船端即 ~/usv-test/app/map）。
+
+    部署根 USV_HOME 同时含 app/ 与 install/。优先用环境变量；systemd
+    自启没带 USV_HOME 时，从本包安装位置逐级向上找 app/map/map.yaml。
+    只有都没有时才回退到包内 config/map.yaml（开发机 / 仿真）。
+    """
+    candidates = []
+    usv_home = os.environ.get('USV_HOME', '').strip()
+    if usv_home:
+        candidates.append(os.path.join(usv_home, 'app', 'map', 'map.yaml'))
+    here = os.path.abspath(get_package_share_directory('workspace_nav'))
+    while True:
+        candidates.append(os.path.join(here, 'app', 'map', 'map.yaml'))
+        parent = os.path.dirname(here)
+        if parent == here:
+            break
+        here = parent
+    for candidate in candidates:
+        if os.path.isfile(candidate):
+            return candidate
+    print(
+        '[nav2_boat] app/map/map.yaml 未找到（USV_HOME=%r），回退包内 config/map.yaml'
+        % usv_home, file=sys.stderr)
+    return os.path.join(
+        get_package_share_directory('workspace_nav'), 'config', 'map.yaml')
 
 
 def _setup(context, *args, **kwargs):
@@ -45,6 +75,7 @@ def _setup(context, *args, **kwargs):
     rviz_config = LaunchConfiguration('rviz_config')
     enable_mission_bridge = LaunchConfiguration('enable_mission_bridge')
     mission_params_file = LaunchConfiguration('mission_params_file')
+    enable_livox_cloud_filter = LaunchConfiguration('enable_livox_cloud_filter')
 
     # odom_topic：空 = 不注入（尊重 params_file）；非空 = 改写 Nav2 全部 odom_topic 并透传 mission 栈
     odom_topic = LaunchConfiguration('odom_topic').perform(context).strip()
@@ -146,8 +177,8 @@ def _setup(context, *args, **kwargs):
         output='screen',
     )
 
-    # 点云自用回波遮蔽：清扫杆/水雾区滤除后再喂给代价图（观测源 topic 已改 /livox/lidar_filtered）。
-    # 2026-10-21 加入；节点挂掉代价图将无观测（无标记无清除），故 respawn。
+    # 点云自用回波遮蔽：清扫杆/水雾区滤除后再喂给代价图。
+    # 默认关闭；需要时显式传 enable_livox_cloud_filter:=true。
     livox_filter = Node(
         package='workspace_nav',
         executable='livox_cloud_filter',
@@ -155,6 +186,7 @@ def _setup(context, *args, **kwargs):
         output='screen',
         respawn=True,
         respawn_delay=2.0,
+        condition=IfCondition(enable_livox_cloud_filter),
     )
 
     return [container, load_map_server, navigation, mission_bridge, rviz, livox_filter]
@@ -165,7 +197,7 @@ def generate_launch_description():
 
     real_nav2_config = PathJoinSubstitution(
         [package_share, 'config', 'nav2_params_xingfei.yaml'])
-    map_default = PathJoinSubstitution([package_share, 'config', 'map.yaml'])
+    map_default = _default_app_map_yaml()
     mission_params_default = PathJoinSubstitution(
         [package_share, 'config', 'mission_stack.xingfei.yaml'])
 
@@ -175,7 +207,7 @@ def generate_launch_description():
     declare_map = DeclareLaunchArgument(
         'map',
         default_value=map_default,
-        description='实船默认 map.yaml；可 map:=/绝对路径/其它.yaml 覆盖',
+        description='默认 <USV_HOME>/app/map/map.yaml；可 map:=/绝对路径/其它.yaml 覆盖',
     )
 
     declare_use_sim_time = DeclareLaunchArgument(
@@ -226,6 +258,12 @@ def generate_launch_description():
         description='mission 栈参数 YAML（mission_stack.xingfei.yaml）',
     )
 
+    declare_enable_livox_cloud_filter = DeclareLaunchArgument(
+        'enable_livox_cloud_filter',
+        default_value='false',
+        description='是否启动 Livox 自用回波过滤节点（默认关闭）',
+    )
+
     declare_odom_topic = DeclareLaunchArgument(
         'odom_topic',
         default_value='',
@@ -244,6 +282,7 @@ def generate_launch_description():
         declare_rviz_cfg,
         declare_enable_mission_bridge,
         declare_mission_params_file,
+        declare_enable_livox_cloud_filter,
         declare_odom_topic,
         OpaqueFunction(function=_setup),
     ])
