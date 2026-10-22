@@ -2,6 +2,15 @@
 
 2026-09-02 实船避障调试时写的采样脚本。在船上直接跑（`ssh nx` 后）或在能直连船端图（ROS_DOMAIN_ID=5、CycloneDDS）的机器上跑；脚本只读，不改任何参数。
 
+## 调试代价图（2026-10-22，与主导航并存）
+
+`debug_costmap.sh start|stop|status|log`（本机执行，驱动船端 hkzl）：在船端起独立的
+`livox_cloud_filter` + `nav2_costmap_2d`（参数 `workspace_nav/config/debug_costmap_params.yaml`，
+复制自 nav2_params_xingfei.yaml 的 local_costmap 段），话题全部在 `/debug_costmap/*`，
+不动主栈。网页工具 ros_map_tool_v3_nav2_live.html 把"代价图话题"输入框改成
+`/debug_costmap/costmap`（footprint 改 `/debug_costmap/published_footprint`）即可看图调参；
+调好后把参数值搬回 nav2_params_xingfei.yaml 重启主栈。前提：主栈在跑（要定位 TF 和雷达）。
+
 ## 文件
 
 | 文件 | 作用 |

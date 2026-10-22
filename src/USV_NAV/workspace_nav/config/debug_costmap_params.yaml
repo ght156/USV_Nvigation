@@ -1,0 +1,68 @@
+# -----------------------------------------------------------------------------
+# debug_costmap.launch.py 专用参数：避障调试用独立局部代价图（2026-10-22）
+#
+# 与主导航栈并存、互不影响：
+#   - 话题 remap 到 /debug_costmap/*（不碰主栈 /local_costmap/*）
+#   - 参数值复制自 nav2_params_xingfei.yaml 的 local_costmap 段（调哪个改哪个，
+#     调好后再把值搬回 nav2_params_xingfei.yaml 重启主栈生效）
+#   - 与主栈的唯一差别：voxel_layer.enabled=true（主栈联调期间关闭）+
+#     观测源接 /livox/lidar_filtered（livox_cloud_filter 遮蔽清扫杆/水雾后的云）
+#
+# 注意：nav2_costmap_2d 独立可执行文件节点名固定 /costmap/costmap
+#       （忽略 __node/__ns 改名），故用双层 key costmap: costmap:。
+# -----------------------------------------------------------------------------
+
+costmap:
+  costmap:
+    ros__parameters:
+      use_sim_time: false
+      update_frequency: 5.0
+      publish_frequency: 5.0
+      global_frame: odom
+      robot_base_frame: base_link
+      rolling_window: true
+      # —— 与导航配置一致：24×24 窗口，0.1 m/格 ——
+      width: 24
+      height: 24
+      resolution: 0.1
+      # —— 兴飞 footprint：前 2.7 / 后 0.5 / 半宽 0.84 ——
+      footprint: "[[2.7, 0.84], [2.7, -0.84], [-0.5, -0.84], [-0.5, 0.84]]"
+      footprint_padding: 0.2
+      transform_tolerance: 0.3
+      plugins: ["voxel_layer", "inflation_layer"]
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        cost_scaling_factor: 1.0
+        inflate_unknown: false
+        inflate_around_unknown: false
+        inflation_radius: 5.0
+      # —— Voxel 层：与 nav2_params_xingfei.yaml local_costmap.voxel_layer 对齐 ——
+      #    （调参就改这里；mark_threshold / max_obstacle_height 支持在线改，
+      #      ros2 param set /costmap/costmap voxel_layer.mark_threshold 2 立即生效）
+      voxel_layer:
+        plugin: "nav2_costmap_2d::VoxelLayer"
+        enabled: true
+        footprint_clearing_enabled: true
+        publish_voxel_map: true   # 调试期开着：nav_diag voxelmap /count 直接读
+        origin_z: -0.42
+        z_resolution: 0.1
+        z_voxels: 12
+        max_obstacle_height: 0.6
+        mark_threshold: 1
+        unknown_threshold: 15
+        combination_method: 1
+        observation_sources: livox_cloud
+        livox_cloud:
+          topic: /livox/lidar_filtered   # 经 livox_cloud_filter 遮蔽后的云
+          data_type: "PointCloud2"
+          observation_persistence: 0.0
+          clearing: true
+          marking: true
+          # 观测源参数只在节点 configure 时读一次，改这里必须重启本 launch
+          obstacle_min_range: 1.4
+          obstacle_max_range: 18.0
+          raytrace_min_range: 0.5
+          raytrace_max_range: 20.0
+          min_obstacle_height: -0.30
+          max_obstacle_height: 1.0
+      always_send_full_costmap: true   # 网页端不解析增量，必须 true
