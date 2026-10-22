@@ -96,17 +96,26 @@ def _qos():
 
 
 def read_nav_status(node, timeout: float = 4.0, topic: str = DEFAULT_STATUS_TOPIC):
-    """读一帧 /nav_status。同时挂 typed（NavStatus）与 String 两种订阅，谁先来用谁。"""
+    """读一帧 /nav_status：优先 typed（m_common/NavStatus），建不起来才退回 std_msgs/String。
+
+    2026-10-16：**不能同时挂两种订阅**。/nav_status 上同时存在两种类型的发布者，
+    而同一个进程里同名话题只能注册一种类型——FastDDS 下第二个 create_subscription 必失败
+    （rcl 报 `invalid allocator`，还会留下 rcl 错误状态连累后续建实体）；
+    兴飞 2026-10-15 切 FastDDS 后，原来「两种都挂」的写法直接让 status/check 全挂。
+    实测：typed 先建 OK、再建 String FAIL；fresh 进程里单建任一种都 OK。
+    """
     from std_msgs.msg import String
 
     grabbed: dict = {}
     qos = _qos()
 
+    typed_ok = False
     try:
         _sw, _sp, _cm, _mw, NavStatus = _import_m_common()
         node.create_subscription(
             NavStatus, topic,
             lambda m: grabbed.setdefault("typed", _status_to_dict(m)), qos)
+        typed_ok = True
     except Exception as exc:  # noqa: BLE001
         grabbed["typed_import_error"] = str(exc)
 
@@ -116,7 +125,12 @@ def read_nav_status(node, timeout: float = 4.0, topic: str = DEFAULT_STATUS_TOPI
         except Exception:  # noqa: BLE001
             grabbed.setdefault("json", {"raw": m.data})
 
-    node.create_subscription(String, topic, _on_string, qos)
+    if not typed_ok:
+        # typed 建不起来（老栈 / m_common 缺失）才退回 String；两者不可同时挂
+        try:
+            node.create_subscription(String, topic, _on_string, qos)
+        except Exception as exc:  # noqa: BLE001
+            grabbed["string_sub_error"] = str(exc)
 
     import rclpy
     t0 = time.time()
@@ -192,6 +206,38 @@ def cmd_check(node) -> None:
         cl = _client_wait(node, SendWaypoints, "/mission_bridge/send_waypoints", 3.0)
         info["send_waypoints_ready"] = cl is not None
 
+    # 2026-10-16：只列服务名会「假绿」——客户端 RMW 与船端节点不一致时，发现层照旧能
+    # 看到服务、/nav_status 也读得到，但**服务请求-应答静默超时**（页面上表现为
+    # 「下发失败：服务 /mission_bridge/send_waypoints 超时（8s）无响应」）。
+    # 这里真发一次只读服务调用（get_geofence，不改任何状态）来验证往返通路。
+    try:
+        from m_common.srv import GetGeoFence
+        cl = _client_wait(node, GetGeoFence, "/mission_bridge/get_geofence", 3.0)
+        if cl is None:
+            info["service_roundtrip"] = {
+                "ok": None, "service": "/mission_bridge/get_geofence",
+                "error": "服务未发现（非兴飞栈 / mission_bridge 没起？）"}
+        else:
+            t1 = time.time()
+            fut = cl.call_async(GetGeoFence.Request())
+            rclpy.spin_until_future_complete(node, fut, timeout_sec=6.0)
+            if fut.done() and fut.exception() is None:
+                info["service_roundtrip"] = {
+                    "ok": True, "service": "/mission_bridge/get_geofence",
+                    "elapsed_sec": round(time.time() - t1, 2)}
+            else:
+                info["service_roundtrip"] = {
+                    "ok": False, "service": "/mission_bridge/get_geofence",
+                    "elapsed_sec": round(time.time() - t1, 2),
+                    "error": "服务调用 6s 无响应（典型原因：客户端 RMW 与船端节点不一致）"}
+                info["ok"] = False
+                info["hint"] = (
+                    "服务请求-应答不通：中间件可能不一致。船端 2026-10-15 起为 "
+                    "rmw_fastrtps_cpp；本客户端 RMW_IMPLEMENTATION="
+                    f"{os.environ.get('RMW_IMPLEMENTATION')}")
+    except Exception as exc:  # noqa: BLE001
+        info["service_roundtrip"] = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
     info["nav_status"] = read_nav_status(node, timeout=3.0)
     if info["nav_status"] is None:
         info["ok"] = False
@@ -206,9 +252,19 @@ def cmd_status(node) -> None:
 
 
 # mission_bridge / zone_manager 实际加载的那份优先（install 拷贝），src 兜底
+# 2026-10-16 起两条实船布局都认：
+#   兴飞 hkzl：~/usv-main/...；澄丰 nx：~/usv_nav_ws/...
 MAP_YAML_CANDIDATES = (
     "~/usv-main/install/arm/workspace_nav/share/workspace_nav/config/map.yaml",
     "~/usv-main/src/USV_NAV/workspace_nav/config/map.yaml",
+    "~/usv_nav_ws/install/workspace_nav/share/workspace_nav/config/map.yaml",
+    "~/usv_nav_ws/src/USV_NAV/workspace_nav/config/map.yaml",
+)
+# 兜底：上面都没命中时按通配找（换工作区名/换船时不用改这份脚本）
+MAP_YAML_GLOBS = (
+    "~/usv*/install/*/workspace_nav/share/workspace_nav/config/map.yaml",
+    "~/usv*/src/USV_NAV/workspace_nav/config/map.yaml",
+    "~/usv*_ws/src/USV_NAV/workspace_nav/config/map.yaml",
 )
 
 
@@ -229,8 +285,21 @@ def cmd_datum() -> None:
                 text = f.read()
             break
     if text is None:
+        import glob as _glob
+
+        found = []
+        for pat in MAP_YAML_GLOBS:
+            found.extend(sorted(_glob.glob(os.path.expanduser(pat))))
+        for rp in found:
+            if os.path.isfile(rp):
+                path_used = rp
+                with open(rp, encoding="utf-8") as f:
+                    text = f.read()
+                break
+    if text is None:
         emit({"ok": False, "cmd": "datum",
-              "error": "找不到 map_yaml: " + " | ".join(MAP_YAML_CANDIDATES)}, 3)
+              "error": "找不到 map_yaml: " + " | ".join(MAP_YAML_CANDIDATES)
+              + " | 通配 " + " | ".join(MAP_YAML_GLOBS)}, 3)
 
     anchors = {}
     re_anchors = re.compile(
@@ -319,7 +388,8 @@ def cmd_dispatch(node, mode: str, b64: str) -> None:
         SendWaypoints, _SP, _CM, MissionWaypoint, _NS = _import_m_common()
     except Exception as exc:  # noqa: BLE001
         emit({"ok": False, "cmd": "dispatch", "mode": "service",
-              "error": f"导入 m_common 失败（需 source ~/usv-main/install/arm/setup.bash）: {exc}"}, 2)
+              "error": f"导入 m_common 失败（需 source 船端工作区 setup.bash："
+                       f"兴飞 ~/usv-main/install/arm/setup.bash / 澄丰 ~/usv_nav_ws/install/setup.bash）: {exc}"}, 2)
     name = str(payload.get("service") or "/mission_bridge/send_waypoints")
     cl = _client_wait(node, SendWaypoints, name, 4.0)
     if cl is None:
@@ -1559,6 +1629,11 @@ def main() -> None:
     if not argv:
         emit({"ok": False, "error": "用法: python3 - <check|status|dispatch|cancel|pause> [...]"}, 64)
     mode = argv[0]
+
+    # datum 只读取 map.yaml，不启动 ROS；不能因未 source ROS 或 RMW
+    # 配置异常而阻断纯文件查询。
+    if mode == "datum":
+        cmd_datum()
 
     try:
         import rclpy

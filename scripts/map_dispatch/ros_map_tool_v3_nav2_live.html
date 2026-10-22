@@ -274,6 +274,12 @@
             <input type="text" id="rosCostmapTopic" value="/local_costmap/costmap">
             <label>Footprint 话题</label>
             <input type="text" id="rosFootprintTopic" value="/local_costmap/published_footprint">
+            <label>局部路径话题（controller_server 发布）</label>
+            <input type="text" id="rosLocalPlanTopic" value="/local_plan">
+            <label>RPP 碰撞预测弧话题（base_link 系）</label>
+            <input type="text" id="rosCollisionArcTopic" value="/lookahead_collision_arc">
+            <label>RPP 前瞻点话题</label>
+            <input type="text" id="rosLookaheadTopic" value="/lookahead_point">
             <label>TF 话题（map→odom）</label>
             <input type="text" id="rosTFTopic" value="/tf">
             <button class="secondary" onclick="resubscribeRosTopics()">↻ 重新订阅</button>
@@ -283,6 +289,9 @@
             <label><input type="checkbox" id="showBoat" checked onchange="renderUI()"> 显示船位置与朝向</label>
             <label>船图标(px) <input type="number" id="boatSize" value="28" min="8" max="120" step="2" onchange="renderUI()" style="width:56px"></label>
             <label><input type="checkbox" id="showPlan" checked onchange="renderUI()"> 显示 Nav2 全局路径</label>
+            <label><input type="checkbox" id="showLocalPlan" checked onchange="renderUI()"> 显示局部路径（/local_plan，品红）</label>
+            <label><input type="checkbox" id="showCollisionArc" checked onchange="renderUI()"> 显示碰撞预测弧（RPP，红虚线）</label>
+            <label><input type="checkbox" id="showLookahead" checked onchange="renderUI()"> 显示前瞻点（carrot，青色）</label>
             <label><input type="checkbox" id="showFootprint" checked onchange="renderUI()"> 显示船体 footprint（尺寸方框）</label>
             <label><input type="checkbox" id="showTF" checked onchange="renderUI()"> 显示 TF 坐标轴（map + base_link）</label>
             <label>TF 大小(m) <input type="number" id="tfSize" value="2" min="0.2" step="0.1" onchange="renderUI()" style="width:56px"></label>
@@ -405,6 +414,9 @@ state.mouseMapPos = null;  // 鼠标所在地图像素（笔刷预览用）
 // ROS / Nav2 实时可视化状态
 state.ros = {
     ws: null, connected: false, lastMap: null, boatPose: null, plan: [], footprint: null,
+    localPlan: null,      // controller_server /local_plan {frame, pts}
+    collisionArc: null,   // RPP 碰撞预测弧 {frame, pts}（通常 base_link 系）
+    lookahead: null,      // RPP 前瞻点 {frame, x, y}
     costmap: null,        // 最新局部代价图 {info, frame, data}
     costmapCanvas: null,  // 着色后的 offscreen canvas（buildCostmapCanvas 生成）
     mapToOdom: null,      // 最新 /tf 中的 map→odom 变换 {x, y, yaw}
@@ -1585,6 +1597,47 @@ function renderUI(currentMousePos = null) {
         ctxUI.restore();
     }
 
+    // 4.1 局部路径（controller_server /local_plan，品红实线）
+    if(document.getElementById('showLocalPlan')?.checked && state.ros.localPlan) {
+        drawRosPolyline(rosPtsToMapFrame(state.ros.localPlan.pts, state.ros.localPlan.frame),
+            '#ff00ff', Math.max(2, 3 / Math.max(state.scale, 0.1)), false);
+    }
+
+    // 4.2 RPP 碰撞预测弧（lookahead_collision_arc，base_link 系，红虚线）
+    if(document.getElementById('showCollisionArc')?.checked && state.ros.collisionArc) {
+        drawRosPolyline(rosPtsToMapFrame(state.ros.collisionArc.pts, state.ros.collisionArc.frame),
+            '#ff5252', Math.max(2, 3 / Math.max(state.scale, 0.1)), true);
+    }
+
+    // 4.3 RPP 前瞻点（carrot，青色圆点 + 与船位连线）
+    if(document.getElementById('showLookahead')?.checked && state.ros.lookahead) {
+        const la = rosPtsToMapFrame([{x: state.ros.lookahead.x, y: state.ros.lookahead.y}], state.ros.lookahead.frame);
+        if(la) {
+            const p = worldToMapPixel(la[0].x, la[0].y);
+            const sc = Math.max(state.scale, 0.1);
+            if(p) {
+                ctxUI.save();
+                if(state.ros.boatPose) {
+                    const bp = worldToMapPixel(state.ros.boatPose.x, state.ros.boatPose.y);
+                    if(bp) {
+                        ctxUI.beginPath(); ctxUI.moveTo(bp.x, bp.y); ctxUI.lineTo(p.x, p.y);
+                        ctxUI.strokeStyle = 'rgba(0,255,255,0.5)';
+                        ctxUI.lineWidth = Math.max(1, 1.5 / sc);
+                        ctxUI.stroke();
+                    }
+                }
+                ctxUI.beginPath();
+                ctxUI.arc(p.x, p.y, Math.max(4, 6 / sc), 0, Math.PI * 2);
+                ctxUI.fillStyle = 'rgba(0,255,255,0.35)'; ctxUI.fill();
+                ctxUI.strokeStyle = '#00ffff'; ctxUI.lineWidth = Math.max(1.5, 2 / sc); ctxUI.stroke();
+                ctxUI.beginPath();
+                ctxUI.arc(p.x, p.y, Math.max(1.5, 2 / sc), 0, Math.PI * 2);
+                ctxUI.fillStyle = '#00ffff'; ctxUI.fill();
+                ctxUI.restore();
+            }
+        }
+    }
+
     // 5. Nav2 实时船位
     const showBoatEl = document.getElementById('showBoat');
     if(showBoatEl && showBoatEl.checked && state.ros.boatPose) {
@@ -2065,9 +2118,15 @@ window.toggleRosConnection = () => {
             const costmapTopic = document.getElementById('rosCostmapTopic').value.trim();
             const footprintTopic = document.getElementById('rosFootprintTopic').value.trim();
             const tfTopic = (document.getElementById('rosTFTopic')?.value.trim()) || '/tf';
+            const localPlanTopic = document.getElementById('rosLocalPlanTopic')?.value.trim();
+            const collisionArcTopic = document.getElementById('rosCollisionArcTopic')?.value.trim();
+            const lookaheadTopic = document.getElementById('rosLookaheadTopic')?.value.trim();
             if(m.topic === footprintTopic) { handleRosFootprint(m.msg); return; }
             if(m.topic === costmapTopic) { handleRosCostmap(m.msg); return; }
             if(m.topic === tfTopic) { handleRosTF(m.msg); return; }
+            if(m.topic === localPlanTopic) { handleRosLocalPlan(m.msg); return; }
+            if(m.topic === collisionArcTopic) { handleRosCollisionArc(m.msg); return; }
+            if(m.topic === lookaheadTopic) { handleRosLookahead(m.msg); return; }
             if(m.topic === mapTopic) handleRosMap(m.msg);
             else if(m.topic === poseTopic) handleRosPose(m.msg);
             else if(m.topic === planTopic) handleRosPlan(m.msg);
@@ -2090,18 +2149,28 @@ window.resubscribeRosTopics = () => {
     const costmapTopic = document.getElementById('rosCostmapTopic').value.trim();
     const footprintTopic = document.getElementById('rosFootprintTopic').value.trim();
     const tfTopic = (document.getElementById('rosTFTopic')?.value.trim()) || '/tf';
+    const localPlanTopic = document.getElementById('rosLocalPlanTopic')?.value.trim();
+    const collisionArcTopic = document.getElementById('rosCollisionArcTopic')?.value.trim();
+    const lookaheadTopic = document.getElementById('rosLookaheadTopic')?.value.trim();
     const showCostmap = document.getElementById('showCostmap')?.checked;
-    state.ros.subscriptions = [mapTopic, poseTopic, planTopic, footprintTopic, tfTopic].filter(Boolean);
+    state.ros.subscriptions = [mapTopic, poseTopic, planTopic, footprintTopic, tfTopic,
+        localPlanTopic, collisionArcTopic, lookaheadTopic].filter(Boolean);
     if(showCostmap && costmapTopic) state.ros.subscriptions.push(costmapTopic);
     // map 使用 transient-local / latched 语义时 rosbridge 通常能收到当前地图；throttle 0 表示不节流。
     if(mapTopic) rosSend({op:'subscribe', topic:mapTopic, type:'nav_msgs/msg/OccupancyGrid', throttle_rate:0, queue_length:1});
     if(poseTopic) rosSend({op:'subscribe', topic:poseTopic, type:'geometry_msgs/msg/PoseStamped', throttle_rate:100, queue_length:1});
     if(planTopic) rosSend({op:'subscribe', topic:planTopic, type:'nav_msgs/msg/Path', throttle_rate:100, queue_length:1});
     if(footprintTopic) rosSend({op:'subscribe', topic:footprintTopic, type:'geometry_msgs/msg/PolygonStamped', throttle_rate:100, queue_length:1});
+    if(localPlanTopic) rosSend({op:'subscribe', topic:localPlanTopic, type:'nav_msgs/msg/Path', throttle_rate:100, queue_length:1});
+    if(collisionArcTopic) rosSend({op:'subscribe', topic:collisionArcTopic, type:'nav_msgs/msg/Path', throttle_rate:100, queue_length:1});
+    if(lookaheadTopic) rosSend({op:'subscribe', topic:lookaheadTopic, type:'geometry_msgs/msg/PointStamped', throttle_rate:100, queue_length:1});
     // 局部代价图 1Hz 节流 + 只保留最新一帧，避免占用 rosbridge 带宽
-    if(showCostmap && costmapTopic) rosSend({op:'subscribe', topic:costmapTopic, type:'nav_msgs/msg/OccupancyGrid', throttle_rate:1000, queue_length:1});
+    // 2026-10-16：局部代价图节流从 1000ms 降到 250ms —— 它是 odom 系滚动窗口，
+    // 1Hz 时窗口中心最多落后船 1 秒（遥控开船时肉眼可见"方框不跟船"）。带宽不够时再调回大值。
+    if(showCostmap && costmapTopic) rosSend({op:'subscribe', topic:costmapTopic, type:'nav_msgs/msg/OccupancyGrid', throttle_rate:250, queue_length:1});
     // /tf 用于取 map→odom，把 odom 系的局部代价图贴到 map 系画布上
-    rosSend({op:'subscribe', topic:tfTopic, type:'tf2_msgs/msg/TFMessage', throttle_rate:200, queue_length:1});
+    // 2026-10-16：TF 节流 200→100ms，船位/朝向跟手一点
+    rosSend({op:'subscribe', topic:tfTopic, type:'tf2_msgs/msg/TFMessage', throttle_rate:100, queue_length:1});
 };
 
 // 代价图开关切换：关闭时退订并清空缓存，打开时重新订阅
@@ -2146,6 +2215,33 @@ function handleRosPlan(msg) {
     renderUI();
 }
 
+function handleRosLocalPlan(msg) {
+    if(!msg || !Array.isArray(msg.poses)) return;
+    state.ros.localPlan = {
+        frame: (msg.header && msg.header.frame_id) || 'map',
+        pts: msg.poses.map(ps=>({x:ps.pose.position.x, y:ps.pose.position.y}))
+    };
+    renderUI();
+}
+
+function handleRosCollisionArc(msg) {
+    if(!msg || !Array.isArray(msg.poses)) return;
+    state.ros.collisionArc = {
+        frame: (msg.header && msg.header.frame_id) || 'base_link',
+        pts: msg.poses.map(ps=>({x:ps.pose.position.x, y:ps.pose.position.y}))
+    };
+    renderUI();
+}
+
+function handleRosLookahead(msg) {
+    if(!msg || !msg.point) return;
+    state.ros.lookahead = {
+        frame: (msg.header && msg.header.frame_id) || 'map',
+        x: msg.point.x, y: msg.point.y
+    };
+    renderUI();
+}
+
 // 把带 frame 标注的点列换算到 map 系；无法换算（缺 TF/未知系）时返回 null
 function rosPtsToMapFrame(pts, frame) {
     if(!frame || frame === 'map') return pts;
@@ -2161,6 +2257,26 @@ function rosPtsToMapFrame(pts, frame) {
         return pts.map(p => ({x: T.x + c*p.x - s*p.y, y: T.y + s*p.x + c*p.y}));
     }
     return null;
+}
+
+// 画一条折线（map 系世界坐标点列），dash=true 时虚线
+function drawRosPolyline(pts, color, width, dash) {
+    if(!pts || pts.length < 2) return;
+    const sc = Math.max(state.scale, 0.1);
+    ctxUI.save();
+    ctxUI.beginPath();
+    let started = false;
+    for(const pt of pts) {
+        const p = worldToMapPixel(pt.x, pt.y);
+        if(!p) continue;
+        if(!started) { ctxUI.moveTo(p.x, p.y); started = true; }
+        else ctxUI.lineTo(p.x, p.y);
+    }
+    if(dash) ctxUI.setLineDash([6 / sc, 4 / sc]);
+    ctxUI.strokeStyle = color;
+    ctxUI.lineWidth = width;
+    ctxUI.stroke();
+    ctxUI.restore();
 }
 
 function handleRosFootprint(msg) {
@@ -2467,6 +2583,16 @@ function renderLoop() {
 
 // 启动
 init();
+
+// 2026-10-16：页面如果是从 HTTP 打开的（船端 ~/ros_map_tool/ros_map_tool.sh 起的 8001 端口、
+// 或用 ssh -L 隧道转发到本机 8001），默认就把 rosbridge 指向「页面所在主机」的 9090，
+// 省得在局域网/隧道场景下手工改地址；用 file:// 双击打开时仍是 127.0.0.1（原行为不变）。
+(() => {
+    const el = document.getElementById('rosbridgeUrl');
+    if (!el) return;
+    const host = (location.protocol === 'http:' || location.protocol === 'https:') ? location.hostname : '';
+    if (host) el.value = 'ws://' + host + ':9090';
+})();
 
 </script>
 <script type="module" src="https://static.cloudflareinsights.com/beacon.min.js/v4513226cdae34746b4dedf0b4dfa099e1781791509496" integrity="sha512-ZE9pZaUXND66v380QUtch/5sE9tPFh2zg45pR2PB0CVkCtOREv2AJKkSidISWkysEuQ0EH8faUU5du78bx87UQ==" data-cf-beacon='{"version":"2024.11.0","token":"7939e04a4baf43c8b86a560f74aac60e"}' crossorigin="anonymous"></script>

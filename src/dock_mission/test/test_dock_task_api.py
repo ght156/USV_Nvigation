@@ -41,6 +41,40 @@ def test_parse_gcs_command_unknown_action_returns_none():
     assert parse_gcs_command("not json") is None
 
 
+def test_parse_gcs_command_sentinel_dock_point_means_unspecified():
+    """上层 Decision 无泊位时 lat/lon/yaw 恒发 65536：经纬度应按“不指定”回退泊位库，
+    而不是当非法坐标丢弃整条指令（2026-10-20 兼容）。"""
+    g = parse_gcs_command(
+        '{"action": "one_click_dock", "mission_id": "m", "command_id": "c", '
+        '"dock_lat": 65536.0, "dock_lon": 65536.0, "dock_yaw": 65536.0}'
+    )
+    assert g is not None
+    assert g.command == DockCommand.ONE_CLICK_DOCK
+    assert g.has_dock_point is False
+    assert g.dock_lat is None and g.dock_lon is None
+    assert g.dock_yaw == 65536.0
+
+
+def test_parse_gcs_command_one_sentinel_coord_is_unspecified():
+    # 任一坐标为哨兵（另一个合法）也按“未指定”处理，避免半套坐标覆盖泊位库
+    g = parse_gcs_command(
+        '{"action": "one_click_dock", "dock_lat": 65536.0, "dock_lon": 120.4}'
+    )
+    assert g is not None
+    assert g.has_dock_point is False
+    assert g.dock_lat is None and g.dock_lon == pytest.approx(120.4)
+
+
+def test_parse_gcs_command_real_out_of_range_still_invalid():
+    # 真正的越界（非 65536 哨兵）仍视为非法预泊点，由调用方丢弃整条指令
+    g = parse_gcs_command(
+        '{"action": "one_click_dock", "dock_lat": 95.0, "dock_lon": 120.0}'
+    )
+    assert g is not None
+    assert g.has_dock_point is True
+    assert is_valid_dock_point(g.dock_lat, g.dock_lon) is False
+
+
 def test_parse_gcs_command_dock_yaw_as_number_and_sentinel():
     # 数值类型（非字符串）也能解析
     g = parse_gcs_command(

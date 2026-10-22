@@ -773,7 +773,7 @@ IDLE/RUNNING/PAUSED ──(TF或action丢失)──► WAITING_SYSTEM ──(恢
 |--------|----------|------|--------------|
 | `PLAN_FAILED` | planner_server action ABORTED | 全局规划失败，目标可能在障碍物内或不在地图范围内 | 调整航点坐标 |
 | `CTRL_STUCK` | 位移不足超时（跟随 Nav2 progress_checker） | 机器人被卡住或无法跟踪路径 | 告警、人工介入 |
-| `LOC_LOST` | TF 丢失 / odom 超时 / cov 超阈值 | 定位丢失 | 暂缓发新任务，等待恢复 |
+| `LOC_LOST` | TF 丢失 / odom 超时 / cov 超阈值；任务执行中由 `mission_bridge` 定位看门狗直接 abort NavigateTask | 定位丢失 | 暂缓发新任务，等待 `WAITING_SYSTEM` 恢复后再重发 |
 | `LOC_DEGRADED` | cov 偏高 / GPS fix < 3 / odom 频率低 | 定位精度下降 | 暂缓发新任务 |
 | `MISSION_FAILED` | FollowWaypoints 非 SUCCEEDED 或 missed_waypoints | 任务级失败 | 读 `TASK_FAILED.detail` 获取详情 |
 

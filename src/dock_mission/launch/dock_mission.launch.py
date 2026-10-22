@@ -33,6 +33,11 @@ def _launch_setup(context, *args, **kwargs):
     pkg = get_package_share_directory("dock_mission")
     profile = LaunchConfiguration("profile").perform(context)
     use_sim = LaunchConfiguration("use_sim_time").perform(context) == "true"
+    # 定位源切换：空 = 尊重 yaml/代码默认；非空 = 覆盖 dock_mission_node 的
+    # odom_speed_topic（SETTLE 停稳门速度源）。与 usv_docking docking.launch.py
+    # 的 odom_topic 用法一致——两边必须传同一个话题，否则 SETTLE 与 FSM
+    # 读不同里程计（2026-10-13 二审 P1-8）。
+    odom_topic = LaunchConfiguration("odom_topic").perform(context).strip()
 
     base = os.path.join(pkg, "config", "dock_mission.yaml")
     overlay = os.path.join(pkg, "config", f"dock_mission_{profile}.yaml")
@@ -54,12 +59,15 @@ def _launch_setup(context, *args, **kwargs):
         ("dock_mission_node", "dock_mission_node"),
     ]
     for exe, key in entries:
+        params = params_for(key) + sim_param
+        if odom_topic:
+            params.append({"odom_speed_topic": odom_topic})
         nodes.append(
             Node(
                 package="dock_mission",
                 executable=exe,
                 name=key,
-                parameters=params_for(key) + sim_param,
+                parameters=params,
                 output="screen",
             )
         )
@@ -71,6 +79,13 @@ def generate_launch_description() -> LaunchDescription:
         [
             DeclareLaunchArgument("profile", default_value="real"),
             DeclareLaunchArgument("use_sim_time", default_value="false"),
+            DeclareLaunchArgument(
+                "odom_topic",
+                default_value="",
+                description="定位源里程计话题：空 = 尊重 yaml 默认 "
+                            "(/mavros/gps_input/local)；切 SLAM 传 "
+                            "/slam/localization（与 docking.launch.py 传同一个值）",
+            ),
             OpaqueFunction(function=_launch_setup),
         ]
     )

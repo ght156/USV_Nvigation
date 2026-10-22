@@ -192,6 +192,7 @@ usv_docking/config/
 | 参数 | 文件 | 说明 |
 |------|------|------|
 | `use_gnss_staging` | `dock_mission.yaml`（实船默认 true） | `true`=用泊位库 GNSS 预泊点（WGS84 直发） |
+| `accept_gcs_staging_override` | `dock_mission.yaml`（实船默认 false） | `false`=忽略 `/gcs_dock/command` 里的 `dock_lat/dock_lon/dock_yaw`，固定使用船端泊位库 |
 | `bay_id` | `dock_mission.yaml` | 对应 `dock_database.yaml` 里的 bay 名 |
 
 ---
@@ -283,6 +284,7 @@ cmd_vel_dock_topic: "/cmd_vel_dock"    # usv_docking 改发这里（需改 usv_d
 | `/dock/home` | `Bool` | `data=true` 开始归港（参数 `dock_home_topic` 可改） |
 | `/dock/mission/start` | `Trigger` | 同上 |
 | `/dock/mission/cancel` | `Trigger` | 取消归港 |
+| `/dock/in_dock` | `m_common/srv/QueryInDock` | 出泊前查询"船是否在坞内"（server 在本节点；参数 `in_dock_service` 可改，置空关闭） |
 | `/task_event` | `String` | mission_bridge 任务事件（内部订阅） |
 | `/dock/status` | `String` | usv_docking 状态（内部订阅，判成功/需重 Nav） |
 
@@ -367,9 +369,10 @@ cd src/dock_mission
 
 | 方向 | 接口 | 说明 |
 |------|------|------|
-| GCS → 船 | `/gcs_dock/command` | JSON `action`：一键归港 / 仅精靠泊 / 出泊 / 取消；可选 `dock_lat`/`dock_lon`/`dock_yaw` 指定**预泊点**（WGS84 经纬度 + 预泊点处**船艏航向**，度，ENU/map 系 CCW、0°=东——船尾朝坞 ⇒ 取船艏朝坞外的航向；`dock_yaw` 超 `(−360,360)` 或 `65536.0` = 不指定朝向），下发后 Nav 到该点再精确归港，缺省用泊位库 `gnss_staging`；yaw 全程按**度**透传给 mission_bridge，转弧度只在 mission_bridge 生成 Nav2 位姿时做 |
+| GCS → 船 | `/gcs_dock/command` | JSON `action`：一键归港 / 仅精靠泊 / 出泊 / 取消。实船默认忽略 `dock_lat`/`dock_lon`/`dock_yaw`，固定使用船端泊位库 `/dock_database.yaml`；只有联调显式开启 `accept_gcs_staging_override=true` 时才接受外部预泊点 |
 | 上层 → 船 | `/dock/home` | `Bool`：一键归港 |
 | 上层 → 船 | `/dock/mission/start` | `Trigger` service：一键归港 |
+| 上层 → 船 | `/dock/in_dock` | `m_common/srv/QueryInDock` service：出泊前查询"船是否在坞内"（二维码定位判定，§ 对接文档 2.4） |
 | 船 → 上层 | `/dock_task/status` | 约 5Hz：`run_state`、`retry_count`、`needs_manual_takeover`、`dock_active` |
 | 船 → 上层 | `/dock_task/event`（service） | `DOCK_SUCCEEDED`、`DOCK_FAILED`、`MANUAL_TAKEOVER_REQUESTED` 等，嵌软回 ACK（`m_common/srv/DockTaskEvent`） |
 | 船 → 本地 | `/dock_task/event_log`（可选） | 同 JSON 观察流（日志/联调；参数 `dock_task_event_log_topic`，置空关闭） |

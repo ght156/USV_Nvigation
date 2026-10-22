@@ -3,12 +3,14 @@
 
 用法：
     ros2 launch usv_docking docking.launch.py                      # 实船默认（use_sim_time=false）
-    ros2 launch usv_docking docking.launch.py test_only:=false     # 接管 /cmd_vel_nav
+    ros2 launch usv_docking docking.launch.py test_only:=true      # 调试：只发 /docking/cmd_vel_test
     ros2 launch usv_docking docking.launch.py params_file:=/path/to/docking_real.yaml
     ros2 launch usv_docking docking.launch.py odom_topic:=/slam/localization  # 定位源切 SLAM
+    # （切定位源时 dock_mission.launch.py 的 odom_topic 必须传同一个值）
 
-test_only=false 才会向 /cmd_vel_nav 发速度（真船/联调后期），
-默认 true 只发 /docking/cmd_vel_test。
+⚠️ 本 launch 的 test_only 默认是 **false**（实船配置：直接接管 /cmd_vel_nav），
+与代码 declare_parameter 的保险默认 true 相反——调试环境务必显式
+test_only:=true，不要凭旧注释以为默认只发测试话题（2026-10-13 二审 P1-9 修正）。
 params_file 可指向实船标定后的整份配置；默认 config/docking.yaml
 与代码 declare_parameter 默认值逐项一致（test_param_defaults.py 强制）。
 odom_topic 为空时尊重 params_file / 代码默认（/mavros/gps_input/local）；

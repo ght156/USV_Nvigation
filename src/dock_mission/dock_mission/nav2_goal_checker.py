@@ -21,14 +21,14 @@ class GoalCheckerProfile:
 
 CRUISE_PROFILE = GoalCheckerProfile(
     name="general_goal_checker",
-    xy_goal_tolerance=1.0,
+    xy_goal_tolerance=2.0,
     yaw_goal_tolerance=1.0,
 )
 
 DOCKING_PROFILE = GoalCheckerProfile(
     name="docking_goal_checker",
-    xy_goal_tolerance=0.5,
-    yaw_goal_tolerance=0.15,
+    xy_goal_tolerance=1.0,
+    yaw_goal_tolerance=0.4,
 )
 
 

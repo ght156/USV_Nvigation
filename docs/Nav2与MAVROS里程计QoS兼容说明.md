@@ -129,4 +129,4 @@ ros2 topic echo /mavros/gps_input/local --qos-reliability best_effort --once
 - `is_stuck_condition` 订阅的话题是字面量 `"odom"`（即 `/odom`），**不是** `/mavros/gps_input/local`。若 BT 里用到 is_stuck，需单独确认 `/odom` 是否有数据。
 - Nav2 是源码改动，后续升级 Nav2 需重新打补丁。
 - `nav_status_aggregator` 的 GPS 订阅 `/gps/fixed_cov` 仍为默认 QoS；若该发布端（GI320 GNSS 驱动）也是 best_effort，需同样处理（当前不在本次 odom 范围内）。
-- `DockTaskCommand`：`/dock_task/command` service 已于 2026-07-28 从 `m_common` **故意删除**；`dock_mission_node.py` 用 `try/except ImportError` 优雅降级（不创建该 service），**并非缺失文件，无需补**。
+- `DockTaskCommand`：`/dock_task/command` service 已于 2026-07-28 从 `m_common` **故意删除**；2026-10-13 起 `dock_mission_node.py` 中的 try/except 降级残留与 `require_camera` 透传也一并移除（唯一携带 require_camera 的入口已不存在）。

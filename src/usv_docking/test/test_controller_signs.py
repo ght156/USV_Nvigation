@@ -10,6 +10,7 @@ import pytest
 import rclpy
 
 from geometry_msgs.msg import PoseStamped
+from rclpy.parameter import Parameter
 from std_msgs.msg import Bool, String
 
 from usv_docking.docking_motion_controller import (
@@ -17,6 +18,7 @@ from usv_docking.docking_motion_controller import (
     MODE_BACK_IN,
     MODE_EXIT_FORWARD,
     MODE_HOLD,
+    MODE_UNDOCK_FORWARD,
 )
 
 @pytest.fixture(scope="module")
@@ -33,7 +35,7 @@ def ctrl(ros_context):
     node.destroy_node()
 
 
-def _feed_pose(ctrl, x, y, yaw):
+def _feed_pose(ctrl, x, y, yaw, source="VISION"):
     msg = PoseStamped()
     msg.pose.position.x = x
     msg.pose.position.y = y
@@ -41,7 +43,7 @@ def _feed_pose(ctrl, x, y, yaw):
     msg.pose.orientation.w = math.cos(yaw / 2)
     ctrl._pose_cb(msg)
     src = String()
-    src.data = "VISION"
+    src.data = source
     ctrl._src_cb(src)
 
 
@@ -419,6 +421,67 @@ def test_motion_mode_keeps_publishing_when_pose_invalid(ctrl):
     assert len(cap.sent) == 30
 
 
+@pytest.mark.parametrize(
+    "mode,speed_param",
+    [(MODE_EXIT_FORWARD, "abort_exit_speed"), (MODE_UNDOCK_FORWARD, "undock_speed")],
+)
+def test_exit_modes_drive_open_loop_when_pose_invalid(ctrl, mode, speed_param):
+    """仅 blind_exit_enabled=true 时：出坞/撤离位姿 INVALID 开环直行。
+    默认 false 已取消盲开，见 test_exit_modes_stop_when_pose_invalid_by_default。"""
+    ctrl.set_parameters([Parameter("blind_exit_enabled", value=True)])
+    cap = _CapturePub()
+    ctrl._cmd_pub = cap
+    ctrl._safety_cb(Bool(data=False))  # 伪造新鲜 safety，专验位姿门豁免
+    ctrl._mode_cb(String(data=mode))
+    for _ in range(80):  # 斜坡爬满目标速度（accel 0.30×dt 0.05=0.015/tick）
+        ctrl._control_loop()
+    assert cap.sent
+    v, w = cap.sent[-1]
+    assert v == pytest.approx(float(ctrl.get_parameter(speed_param).value))
+    assert abs(w) < 1e-9
+
+
+@pytest.mark.parametrize("mode", [MODE_EXIT_FORWARD, MODE_UNDOCK_FORWARD])
+def test_exit_modes_stop_when_pose_invalid_by_default(ctrl, mode):
+    """默认 blind_exit_enabled=false：位姿 INVALID 时出坞/撤离都不开环直行，
+    输出零速（由 FSM 等待视觉/超时失败）。"""
+    cap = _CapturePub()
+    ctrl._cmd_pub = cap
+    ctrl._safety_cb(Bool(data=False))
+    ctrl._mode_cb(String(data=mode))
+    for _ in range(20):
+        ctrl._control_loop()
+    assert cap.sent
+    assert all(abs(v) < 1e-9 and abs(w) < 1e-9 for v, w in cap.sent)
+
+
+@pytest.mark.parametrize("mode", [MODE_EXIT_FORWARD, MODE_UNDOCK_FORWARD])
+def test_exit_modes_stop_on_prediction_by_default(ctrl, mode):
+    """默认不盲开：出泊/撤离只有 VISION 才动；ODOM_PREDICTION 也零速。"""
+    cap = _CapturePub()
+    ctrl._cmd_pub = cap
+    ctrl._safety_cb(Bool(data=False))
+    _feed_pose(ctrl, -2.0, 0.0, math.pi, source="ODOM_PREDICTION")
+    ctrl._mode_cb(String(data=mode))
+    for _ in range(20):
+        ctrl._control_loop()
+    assert cap.sent
+    assert all(abs(v) < 1e-9 for v, _ in cap.sent)
+
+
+def test_undock_moves_with_vision_by_default(ctrl):
+    """默认不盲开，但新鲜 VISION 时 UNDOCK_FORWARD 正常闭环前进。"""
+    cap = _CapturePub()
+    ctrl._cmd_pub = cap
+    ctrl._safety_cb(Bool(data=False))
+    _feed_pose(ctrl, -2.0, 0.0, math.pi, source="VISION")
+    ctrl._mode_cb(String(data=MODE_UNDOCK_FORWARD))
+    for _ in range(80):
+        ctrl._control_loop()
+    assert cap.sent
+    assert cap.sent[-1][0] > 0.0
+
+
 def test_hold_safety_stop_republishes_zero(ctrl):
     """保持态静默期间收到 safety_stop：补发零速帧。"""
     cap = _CapturePub()
@@ -429,3 +492,87 @@ def test_hold_safety_stop_republishes_zero(ctrl):
     ctrl._control_loop()
     assert len(cap.sent) == 1
     assert cap.sent[0] == (0.0, 0.0)
+
+
+# ══════════════ 本地断流/NaN 防线（2026-10-13，源码审查 P0）══════════════
+
+
+def test_stale_pose_msg_holds_motion(ctrl):
+    """pose/source 消息龄期超 pose_msg_timeout_sec：_pose_valid() 判不可用，
+    运动态**当帧**输出零速（绕过斜坡）——safety 节点自身死亡时的控制器本地
+    最后一道防线。关键前置：失效前 _v_cmd 必须非零（斜坡上有惯性指令），
+    否则测不到"立即清零"（2026-10-13 二审 P0-2 指出的旧测试盲区）。"""
+    from rclpy.duration import Duration
+
+    cap = _CapturePub()
+    ctrl._cmd_pub = cap
+    ctrl._safety_cb(Bool(data=False))
+    _feed_pose(ctrl, -5.0, 0.0, math.pi)  # 坞外 3m，APPROACH 应正常给倒船速度
+    ctrl._mode_cb(String(data="APPROACH"))
+    ctrl._control_loop()
+    assert cap.sent and cap.sent[-1][0] != 0.0  # 新鲜位姿下正常输出
+    assert ctrl._v_cmd != 0.0  # 失效前斜坡上确有非零指令
+
+    # 消息断流：把两条消息的接收时间拨回 2s 前（> pose_msg_timeout_sec=1.0）
+    old = ctrl.get_clock().now() - Duration(seconds=2.0)
+    ctrl._pose_msg_time = old
+    ctrl._src_msg_time = old
+    assert not ctrl._pose_valid()
+    cap.sent.clear()
+    ctrl._control_loop()
+    assert cap.sent[-1] == (0.0, 0.0)  # 第一帧即清零，不经斜坡
+    assert ctrl._v_cmd == 0.0
+    assert ctrl._w_cmd == 0.0
+
+
+def test_stale_fsm_mode_stops_motion(ctrl):
+    """FSM target_mode 断流：位姿仍新鲜也必须零速——不得按缓存的最后一个
+    运动模式继续开（2026-10-13 二审 P0-3）。"""
+    from rclpy.duration import Duration
+
+    cap = _CapturePub()
+    ctrl._cmd_pub = cap
+    ctrl._safety_cb(Bool(data=False))
+    _feed_pose(ctrl, -5.0, 0.0, math.pi)
+    ctrl._mode_cb(String(data="APPROACH"))
+    ctrl._control_loop()
+    assert cap.sent[-1][0] != 0.0
+
+    ctrl._mode_msg_time = ctrl.get_clock().now() - Duration(seconds=2.0)
+    cap.sent.clear()
+    ctrl._control_loop()
+    assert cap.sent[-1] == (0.0, 0.0)
+
+
+def test_stale_safety_msg_stops_motion(ctrl):
+    """safety 消息断流：最后收到的 safety_stop=false 不可无限期信任
+    （2026-10-13 二审 P0-3）。"""
+    from rclpy.duration import Duration
+
+    cap = _CapturePub()
+    ctrl._cmd_pub = cap
+    ctrl._safety_cb(Bool(data=False))
+    _feed_pose(ctrl, -5.0, 0.0, math.pi)
+    ctrl._mode_cb(String(data="APPROACH"))
+    ctrl._control_loop()
+    assert cap.sent[-1][0] != 0.0
+
+    ctrl._safety_msg_time = ctrl.get_clock().now() - Duration(seconds=2.0)
+    cap.sent.clear()
+    ctrl._control_loop()
+    assert cap.sent[-1] == (0.0, 0.0)
+
+
+def test_nan_pose_frame_dropped(ctrl):
+    """NaN/inf 位姿帧直接丢弃：不污染缓存位姿，也不刷新新鲜度。"""
+    _feed_pose(ctrl, -2.0, 0.5, math.pi)
+    good_stamp = ctrl._pose_msg_time
+
+    bad = PoseStamped()
+    bad.pose.position.x = float("nan")
+    bad.pose.orientation.w = 1.0
+    ctrl._pose_cb(bad)
+
+    assert ctrl._pose_x == -2.0
+    assert ctrl._pose_y == 0.5
+    assert ctrl._pose_msg_time == good_stamp

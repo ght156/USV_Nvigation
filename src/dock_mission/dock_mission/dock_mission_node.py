@@ -3,14 +3,20 @@
 from __future__ import annotations
 
 import json
+import math
 import time
 from pathlib import Path
 from typing import Optional
 
 import rclpy
+from rclpy.action import ActionClient
 from rclpy.node import Node
-from std_msgs.msg import Bool, Empty, String
+from std_msgs.msg import Bool, Empty, Float32, String
 from std_srvs.srv import Trigger
+
+from geometry_msgs.msg import PoseStamped
+from nav_msgs.msg import Odometry
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 
 from dock_mission.bay_loader import load_bay
 from dock_mission.dock_task_api import (
@@ -30,14 +36,29 @@ from dock_mission.task_event import parse_task_event
 from dock_mission.types import MissionState, SpeedAuthority
 
 try:
-    from m_common.srv import DockTaskCommand  # /dock_task/command（可能已移除）
-except ImportError:  # pragma: no cover - before colcon build
-    DockTaskCommand = None  # type: ignore[misc, assignment]
-
-try:
     from m_common.srv import DockTaskEvent  # /dock_task/event 上报 service
 except ImportError:  # pragma: no cover - before colcon build
     DockTaskEvent = None  # type: ignore[misc, assignment]
+
+try:
+    from m_common.srv import SetChannelEnabled  # apriltag 检测通道开关 service
+except ImportError:  # pragma: no cover - before colcon build
+    SetChannelEnabled = None  # type: ignore[misc, assignment]
+
+try:
+    from m_common.srv import QueryInDock  # /dock/in_dock 出泊前"船是否在坞内"查询
+except ImportError:  # pragma: no cover - before colcon build
+    QueryInDock = None  # type: ignore[misc, assignment]
+
+try:
+    from usv_rs485_driver.srv import SetDO  # 船坞背光板（DO bit1），船端包
+except ImportError:  # pragma: no cover - 主机/仿真无此包
+    SetDO = None  # type: ignore[misc, assignment]
+
+try:
+    from usv_rs485_driver.action import ControlDO  # 只开灯不松闸（mask=2）
+except ImportError:  # pragma: no cover - 主机/仿真无此包
+    ControlDO = None  # type: ignore[misc, assignment]
 
 
 class DockMissionNode(Node):
@@ -49,10 +70,14 @@ class DockMissionNode(Node):
         self._state = MissionState.IDLE
         self._staging_retry = 0
         self._settle_elapsed = 0.0
+        self._settle_still_hold = 0.0
         self._complete_settle_elapsed = 0.0
         self._pending_nav = False
         self._staging_send_inflight = False
         self._staging_send_mono = 0.0
+        # 预泊下发尝试序号：每次 _start_nav_to_staging +1，done_cb 据此丢弃
+        # 上一轮（已超时/已重发）的迟到响应（2026-10-13 二审 P0-1）
+        self._staging_attempt = 0
         self._mission_id = "dock_staging"
         self._command_id = ""
         self._staging_override: Optional[tuple[float, float, float]] = None
@@ -62,7 +87,31 @@ class DockMissionNode(Node):
         self._needs_reapproach = False
         self._last_fail_reason = ""
         self._session_start_mono: Optional[float] = None
+        # 相机握手未实现：camera_ready 恒 True 仅为 status schema 兼容（嵌软可能在读），
+        # 勿当作相机就绪门
         self._camera_ready = True
+        # SETTLE 实测停稳门的速度来源（/mavros/gps_input/local，与 docking_fsm 一致）
+        self._odom_speed: Optional[float] = None
+        self._odom_yaw_rate: Optional[float] = None
+        self._odom_speed_stamp = None
+        # /dock/in_dock 查询用的坞系位姿缓存（docking_pose_estimator 输出：
+        # base_link 在 dock_est 系的平面位姿 + 来源分级）
+        self._dock_pose_xy: Optional[tuple[float, float]] = None
+        self._dock_pose_stamp = None
+        self._dock_pose_source = ""
+        # 估计器的“距最近视觉观测秒数”（Float32，inf=从未见过 Tag）。用于限制
+        # ODOM_PREDICTION 的可用龄期，避免相机掉线后拿很旧的视觉判在坞。
+        self._dock_measurement_age: Optional[float] = None
+        self._dock_measurement_age_stamp = None
+        # usv_docking 背光会话标志（/dock/status 缓存）：查询据此避免互抢
+        self._fsm_backlight_active = False
+        # 停稳门（2026-10-13 三审 P1）：按连续有效观测的实际时间累计，
+        # 与发布频率解耦。_settle_hold_last_stamp=已处理的最新帧戳（判新帧）；
+        # start/last/frames=当前连续停稳段的首帧戳/末帧戳/有效帧数
+        self._settle_hold_last_stamp = None
+        self._settle_still_start_stamp = None
+        self._settle_still_last_stamp = None
+        self._settle_still_frames = 0
         # 事件上报 ACK 跟踪（事件通道已从 topic 改为 service）
         self._event_ack_ok = True
         self._event_ack_failures = 0
@@ -97,13 +146,79 @@ class DockMissionNode(Node):
 
         self.create_service(Trigger, "/dock/mission/start", self._start_srv)
         self.create_service(Trigger, "/dock/mission/cancel", self._cancel_srv)
-        if DockTaskCommand is not None:
-            self.create_service(DockTaskCommand, "/dock_task/command", self._dock_task_command_srv)
         # 事件上报 client：船端(dock_mission) → 上层状态机(嵌软)，等待 ACK
         self._event_client = None
         if DockTaskEvent is not None:
             self._event_client = self.create_client(
                 DockTaskEvent, self._dock_task_event_service
+            )
+
+        # apriltag 检测通道开关 client：进 SETTLE / 出泊交接时开启，
+        # 归港/出泊成功收尾关闭（2026-10-13）
+        self._apriltag_channel_client = None
+        apriltag_srv = str(
+            self.get_parameter("apriltag_channel_service").value
+        ).strip()
+        if SetChannelEnabled is not None and apriltag_srv:
+            self._apriltag_channel_client = self.create_client(
+                SetChannelEnabled, apriltag_srv
+            )
+
+        # 船坞背光板：点亮走 ControlDO action（start=true, mask=2，只开灯不松闸，
+        # 2026-10-20）；关闭仍走 SetDO 全掩码写 0（查询结束恢复）。
+        self._set_do_client = None
+        set_do_srv = str(self.get_parameter("set_do_service").value).strip()
+        if SetDO is not None and set_do_srv:
+            self._set_do_client = self.create_client(SetDO, set_do_srv)
+
+        self._ControlDO = ControlDO
+        self._control_do_client = None
+        if ControlDO is not None:
+            self._control_do_client = ActionClient(
+                self,
+                ControlDO,
+                str(self.get_parameter("control_do_action").value),
+            )
+
+        # SETTLE 停稳门的速度来源（与 docking_fsm 同话题同 QoS，RELIABLE）
+        self.create_subscription(
+            Odometry,
+            str(self.get_parameter("odom_speed_topic").value),
+            self._odom_speed_cb,
+            10,
+        )
+
+        # 二维码定位链输出（/dock/in_dock 查询的数据源）
+        self.create_subscription(
+            PoseStamped,
+            str(self.get_parameter("dock_pose_topic").value),
+            self._dock_pose_cb,
+            10,
+        )
+        self.create_subscription(
+            String,
+            str(self.get_parameter("dock_pose_source_topic").value),
+            self._dock_pose_source_cb,
+            10,
+        )
+        # 视觉观测龄期：用于限制 ODOM_PREDICTION 的可用龄期
+        self.create_subscription(
+            Float32,
+            str(self.get_parameter("dock_measurement_age_topic").value),
+            self._dock_measurement_age_cb,
+            10,
+        )
+
+        # 出泊前"船是否在坞内"查询（上层/嵌软 client → 本节点 server，
+        # 2026-10-15）。handler 可能阻塞数秒等视觉锚定，放独立互斥回调组，
+        # main() 用多线程 executor 保证不饿死默认组的定时器/订阅回调。
+        in_dock_srv_name = str(self.get_parameter("in_dock_service").value).strip()
+        if QueryInDock is not None and in_dock_srv_name:
+            self.create_service(
+                QueryInDock,
+                in_dock_srv_name,
+                self._in_dock_srv,
+                callback_group=MutuallyExclusiveCallbackGroup(),
             )
 
         self.create_timer(0.2, self._tick)
@@ -118,15 +233,74 @@ class DockMissionNode(Node):
             "dock_database_path": "",
             "map_yaml_path": "",
             "use_gnss_staging": True,  # 实船默认 WGS84 预泊点；False=map_staging 反解(标定用)
+            # 默认拒绝上层/GCS 下发的预泊点，始终使用 dock_database.yaml 的本地标定点。
+            # 仅联调需要临时接受 dock_lat/dock_lon/dock_yaw 覆盖时才显式设为 True。
+            "accept_gcs_staging_override": False,
             "staging_retry_max": 5,  # 2026-10-06 现场要求
             "settle_sec": 2.5,
             "complete_settle_sec": 2.0,
+            # SETTLE 实测停稳门（2026-10-13 源码审查 P0）：原实现是纯延时交接，
+            # 船还可能带着风/流残余速度就启动精靠泊。开启后要求速度源新鲜且
+            # 实测速度 <= settle_max_speed 持续 settle_still_hold_sec 才交接；
+            # 一直停不稳/速度源缺测超 settle_timeout_sec 走 staging 重试管线。
+            # 阈值与 docking_fsm 的 approach_stop_speed/hold_sec 对齐。
+            "settle_require_still": True,  # false 回退纯 settle_sec 延时
+            "odom_speed_topic": "/mavros/gps_input/local",
+            "settle_max_speed": 0.15,
+            "settle_max_yaw_rate": 0.1,  # rad/s：原地偏航未稳也不算停稳（2026-10-13 二审 P1-4）
+            "settle_still_hold_sec": 0.5,
+            # 停稳门频率兼容（2026-10-13 三审 P1）：停稳时长按连续有效观测的
+            # 实际时间累计；相邻帧间隔或无新帧沉默超 settle_max_frame_gap_sec
+            # 才清零重计（默认 1s，2Hz 低频里程计可用），且至少
+            # settle_min_still_frames 帧有效观测才放行，防单帧零速凑数
+            "settle_max_frame_gap_sec": 1.0,
+            "settle_min_still_frames": 3,
+            "settle_timeout_sec": 15.0,
             "dock_home_topic": "/dock/home",
             "gcs_dock_command_topic": "/gcs_dock/command",
             "dock_task_status_topic": "/dock_task/status",
             "dock_task_event_service": "/dock_task/event",
             "dock_task_event_log_topic": "/dock_task/event_log",
             "event_ack_timeout": 3.0,
+            # 到达预泊点（进入 SETTLE）异步开启后视相机二维码检测通道
+            #（2026-10-13）：巡航段关闭检测省算力，快到/到达预泊点才打开。
+            # 置空服务名 = 关闭本功能（仿真/无相机环境）
+            "apriltag_channel_service": "/apriltag_node/set_channel_enabled",
+            "apriltag_channel": "all",  # 通道名；"all"/空 = 全部通道
+            # 出泊前"船是否在坞内"查询 service（2026-10-15）：上层（嵌软）出泊前
+            # 调用，用二维码定位链 /docking/dock_pose（base_link 在 dock 系位姿，
+            # 坞中心/充电位为原点，+x 朝坞内，坞外 x<0）+ /docking/pose_source
+            # 做几何判定。置空服务名 = 不注册本 service。
+            "in_dock_service": "/dock/in_dock",
+            "dock_pose_topic": "/docking/dock_pose",
+            "dock_pose_source_topic": "/docking/pose_source",
+            "dock_measurement_age_topic": "/docking/measurement_age",
+            # 在坞区域（dock 系，米）：x∈[x_min,x_max] 且 |y|<=y_max 判在坞内。
+            # 停稳充电位 x≈0（容差 0.15/0.10，见 docking.yaml docked_*_tol），
+            # 出泊完成 x≈-3（undock_complete_x）；半入坞也算在坞内（出泊可行）。
+            "in_dock_x_min": -1.5,
+            "in_dock_x_max": 1.0,
+            "in_dock_y_max": 0.6,
+            # 缓存位姿最大龄期：estimator 正常 20Hz 恒发，超此视为缺测
+            "in_dock_pose_max_age_sec": 1.5,
+            # 在坞判定对 ODOM_PREDICTION 的额外限制：相机掉线后锚点死推算会
+            # 持续 70s，不能拿“10 秒前的最后一次视觉”判是否在坞。推算龄期
+            # 超此值即视为不可用（返回 INVALID，等相机恢复/人工）；VISION 不受限。
+            "in_dock_prediction_max_age_sec": 3.0,
+            # wait_vision=true 且位姿无效时，临时打开二维码检测通道等视觉锚定的
+            # 上限（首锚需 8 帧共识，秒级）
+            "in_dock_vision_timeout_sec": 6.0,
+            # 查询结束后是否恢复关闭由本查询打开的检测通道与背光
+            #（会话进行中不动通道/背光）
+            "in_dock_restore_channel": True,
+            # 船坞背光板：点亮走 ControlDO action start=true + mask=2（只开灯
+            # 不松闸，2026-10-20）；关闭走 SetDO service 写 0。等视觉锚定前
+            # 点亮，否则黑天 Tag 不可见永远等不到锚。
+            # 置空服务名/action 名或掩码 0 = 查询不控制背光（仿真/无背光船坞）
+            "set_do_service": "set_do",
+            # 点亮背光用 ControlDO action（mask=2 只开灯不松闸）；关闭用 SetDO 0
+            "control_do_action": "control_do",
+            "in_dock_backlight_mask": 2,
             "send_waypoints_service": "/mission_bridge/send_waypoints",
             "cancel_mission_service": "/mission_bridge/cancel_mission",
             "nav2_controller_node": "/controller_server",
@@ -134,10 +308,13 @@ class DockMissionNode(Node):
             "use_goal_checker_selector": True,
             "cruise_goal_checker_id": "general_goal_checker",
             "docking_goal_checker_id": "docking_goal_checker",
-            "cruise_xy_goal_tolerance": 1.0,
+            # 2026-10-19/20：与 nav2_params_xingfei.yaml 同步——巡航 2.0（防到点转圈），
+            # 归港预泊 1.0/0.4。运行时本节点会 set_parameters 覆盖 controller_server
+            # 的同名 goal_checker 参数，所以这里必须与 yaml 保持一致，否则改 yaml 不生效。
+            "cruise_xy_goal_tolerance": 2.0,
             "cruise_yaw_goal_tolerance": 1.0,
-            "docking_xy_goal_tolerance": 0.5,
-            "docking_yaw_goal_tolerance": 0.15,
+            "docking_xy_goal_tolerance": 1.0,
+            "docking_yaw_goal_tolerance": 0.4,
             "dock_mission_id": "dock_staging",
         }
         for name, value in defaults.items():
@@ -158,6 +335,9 @@ class DockMissionNode(Node):
             except Exception:
                 self._map_yaml = Path("")
         self._use_gnss = bool(g("use_gnss_staging").value)
+        self._accept_gcs_staging_override = bool(
+            g("accept_gcs_staging_override").value
+        )
         self._mission_id = str(g("dock_mission_id").value)
         self._gcs_dock_command_topic = str(g("gcs_dock_command_topic").value)
         self._dock_task_status_topic = str(g("dock_task_status_topic").value)
@@ -252,6 +432,7 @@ class DockMissionNode(Node):
             camera_ready=self._camera_ready,
             event_ack_ok=self._event_ack_ok,
             event_ack_failures=self._event_ack_failures,
+            odom_speed=self._odom_speed,
         )
         msg = String()
         msg.data = dumps_json(payload)
@@ -276,9 +457,289 @@ class DockMissionNode(Node):
         self.get_logger().info(f"mission {old.value} → {new_state.value} {note}")
         if new_state == MissionState.SETTLE:
             self._settle_elapsed = 0.0
+            self._settle_still_hold = 0.0
+            self._settle_hold_last_stamp = None
+            self._settle_still_start_stamp = None
+            self._settle_still_last_stamp = None
+            self._settle_still_frames = 0
+            # 到达预泊点：开启后视相机二维码检测，给交接精靠泊预热视觉
+            self._set_apriltag_channels(True, reason="到达预泊点")
+        if new_state == MissionState.UNDOCK_HANDOFF:
+            # 出泊交接：同样开启检测（出泊后常紧接归港，且坞内段可用视觉辅助）
+            self._set_apriltag_channels(True, reason="出泊交接")
+        if new_state == MissionState.DOCK_HANDOFF:
+            # 交接精靠泊：开启检测。dock_only 直连不走 SETTLE（没有预热点），必须在这里开，
+            # 否则 usv_docking 进 ACQUIRE_TAG 时通道还是关的 → 一直 ACQUIRE_TIMEOUT
+            # （2026-10-13 现场踩到）；nav 路径 SETTLE 已开过，这里幂等重申，
+            # 预泊/交接失败重试回 DOCK_HANDOFF 时也能补开。
+            self._set_apriltag_channels(True, reason="交接精靠泊")
         if new_state == MissionState.COMPLETE_SETTLE:
             self._complete_settle_elapsed = 0.0
         self._state = new_state
+
+    def _set_apriltag_channels(self, enabled: bool, *, reason: str) -> None:
+        """异步开关 apriltag 检测通道（2026-10-13）。
+
+        开启等效：ros2 service call /apriltag_node/set_channel_enabled
+        m_common/srv/SetChannelEnabled "{channel: 'all', enabled: true}"。
+        开：进入 SETTLE（到达预泊点）/ DOCK_HANDOFF（交接精靠泊，dock_only 直连
+        只经过这里）/ UNDOCK_HANDOFF（出泊交接）；
+        关：归港/出泊成功收尾。服务不在线只告警不阻塞 FSM——主流程不依赖
+        本次调用的回执，节点随后上线时由下一次触发点补发。"""
+        if self._apriltag_channel_client is None:
+            return
+        if not self._apriltag_channel_client.service_is_ready():
+            self.get_logger().warn(
+                "apriltag 通道开关服务暂不在线，仍发起异步调用（结果见后续日志）"
+            )
+        req = SetChannelEnabled.Request()
+        req.channel = str(self.get_parameter("apriltag_channel").value)
+        req.enabled = enabled
+        fut = self._apriltag_channel_client.call_async(req)
+        fut.add_done_callback(
+            lambda f, e=enabled, r=reason: self._apriltag_channel_done(f, e, r)
+        )
+
+    def _apriltag_channel_done(self, fut, enabled: bool, reason: str) -> None:
+        action = "开启" if enabled else "关闭"
+        try:
+            resp = fut.result()
+        except Exception as exc:  # noqa: BLE001
+            self.get_logger().warn(f"apriltag 通道{action}调用失败({reason}): {exc}")
+            return
+        if resp.success:
+            self.get_logger().info(
+                f"apriltag 检测通道已{action}({reason}): {resp.message}"
+            )
+        else:
+            self.get_logger().warn(f"apriltag 通道{action}被拒({reason}): {resp.message}")
+
+    # ── /dock/in_dock：出泊前"船是否在坞内"查询（2026-10-15）──
+
+    def _dock_pose_cb(self, msg: PoseStamped) -> None:
+        self._dock_pose_xy = (msg.pose.position.x, msg.pose.position.y)
+        self._dock_pose_stamp = self.get_clock().now()
+
+    def _dock_pose_source_cb(self, msg: String) -> None:
+        self._dock_pose_source = msg.data
+
+    def _dock_measurement_age_cb(self, msg: Float32) -> None:
+        age = float(msg.data)
+        # NaN 不采信；inf 是估计器“从未见过 Tag”的合法表达
+        if math.isnan(age):
+            return
+        self._dock_measurement_age = age
+        self._dock_measurement_age_stamp = self.get_clock().now()
+
+    def _measurement_age_usable(self) -> Optional[float]:
+        """返回新鲜的 measurement_age；缺测/过期返回 None。"""
+        if self._dock_measurement_age_stamp is None:
+            return None
+        age = (
+            self.get_clock().now() - self._dock_measurement_age_stamp
+        ).nanoseconds * 1e-9
+        if age > float(self.get_parameter("in_dock_pose_max_age_sec").value):
+            return None
+        return self._dock_measurement_age
+
+    def _estimator_alive(self) -> bool:
+        """估计器是否在发数据（即使 source=INVALID 也会 20Hz 发布）。"""
+        if self._dock_pose_stamp is None:
+            return False
+        age = (self.get_clock().now() - self._dock_pose_stamp).nanoseconds * 1e-9
+        return age <= float(self.get_parameter("in_dock_pose_max_age_sec").value)
+
+    def _in_dock_pose_usable(self) -> bool:
+        """坞系位姿是否可用于在坞判定：来源有效（VISION/ODOM_PREDICTION）且新鲜。
+
+        ODOM_PREDICTION 额外受 in_dock_prediction_max_age_sec 限制：相机掉线后
+        锚点死推算可持续 70s，不能拿很旧的视觉观测判“是否在坞”。"""
+        if self._dock_pose_xy is None or self._dock_pose_stamp is None:
+            return False
+        if self._dock_pose_source not in ("VISION", "ODOM_PREDICTION"):
+            return False
+        age = (self.get_clock().now() - self._dock_pose_stamp).nanoseconds * 1e-9
+        if age > float(self.get_parameter("in_dock_pose_max_age_sec").value):
+            return False
+        if self._dock_pose_source == "ODOM_PREDICTION":
+            measurement_age = self._measurement_age_usable()
+            if measurement_age is not None and math.isfinite(measurement_age):
+                if measurement_age > float(
+                    self.get_parameter("in_dock_prediction_max_age_sec").value
+                ):
+                    return False
+        return True
+
+    def _set_dock_backlight(self, on: bool, *, reason: str) -> bool:
+        """点亮/关闭船坞背光（异步 fire-and-forget）。返回是否实际发起了写。
+
+        点亮：ControlDO action start=true + mask=2（只写 bit1 背光，不驱动夹爪）。
+        关闭：SetDO service 写 0（16 位全掩码；查询只在无会话时动 DO，夹爪本应 0）。
+        """
+        mask = int(self.get_parameter("in_dock_backlight_mask").value) & 0xFFFF
+        if mask == 0:
+            return False
+        if on:
+            if self._control_do_client is None or self._ControlDO is None:
+                return False
+            if not self._control_do_client.server_is_ready():
+                self.get_logger().warn(
+                    "control_do action server 不在线，无法点背光"
+                    "（需 usv_rs485_driver 最新版本）"
+                )
+                return False
+            goal = self._ControlDO.Goal()
+            if not hasattr(goal, "mask"):
+                self.get_logger().warn(
+                    "当前 usv_rs485_driver ControlDO 无 mask 字段（旧版本），"
+                    "无法只开灯不松闸"
+                )
+                return False
+            goal.start = True
+            goal.mask = mask
+            future = self._control_do_client.send_goal_async(goal)
+            future.add_done_callback(
+                lambda fut, m=mask: self._on_backlight_goal(fut, m)
+            )
+            self.get_logger().info(
+                f"船坞背光点亮({reason}): ControlDO mask=0x{mask:04X}"
+                "（只开灯，不驱动夹爪）"
+            )
+            return True
+
+        if self._set_do_client is None:
+            return False
+        if not self._set_do_client.service_is_ready():
+            self.get_logger().warn(
+                "set_do 服务暂不在线，仍发起异步调用（关背光，结果见驱动日志）"
+            )
+        req = SetDO.Request()
+        req.digital_output = 0
+        self._set_do_client.call_async(req)
+        self.get_logger().info(f"船坞背光关闭({reason}): DO 0x0000")
+        return True
+
+    def _on_backlight_goal(self, future, mask: int) -> None:
+        try:
+            handle = future.result()
+        except Exception as exc:  # noqa: BLE001
+            self.get_logger().warn(f"ControlDO 点背光 0x{mask:04X} 发送失败: {exc}")
+            return
+        if handle is None or not handle.accepted:
+            self.get_logger().warn(
+                f"ControlDO 点背光 0x{mask:04X} 被拒（驱动可能有在途 goal）"
+            )
+
+    def _await_vision_pose(self) -> tuple[bool, bool]:
+        """临时打开二维码检测通道 + 点亮船坞背光，等视觉锚定（阻塞，秒级）。
+
+        返回 (opened_channel, lit_backlight)，查完由调用方按
+        in_dock_restore_channel 恢复关闭。会话进行中不动通道/背光——
+        归港/出泊流程自己管理。"""
+        if self._dock_active or self._apriltag_channel_client is None:
+            return False, False
+        # 黑天下 Tag 靠船坞背光板照亮：先点灯再开检测。
+        # usv_docking 背光会话活跃（归港失败待重试等）时不碰 DO：
+        # 查询收尾的 0x0000 全掩码写会把 FSM 为重试保持的灯误关
+        lit_backlight = (
+            False
+            if self._fsm_backlight_active
+            else self._set_dock_backlight(True, reason="在坞查询")
+        )
+        self._set_apriltag_channels(True, reason="在坞查询")
+        deadline = time.monotonic() + float(
+            self.get_parameter("in_dock_vision_timeout_sec").value
+        )
+        while time.monotonic() < deadline:
+            if self._in_dock_pose_usable():
+                return True, lit_backlight
+            time.sleep(0.1)
+        self.get_logger().warning("在坞查询：等视觉锚定超时，位姿仍无效")
+        return True, lit_backlight
+
+    def _in_dock_srv(self, req, resp):
+        """出泊前查询：二维码定位判 base_link 是否在坞内（可能阻塞等视觉锚定）。
+
+        只返回既有的四种来源（VISION / ODOM_PREDICTION / INVALID / NONE），
+        不额外上报相机故障：相机故障由上层状态机通过 /sensor_health 自己判。
+        无有效位姿时 in_dock=false、pose_valid=false；上层结合自己的相机健康
+        决定“坞外”还是“故障”。
+        """
+        opened_channel = False
+        lit_backlight = False
+        try:
+            if not self._in_dock_pose_usable() and bool(req.wait_vision):
+                opened_channel, lit_backlight = self._await_vision_pose()
+        finally:
+            if not self._dock_active and bool(
+                self.get_parameter("in_dock_restore_channel").value
+            ):
+                if lit_backlight:
+                    self._set_dock_backlight(False, reason="在坞查询收尾")
+                if opened_channel:
+                    self._set_apriltag_channels(False, reason="在坞查询收尾")
+
+        resp.pose_valid = self._in_dock_pose_usable()
+        resp.pose_source = self._dock_pose_source or "NONE"
+        if resp.pose_valid:
+            x, y = self._dock_pose_xy
+            x_min = float(self.get_parameter("in_dock_x_min").value)
+            x_max = float(self.get_parameter("in_dock_x_max").value)
+            y_max = float(self.get_parameter("in_dock_y_max").value)
+            resp.dock_x = x
+            resp.dock_y = y
+            resp.in_dock = x_min <= x <= x_max and abs(y) <= y_max
+            resp.message = (
+                f"dock系({x:.2f},{y:.2f}) 区域x∈[{x_min},{x_max}] |y|<={y_max} "
+                f"→ {'在坞内' if resp.in_dock else '不在坞内'}"
+            )
+        else:
+            resp.in_dock = False
+            resp.dock_x = 0.0
+            resp.dock_y = 0.0
+            measurement_age = self._measurement_age_usable()
+            channel_ready = (
+                self._apriltag_channel_client is not None
+                and self._apriltag_channel_client.service_is_ready()
+            )
+            if resp.pose_source in ("VISION", "ODOM_PREDICTION"):
+                resp.message = (
+                    f"坞系位姿过期/不可用(pose_source={resp.pose_source})，"
+                    "in_dock 不可信"
+                )
+            elif (
+                bool(req.wait_vision)
+                and opened_channel
+                and channel_ready
+                and self._estimator_alive()
+                and measurement_age is not None
+                and math.isinf(measurement_age)
+            ):
+                # 检测节点正常、确实开了检测，但从未见到 Tag → 按坞外处理。
+                # 相机是否掉线由上层状态机用 /sensor_health 自己判。
+                resp.message = (
+                    "检测节点正常、已开启检测但未检测到 Tag；判定不在坞内"
+                    "（相机故障由上层状态机判定）"
+                )
+            elif bool(req.wait_vision) and not (
+                channel_ready and self._estimator_alive()
+            ):
+                resp.message = (
+                    "检测节点异常/未就绪（apriltag 服务或估计器不在线），"
+                    "按失败处理，in_dock 不可信"
+                )
+            elif not bool(req.wait_vision):
+                resp.message = (
+                    "未尝试开启检测（wait_vision=false），in_dock 不可信；"
+                    "出泊/派航线前请用 wait_vision=true"
+                )
+            else:
+                resp.message = (
+                    f"无有效坞系位姿(pose_source={resp.pose_source})，"
+                    "in_dock 不可信"
+                )
+        self.get_logger().info(f"in_dock 查询: {resp.message}")
+        return resp
 
     def _release_docking_session(
         self,
@@ -334,7 +795,6 @@ class DockMissionNode(Node):
         mission_id: str = "",
         command_id: str = "",
         dock_point: Optional[tuple[float, float, float]] = None,
-        require_camera: bool = False,
     ) -> tuple[bool, str]:
         if command == DockCommand.CANCEL:
             return self._cancel_active_session()
@@ -361,9 +821,6 @@ class DockMissionNode(Node):
         self._transition(MissionState.ARMED, f"{mode} requested")
         detail = {"mode": mode}
         if mode != "undock":
-            # 相机握手未实现：require_camera 仅透传进事件 detail，_camera_ready
-            # 恒为 True（有真实握手流程前不据此阻塞任务）
-            detail["require_camera"] = require_camera
             self._emit_event("DOCK_TASK_ACCEPTED", detail=detail)
             return True, f"dock task accepted mode={mode}"
         self._emit_event("UNDOCK_TASK_ACCEPTED", detail=detail)
@@ -408,24 +865,6 @@ class DockMissionNode(Node):
         self._transition(MissionState.IDLE, "cancel settle")
         return True, "cancelled"
 
-    def _dock_task_command_srv(self, request, response):
-        cmd = int(request.command)
-        try:
-            command = DockCommand(cmd)
-        except ValueError:
-            response.success = False
-            response.message = f"invalid command {cmd}"
-            return response
-        ok, msg = self._begin_session(
-            command,
-            mission_id=str(request.mission_id),
-            command_id=str(request.command_id),
-            require_camera=bool(request.require_camera),
-        )
-        response.success = ok
-        response.message = msg
-        return response
-
     def _begin_dock_mission(self) -> tuple[bool, str]:
         return self._begin_session(DockCommand.ONE_CLICK_DOCK)
 
@@ -448,7 +887,11 @@ class DockMissionNode(Node):
             self.get_logger().warning(f"ignore gcs dock command: {msg.data[:120]}")
             return
         dock_point = self._resolve_dock_point(parsed)
-        if parsed.has_dock_point and dock_point is None:
+        if (
+            self._accept_gcs_staging_override
+            and parsed.has_dock_point
+            and dock_point is None
+        ):
             self.get_logger().warning(
                 f"gcs dock command ignored (invalid dock point): {msg.data[:120]}"
             )
@@ -465,10 +908,17 @@ class DockMissionNode(Node):
     def _resolve_dock_point(
         self, parsed: GcsCommand
     ) -> Optional[tuple[float, float, float]]:
-        """从 GCS 命令里提取预泊点覆盖 (lat, lon, yaw_deg)。
+        """从 GCS 命令里提取可选的预泊点覆盖 (lat, lon, yaw_deg)。
 
-        只在经纬度齐全且合法时返回覆盖；缺字段（或 null/非数）返回 None（沿用泊位库）。
-        字段齐全但非法（(0,0)/越界）同样返回 None，由调用方据此丢弃整条指令。
+        默认配置 `accept_gcs_staging_override=false`，完全不接受状态机/GCS
+        下发的预泊点，始终回退 dock_database.yaml 的本地标定点。合法、非法
+        或 65536 哨兵均不会影响归港指令受理。
+
+        只在经纬度齐全且合法时返回覆盖；缺字段（或 null/非数/65536 哨兵）返回 None
+        （沿用泊位库）。65536 哨兵在 parse_gcs_command 已归一化为 None，因此
+        `has_dock_point` 为 false，不会走“非法丢弃”分支。
+        字段齐全但非法（(0,0)/真正越界，如 lat=91）同样返回 None，由调用方据此
+        丢弃整条指令。
         dock_lat/dock_lon 为 WGS84 度；**dock_yaw 为度**（接口统一用度），直接透传。
         弧度转换只在 mission_bridge 生成 Nav2 位姿时做。dock_yaw 缺失或为超范围哨兵
         （如 65536.0）时填 DOCK_YAW_UNSPECIFIED，mission_bridge 判为"不指定朝向"，
@@ -476,6 +926,8 @@ class DockMissionNode(Node):
         dock_yaw 是**预泊点处船艏航向**（ENU/map 系，CCW，0°=东）：船尾朝坞 ⇒
         该值为船艏朝坞外的航向（详见 dock_task_api.GcsCommand docstring）。
         """
+        if not self._accept_gcs_staging_override:
+            return None
         if not parsed.has_dock_point:
             return None
         lat = parsed.dock_lat
@@ -494,7 +946,11 @@ class DockMissionNode(Node):
         return resp
 
     def _staging_waypoint(self) -> tuple[float, float, float]:
-        """返回 (lat, lon, yaw_deg)；优先用 GCS 预泊点覆盖，否则用泊位库。"""
+        """返回 (lat, lon, yaw_deg)；
+
+        默认只用本地泊位库；只有显式开启 `accept_gcs_staging_override` 且收到
+        合法覆盖时，才使用 GCS 预泊点。
+        """
         if self._staging_override is not None:
             lat, lon, yaw = self._staging_override
             self.get_logger().info(
@@ -522,6 +978,8 @@ class DockMissionNode(Node):
             self._on_staging_failed(f"staging waypoint: {exc}")
             return
         # 异步发送：定时器回调里嵌套自旋等响应在单线程 executor 下必超时
+        self._staging_attempt += 1
+        attempt = self._staging_attempt
         self._staging_send_inflight = True
         self._staging_send_mono = time.monotonic()
         self._mission.send_staging_async(
@@ -530,18 +988,20 @@ class DockMissionNode(Node):
             yaw_deg=yaw,
             mission_id=self._mission_id,
             command_id=f"retry{self._staging_retry}",
-            done_cb=self._on_staging_sent,
+            done_cb=lambda ok, msg, a=attempt: self._on_staging_sent(ok, msg, a),
         )
         self.get_logger().info(
             f"Nav2 staging goal sent gnss=({lat:.7f}, {lon:.7f}) "
-            f"yaw_deg={yaw:.2f} mission_id={self._mission_id!r}"
+            f"yaw_deg={yaw:.2f} mission_id={self._mission_id!r} attempt={attempt}"
         )
 
-    def _on_staging_sent(self, ok: bool, msg: str) -> None:
-        if not self._staging_send_inflight:
-            # 会话已取消/已判失败，忽略迟到响应。但若 bridge 实际受理了该次下发
-            # （ok），此前 release 发出的 cancel 可能先于 send 到达 bridge 而落空，
-            # 这里补一次取消，确保 Nav2 goal 被撤销。
+    def _on_staging_sent(self, ok: bool, msg: str, attempt: int) -> None:
+        if attempt != self._staging_attempt or not self._staging_send_inflight:
+            # 上一轮（已超时/已重发）或已取消会话的迟到响应：不消费。但若 bridge
+            # 实际受理了该次下发（ok），此前 release 发出的 cancel 可能先于 send
+            # 到达 bridge 而落空，这里补一次取消，确保 Nav2 goal 被撤销。
+            # 注意：重发后旧响应到达时 state 是 NAV_TO_STAGING 且新一轮 inflight，
+            # bridge 侧旧 goal 已被新 send 抢占替换（for_replace），无需补 cancel。
             if ok and self._state != MissionState.NAV_TO_STAGING:
                 self._cancel_staging_nav("late staging response")
             return
@@ -562,7 +1022,19 @@ class DockMissionNode(Node):
             return
         event, detail = parsed
         mid = str(detail.get("task_id") or detail.get("mission_id") or "")
-        if mid and mid != self._mission_id and "dock" not in mid:
+        # 严格关联（2026-10-13 二审 P1-7）：mission_bridge 会回传 task_id=
+        # 我们下发的 mission_id + command_id=retryN；带 id 但不匹配的一律丢弃
+        #（旧的子串放行会让任何含 "dock" 的别家任务事件污染本会话）。
+        # 空 mid 的 legacy 事件保留兼容。
+        if mid and mid != self._mission_id:
+            return
+        cid = str(detail.get("command_id") or "")
+        if cid and cid != f"retry{self._staging_retry}":
+            # 上一轮重试的残留事件（bridge 侧旧 goal 的迟报）：不属于本次 attempt
+            self.get_logger().warning(
+                f"忽略残留任务事件 {event}（command_id={cid!r}，"
+                f"当前 retry{self._staging_retry}）"
+            )
             return
         if event == "TASK_COMPLETED":
             self._pending_nav = False
@@ -573,14 +1045,17 @@ class DockMissionNode(Node):
             self._on_staging_failed(reason)
 
     def _dock_status_cb(self, msg: String) -> None:
+        try:
+            status = json.loads(msg.data)
+        except json.JSONDecodeError:
+            return
+        # 不论本侧状态都缓存 usv_docking 的背光会话标志：在坞查询据此
+        # 避免与 FSM 的背光管理互抢（FSM 会话期间查询不写 DO）
+        self._fsm_backlight_active = bool(status.get("backlight_session_active"))
         if self._state not in (
             MissionState.MONITOR_DOCK,
             MissionState.MONITOR_UNDOCK,
         ):
-            return
-        try:
-            status = json.loads(msg.data)
-        except json.JSONDecodeError:
             return
 
         if self._state == MissionState.MONITOR_UNDOCK:
@@ -657,6 +1132,8 @@ class DockMissionNode(Node):
         kind = "undock" if undock else "dock"
         self._release_docking_session(reason=f"{kind} succeeded")
         self._transition(MissionState.SUCCEEDED, f"{kind} complete")
+        # 归港/出泊成功：关闭二维码检测通道，省算力（2026-10-13）
+        self._set_apriltag_channels(False, reason=f"{kind} 成功收尾")
         self._emit_event(
             event,
             detail={"elapsed_sec": self._elapsed_sec(), "mode": self._mode},
@@ -700,6 +1177,12 @@ class DockMissionNode(Node):
             ):
                 self._staging_send_inflight = False
                 self._on_staging_failed("send_waypoints response timeout")
+            elif not self._pending_nav and not self._staging_send_inflight:
+                # 预泊失败重试（TASK_FAILED / SETTLE_TIMEOUT / needs_reapproach）
+                # 转回本状态后必须真正重新下发 Nav2 目标——此前只有 ARMED 首发
+                # 调一次 _start_nav_to_staging，重试会永远挂在本状态
+                #（2026-10-13 二审 P0-1）
+                self._start_nav_to_staging()
 
         elif self._state in (MissionState.SETTLE, MissionState.COMPLETE_SETTLE):
             self._tick_settle(dt)
@@ -710,13 +1193,137 @@ class DockMissionNode(Node):
         self._publish_task_status()
         self._publish_legacy_status()
 
+    def _odom_speed_cb(self, msg: Odometry) -> None:
+        vx = msg.twist.twist.linear.x
+        vy = msg.twist.twist.linear.y
+        wz = msg.twist.twist.angular.z
+        if not (
+            math.isfinite(vx) and math.isfinite(vy) and math.isfinite(wz)
+        ):
+            self.get_logger().warning(
+                "丢弃非有限 Odometry 速度帧（NaN/inf）", throttle_duration_sec=2.0
+            )
+            return
+        self._odom_speed = math.hypot(vx, vy)
+        self._odom_yaw_rate = wz
+        self._odom_speed_stamp = self.get_clock().now()
+
+    def _odom_speed_fresh(self) -> bool:
+        """速度源新鲜度：>1s 无帧视为缺测（与 docking safety 断流阈值同量级）。"""
+        if self._odom_speed_stamp is None:
+            return False
+        age = (self.get_clock().now() - self._odom_speed_stamp).nanoseconds * 1e-9
+        return age <= 1.0
+
     def _tick_settle(self, dt: float) -> None:
-        """SETTLE / COMPLETE_SETTLE 公共停稳等待：累计 elapsed，到各自时长参数后推进。"""
+        """SETTLE / COMPLETE_SETTLE 停稳等待。
+
+        SETTLE（预泊后交接前）：settle_require_still=true 时要求实测速度
+        （odom_speed_topic）<= settle_max_speed 且 |角速度| <=
+        settle_max_yaw_rate，按连续有效观测的实际时间累计满
+        settle_still_hold_sec 才交接精靠泊——纯延时交接会让船带着风/流残余
+        速度进 APPROACH（2026-10-13 源码审查 P0）。settle_sec 仍是最小延时
+        下限。累计与发布频率解耦（2026-10-13 三审 P1）：新帧刷新停稳条件，
+        短暂无新帧不清零；相邻帧间隔或无新帧沉默超 settle_max_frame_gap_sec
+        才重置，且至少 settle_min_still_frames 帧有效观测，防单帧零速误放行
+        （二审 P1-4）。一直停不稳/速度源缺测超 settle_timeout_sec ->
+        _on_staging_failed 走 staging 重试管线。settle_require_still=false
+        回退纯延时（标定/仿真）。
+
+        COMPLETE_SETTLE（靠泊/出泊完成后收尾）：保持纯延时——坞内成功时船已被
+        夹爪抓住，出泊成功时船已驶离，无需速度门。"""
         if self._state == MissionState.SETTLE:
             self._set_authority(SpeedAuthority.STAGING_VERIFY)
             self._settle_elapsed += dt
-            if self._settle_elapsed >= float(self.get_parameter("settle_sec").value):
-                self._transition(MissionState.DOCK_HANDOFF, "settle done")
+            if not bool(self.get_parameter("settle_require_still").value):
+                if self._settle_elapsed >= float(self.get_parameter("settle_sec").value):
+                    self._transition(MissionState.DOCK_HANDOFF, "settle done (timer only)")
+                return
+            speed = self._odom_speed
+            yaw_rate = self._odom_yaw_rate
+            max_gap = float(self.get_parameter("settle_max_frame_gap_sec").value)
+            min_frames = int(self.get_parameter("settle_min_still_frames").value)
+            now = self.get_clock().now()
+            # 停稳时长按连续有效观测的实际时间累计（2026-10-13 三审 P1）：
+            # 不再要求每 tick 都有新帧（那会把归港绑死在 ≥5Hz 的发布频率上，
+            # 2Hz 低频里程计永远 SETTLE_TIMEOUT）。新帧刷新停稳条件；短暂无
+            # 新帧冻结累计不清零；帧间隔/沉默超 max_gap 才重置；至少
+            # min_frames 帧有效观测，防单帧零速凑数（2026-10-13 二审 P1-4）
+            new_frame = (
+                self._odom_speed_stamp is not None
+                and (
+                    self._settle_hold_last_stamp is None
+                    or self._odom_speed_stamp > self._settle_hold_last_stamp
+                )
+            )
+            if new_frame:
+                stamp = self._odom_speed_stamp
+                self._settle_hold_last_stamp = stamp
+                still = (
+                    speed is not None
+                    and speed <= float(self.get_parameter("settle_max_speed").value)
+                    and yaw_rate is not None
+                    and abs(yaw_rate)
+                    <= float(self.get_parameter("settle_max_yaw_rate").value)
+                )
+                if still:
+                    gap = (
+                        (stamp - self._settle_still_last_stamp).nanoseconds * 1e-9
+                        if self._settle_still_last_stamp is not None
+                        else None
+                    )
+                    if gap is None or gap > max_gap:
+                        # 首帧或断档后：从本帧起重新累计一段连续停稳
+                        self._settle_still_start_stamp = stamp
+                        self._settle_still_frames = 1
+                    else:
+                        self._settle_still_frames += 1
+                    self._settle_still_last_stamp = stamp
+                else:
+                    # 实测在动：立即清零重计
+                    self._settle_still_start_stamp = None
+                    self._settle_still_last_stamp = None
+                    self._settle_still_frames = 0
+            elif (
+                self._settle_still_last_stamp is not None
+                and (now - self._settle_still_last_stamp).nanoseconds * 1e-9
+                > max_gap
+            ):
+                # 速度源沉默超允许帧间隔：旧"停稳"不可信，清零重计
+                self._settle_still_start_stamp = None
+                self._settle_still_last_stamp = None
+                self._settle_still_frames = 0
+
+            self._settle_still_hold = (
+                (
+                    self._settle_still_last_stamp - self._settle_still_start_stamp
+                ).nanoseconds
+                * 1e-9
+                if self._settle_still_start_stamp is not None
+                else 0.0
+            )
+            if (
+                self._settle_still_start_stamp is not None
+                and self._settle_still_hold
+                >= float(self.get_parameter("settle_still_hold_sec").value)
+                and self._settle_still_frames >= min_frames
+                and self._settle_elapsed
+                >= float(self.get_parameter("settle_sec").value)
+            ):
+                self._transition(
+                    MissionState.DOCK_HANDOFF,
+                    f"settle done (speed={speed:.3f} m/s)",
+                )
+                return
+            if self._settle_elapsed > float(
+                self.get_parameter("settle_timeout_sec").value
+            ):
+                note = (
+                    f"speed={speed:.3f} m/s"
+                    if speed is not None and self._odom_speed_fresh()
+                    else "odom speed source missing/stale"
+                )
+                self._on_staging_failed(f"SETTLE_TIMEOUT: {note}")
             return
         self._complete_settle_elapsed += dt
         if self._complete_settle_elapsed >= float(
@@ -739,12 +1346,19 @@ class DockMissionNode(Node):
 def main(args=None) -> None:
     rclpy.init(args=args)
     node = DockMissionNode()
+    # 多线程 executor：/dock/in_dock 查询 handler 在独立回调组里阻塞等视觉锚定
+    # （秒级），不能饿死默认互斥组的定时器/订阅回调
+    from rclpy.executors import MultiThreadedExecutor
+
+    executor = MultiThreadedExecutor(num_threads=2)
+    executor.add_node(node)
     try:
-        rclpy.spin(node)
+        executor.spin()
     except KeyboardInterrupt:
         pass
     finally:
         node._release_docking_session(reason="shutdown")
+        executor.shutdown()
         node.destroy_node()
         rclpy.shutdown()
 

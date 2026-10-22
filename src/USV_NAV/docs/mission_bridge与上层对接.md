@@ -76,7 +76,9 @@ Nav2 使用非默认地图时再传：`map_yaml_path:=<与 Nav2 map:= 相同的�
 | `datum_source` | `map_yaml` | **实质固定**：其它值节点直接 fatal 退出（首版仅支持 map_yaml） |
 | `map_datum_ref_key` | `ref_gnss_10` | 生效，map YAML 里的 datum 锚点键 |
 | `projection` | `enu` | 生效；`utm` 仅警告不禁止 |
-| `odom_topic` | `/mavros/gps_input/local` | 生效，到点容差距离计算 |
+| `odom_topic` | `/mavros/gps_input/local` | 生效，到点容差距离计算；同时是定位看门狗的新鲜度来源 |
+| `localization_timeout_sec` | `3.0` | **2026-10-20 新增**，任务执行中 odom 超过该秒数无新帧 → 取消 Nav2 goal、NavigateTask 以 `RESULT_LOCALIZATION_LOST`/`LOC_LOST` abort、进 `WAITING_SYSTEM`；`<=0` 关闭看门狗 |
+| `localization_startup_grace_sec` | `5.0` | 任务启动后等首帧 odom 的宽限，超时同样按定位丢失处理 |
 | `waypoint_tolerance_m` | `0.0` | `<=0` = 自动读 Nav2 参数文件的 `xy_goal_tolerance`（当前 2.0 m），与 Nav2 到达判定同源；显式正数则优先。仅用于"船已在容差内则跳过该点"，真正的到点判定在 Nav2 |
 | `tf_check_period_sec` | `1.0` | 生效，WAITING_SYSTEM 轮询周期 |
 | `debug_mode` | `false` | 生效，打印原始 waypoint/color 载荷 |

@@ -1,7 +1,0 @@
----
-m_common/GeoFence[] fences
-bool has_pre_dock_point
-m_common/MissionWaypoint pre_dock_point
-float32 wp_speed
-m_common/DockBerth[] dock_berths
-bool success

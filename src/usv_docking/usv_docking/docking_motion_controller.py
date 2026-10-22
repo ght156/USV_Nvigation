@@ -19,11 +19,15 @@
 以上各处角度 P 律输出统一叠加角速度阻尼（2026-09-30，兴飞重船过冲）：
   ω = ω_P − kd_yaw·ω_meas（/mavros/imu/data，best_effort 订阅；无数据退化为纯 P）
   SEARCH/SEARCH_LIMITED 为恒速/定向旋转，不加阻尼。
-  - HOLD/DOCKED_HOLD：v→0 斜坡停车，停稳且发够 hold_zero_publish_sec 零速帧后
+  - HOLD/DOCKED_HOLD：进入当帧 _v_cmd/_w_cmd 立即清零（不经斜坡），
+    发够 hold_zero_publish_sec 零速帧后
     静默（不再占用 /cmd_vel_nav，让位 teleop；实船桥有 command_timeout 看门狗兜底）
-  - INVALID 运动态：v→0（仍常发，防停车指令丢失）
+  - INVALID 运动态：v→0（仍常发，防停车指令丢失）；出坞/撤离默认也不动
+    （blind_exit_enabled=false，只有 VISION 才走），FSM 等待/超时失败
 
-所有输出经加速度斜坡；safety_stop=true 立即清零（绕过斜坡）。
+所有输出经加速度斜坡；must-stop 门（safety_stop=true、FSM/safety 消息断流、
+运动态位姿失效，2026-10-13）与 HOLD/DOCKED_HOLD 进入沿当帧立即清零指令，
+绕过斜坡。
 """
 
 import math
@@ -50,6 +54,7 @@ from usv_docking.docking_common import (
     MODE_SEARCH_LIMITED,
     MODE_UNDOCK_FORWARD,
     SRC_INVALID,
+    SRC_VISION,
     wrap_angle,
     yaw_from_quat,
 )
@@ -62,6 +67,11 @@ MOTION_MODES = (
     MODE_EXIT_FORWARD,
     MODE_UNDOCK_FORWARD,
 )
+
+# 出坞/撤离（前进远离坞）：只有在 blind_exit_enabled=true 时才允许无位姿
+# 开环直行（误差置 0，FSM 按超时兜底）。默认 false：EXIT_FORWARD 与
+# UNDOCK_FORWARD 都要求新鲜 VISION 才动，无视觉零速由 FSM 等待/失败。
+OPEN_LOOP_EXIT_MODES = (MODE_EXIT_FORWARD, MODE_UNDOCK_FORWARD)
 
 
 def clamp(value: float, limit: float) -> float:
@@ -86,6 +96,23 @@ class DockingMotionController(Node):
         self.declare_parameter("cmd_vel_topic", "/cmd_vel_nav")
         self.declare_parameter("cmd_vel_test_topic", "/docking/cmd_vel_test")
         self.declare_parameter("control_rate", 20.0)
+        # 控制器本地断流防线（2026-10-13 源码审查 P0）：safety 节点有
+        # pose_topic_timeout_sec 断流保护，但 safety 自身死亡时控制器会拿缓存
+        # 旧位姿继续运动。本参数是本地最后一道防线：pose/source 消息龄期超此
+        # 值即判位姿不可用（运动态输出零速）。语义与 safety 的不同（那个管
+        # "estimator 节点死亡"上报告警），故意不同名避免被误"统一"。
+        self.declare_parameter("pose_msg_timeout_sec", 1.0)
+        # FSM target_mode / safety_stop 消息看门狗（2026-10-13 二审 P0-3）：
+        # FSM 10Hz 常发、safety 20Hz 常发；断流超此值非保持态立即零速（绕过斜坡）。
+        # safety_stop 最后收到的 false 不得无限期信任——safety 死了就是不可信
+        self.declare_parameter("mode_msg_timeout_sec", 1.0)
+        self.declare_parameter("safety_msg_timeout_sec", 1.0)
+        # 出港/撤离无位姿开环直行总开关（2026-10-20）：默认 false = 不盲开。
+        #   false: EXIT_FORWARD/UNDOCK_FORWARD 都只有 pose_source=VISION 才动；
+        #          无视觉（含 ODOM_PREDICTION）零速，由 FSM 等待/超时失败。
+        #   true : 恢复旧行为（位姿 INVALID 时开环直行）。
+        # 须与 docking_fsm 同名参数一致。
+        self.declare_parameter("blind_exit_enabled", False)
         # HOLD/DOCKED_HOLD 进入后持续发零速的时长：停稳+发够即静默，
         # 让出 cmd_vel 通道给 teleop（实船 usv_ardupilot_velocity_bridge
         # 有 command_timeout_sec 看门狗，超时自动发零，无需常发保持）
@@ -245,6 +272,13 @@ class DockingMotionController(Node):
         self._pose_y = None
         self._pose_yaw = None
         self._pose_source = SRC_INVALID
+        # 输入消息本地新鲜度（2026-10-13）：断流时 _pose_valid() 判不可用
+        self._pose_msg_time = None
+        self._src_msg_time = None
+        # FSM target_mode / safety_stop 看门狗（2026-10-13 二审 P0-3）：
+        # None = 从未收到，非保持态按断流处理
+        self._mode_msg_time = None
+        self._safety_msg_time = None
         self._safety_stop = False
         self._yaw_rate = None  # IMU 角速度 z（rad/s，CCW+；无数据时 D 项退化）
 
@@ -270,19 +304,30 @@ class DockingMotionController(Node):
     # ══════════════ 输入回调 ══════════════
     def _mode_cb(self, msg: String):
         self._mode = msg.data
+        self._mode_msg_time = self.get_clock().now()
 
     def _pose_cb(self, msg: PoseStamped):
-        self._pose_x = msg.pose.position.x
-        self._pose_y = msg.pose.position.y
-        self._pose_yaw = yaw_from_quat(
-            msg.pose.orientation.z, msg.pose.orientation.w
-        )
+        x = msg.pose.position.x
+        y = msg.pose.position.y
+        yaw = yaw_from_quat(msg.pose.orientation.z, msg.pose.orientation.w)
+        if not (math.isfinite(x) and math.isfinite(y) and math.isfinite(yaw)):
+            # 非法数值帧直接丢弃：NaN/inf 会污染缓存位姿并进入控制律
+            self.get_logger().warn(
+                "丢弃非有限位姿帧（NaN/inf）", throttle_duration_sec=2.0
+            )
+            return
+        self._pose_x = x
+        self._pose_y = y
+        self._pose_yaw = yaw
+        self._pose_msg_time = self.get_clock().now()
 
     def _src_cb(self, msg: String):
         self._pose_source = msg.data
+        self._src_msg_time = self.get_clock().now()
 
     def _safety_cb(self, msg: Bool):
         self._safety_stop = bool(msg.data)
+        self._safety_msg_time = self.get_clock().now()
 
     def _imu_cb(self, msg: Imu):
         self._yaw_rate = float(msg.angular_velocity.z)
@@ -306,7 +351,22 @@ class DockingMotionController(Node):
         )
 
     def _pose_valid(self) -> bool:
-        return self._pose_source != SRC_INVALID and self._pose_x is not None
+        """位姿可用：source 有效 + 有缓存位姿 + 输入消息本地新鲜。
+
+        新鲜度是控制器本地最后一道防线（2026-10-13）：estimator 断流由
+        safety 的 pose_topic_timeout_sec 管，但 safety 自身死亡时缓存旧
+        位姿会持续"有效"；这里把 pose/source 消息龄期一并纳入，断流即
+        运动态输出零速。"""
+        if self._pose_source == SRC_INVALID or self._pose_x is None:
+            return False
+        timeout = float(self.get_parameter("pose_msg_timeout_sec").value)
+        now = self.get_clock().now()
+        for stamp in (self._pose_msg_time, self._src_msg_time):
+            if stamp is None:
+                return False
+            if (now - stamp).nanoseconds * 1e-9 > timeout:
+                return False
+        return True
 
     def _cone_half_width(self, x) -> float:
         """锥形漏斗半宽（dock 系）：cone_w(x) = apex_half_width
@@ -554,6 +614,11 @@ class DockingMotionController(Node):
                 self._pose_yaw if mode == MODE_SEARCH_LIMITED else None
             )
             if mode in (MODE_HOLD, MODE_DOCKED_HOLD):
+                # 进入保持态当帧指令清零（2026-10-13 三审 P0）：不得带着上一
+                # 模式的残余指令经斜坡慢收敛——斜坡 ~1.5s 内仍在主动推进；
+                # 惯性滑行是船的事，保持态不应继续发送残余推进指令
+                self._v_cmd = 0.0
+                self._w_cmd = 0.0
                 # 进入保持态：先发一小段零速确保停住，随后静默让出 cmd_vel
                 hold_sec = float(p("hold_zero_publish_sec").value)
                 self._hold_settle_ticks = max(
@@ -567,8 +632,26 @@ class DockingMotionController(Node):
         yaw_b = self._pose_yaw if self._pose_yaw is not None else 0.0
 
         v_target, w_target = 0.0, 0.0
+        blind_exit = bool(p("blind_exit_enabled").value)
+        open_loop_modes = OPEN_LOOP_EXIT_MODES if blind_exit else ()
+        exit_needs_vision = (
+            mode in (MODE_EXIT_FORWARD, MODE_UNDOCK_FORWARD) and not blind_exit
+        )
 
         if mode in (MODE_HOLD, MODE_DOCKED_HOLD):
+            pass
+        elif mode in open_loop_modes and not self._pose_valid():
+            # 仅 blind_exit_enabled=true：出坞/撤离无位姿开环直行（误差置 0）。
+            # 默认 false 时不走这里，见下面的停车分支。
+            exit_speed = (
+                float(p("abort_exit_speed").value)
+                if mode == MODE_EXIT_FORWARD
+                else float(p("undock_speed").value)
+            )
+            v_target, w_target = exit_speed, 0.0
+        elif exit_needs_vision and self._pose_source != SRC_VISION:
+            # 不盲开：出泊/撤离都只有新鲜 VISION 才动；无视觉零速，由 FSM
+            # 等待超时后报 UNDOCK_NO_VISION / ABORT_EXIT_UNCONFIRMED。
             pass
         elif mode in MOTION_MODES and not self._pose_valid():
             # 位姿不可用：运动态全部停车，由 FSM 走异常路径
@@ -614,13 +697,57 @@ class DockingMotionController(Node):
         v_target = clamp(v_target, float(p("max_reverse_speed").value))
         w_target = clamp(w_target, self.max_yaw_rate())
 
-        # safety_stop：立即清零，绕过斜坡
+        # 统一 must-stop 门（2026-10-13 二审 P0-2/P0-3）：所有"能否运动"的判定
+        # 集中于此，命中即当帧清零并发布（绕过加速度斜坡——斜坡收敛需 ~1.5s，
+        # 输入失效期间惯性指令本身就是风险源）：
+        #   - safety_stop=true（保持原语义；保持态补发 3 帧防丢）
+        #   - safety 消息断流/从未收到：safety_stop 的最后 false 不可信
+        #   - FSM target_mode 断流/从未收到：不得按缓存模式继续运动
+        #   - MOTION_MODES 位姿不可用（含 pose/source 本地断流）；
+        #     仅 blind_exit_enabled=true 时出坞/撤离开环直行例外；
+        #     默认 false 时 EXIT/UNDOCK_FORWARD 都要求新鲜 VISION，否则零速
+        #     由 FSM 等待/超时失败（2026-10-20 取消盲开出港）
+        # SEARCH/SEARCH_LIMITED 不受位姿门约束（开环找 Tag 是设计行为），
+        # 但 mode/safety 断流照停；保持态（本来就零速）不受断流门影响。
+        must_stop_now = False
+        stop_reason = ""
+        if not hold_mode:
+            now = self.get_clock().now()
+            mode_stale = self._mode_msg_time is None or (
+                now - self._mode_msg_time
+            ).nanoseconds * 1e-9 > float(p("mode_msg_timeout_sec").value)
+            safety_stale = self._safety_msg_time is None or (
+                now - self._safety_msg_time
+            ).nanoseconds * 1e-9 > float(p("safety_msg_timeout_sec").value)
+            if self._safety_stop:
+                must_stop_now, stop_reason = True, "safety_stop"
+            elif safety_stale:
+                must_stop_now, stop_reason = True, "safety 消息断流"
+            elif mode_stale:
+                must_stop_now, stop_reason = True, "FSM target_mode 断流"
+            elif exit_needs_vision and self._pose_source != SRC_VISION:
+                # 出泊/撤离不盲开：ODOM_PREDICTION 也不动，等 VISION 恢复
+                must_stop_now, stop_reason = True, "exit 无视觉"
+            elif (
+                mode in MOTION_MODES
+                and mode not in open_loop_modes
+                and not self._pose_valid()
+            ):
+                must_stop_now, stop_reason = True, "位姿不可用/断流"
+
         if self._safety_stop:
             self._v_cmd = 0.0
             self._w_cmd = 0.0
             if hold_mode:
                 # 保持态被安全停车时至少补发 3 帧零速，防单帧丢失
                 self._hold_settle_ticks = max(self._hold_settle_ticks, 3)
+        elif must_stop_now:
+            self._v_cmd = 0.0
+            self._w_cmd = 0.0
+            self.get_logger().warn(
+                f"must-stop：{stop_reason}，指令立即清零（绕过斜坡）",
+                throttle_duration_sec=2.0,
+            )
         else:
             dv = clamp(
                 v_target - self._v_cmd,

@@ -1,6 +1,6 @@
 # usv_docking
 
-差速 / 双推进器 USV 的 **Tag 闭环** 精靠泊（全程倒船，船尾入坞，无线充电对接），以及 **odom 出泊**。
+差速 / 双推进器 USV 的 **Tag 闭环** 精靠泊（全程倒船，船尾入坞，无线充电对接），以及 **视觉确认出泊**（默认 `blind_exit_enabled=false`，无视觉不盲开）。
 
 > 旧 `docking_controller`（v4/v5 单节点链）已于 **2026-08-31 移除**（代码/launch/配置/专属测试；
 > 回退见对应 commit，git 历史可随时找回）。
@@ -40,7 +40,7 @@ docking_safety                 # 独立监督：6 项检查
 
 **状态流**：
 `IDLE → ACQUIRE_TAG → APPROACH_ENTRY → ALIGN_ENTRY → BACK_IN → FINAL_DOCK → DOCKED`
-异常：入口外丢 Tag → `REACQUIRE_TAG`（闭环搜索）；坞内失败 → `ABORT_EXIT`（前进驶出后上报；位姿 INVALID 超时则诚实上报"驶出未确认"，不盲报可重试）；出泊：`UNDOCK_EXIT → UNDOCK_SETTLE`。
+异常：入口外丢 Tag → `REACQUIRE_TAG`（闭环搜索）；坞内失败 → `ABORT_EXIT`（前进驶出后上报；默认不盲开，位姿 INVALID 超时则诚实上报"驶出未确认"，不盲报可重试）；出泊：`UNDOCK_EXIT → UNDOCK_SETTLE`，默认只有 `VISION` 才动，无视觉等待 `undock_vision_timeout_sec` 后 `UNDOCK_NO_VISION` 失败（`blind_exit_enabled=true` 才恢复旧盲开）。
 船坞夹爪交互（`dock_claw_enabled=true` 才启用，默认关闭）：归港前 `WAIT_DOCK_OPEN` 请求船坞打开夹爪（嵌软 `usv_rs485_driver` 的 ControlDO action），成功才进 ACQUIRE_TAG；BACK_IN/FINAL_DOCK 发 WaitIO 等夹爪抓住，**抓住即 DOCKED**（位置到位不再判成功）；倒船位移停滞超 `backin_stuck_timeout_sec` → ABORT_EXIT 驶出重试；出泊先 `WAIT_DOCK_RELEASE` 请求松开夹爪，失败/超时 → FAILED（禁止盲动）。
 
 **关键约定**：

@@ -32,13 +32,14 @@
       Action 接口为嵌软的 usv_rs485_driver/action/{ControlDO,WaitIO}
       （懒加载，接口缺失时报错降级）。
     * 船坞背光板（DO bit1，Find Tag 必需，backlight_enabled 默认 true）：
-      /dock/start 经 SetDO service 点亮 bit1，**整个会话保持**并按
+      /dock/start 经 SetDO service 点亮 bit1，**整个归港会话保持**并按
       backlight_keepalive_sec 周期保活；**失败/重试不关灯**（重试期间相机还要
-      看 Tag），只有 DOCKED（归港成功）/ /dock/cancel / /dock/undock 才关闭。
-      WAIT_DOCK_OPEN/RELEASE 与 BACK_IN/FINAL_DOCK 不干预——那几段 bit1 由
-      驱动自己驱动（ControlDO 写 0x0001 / WaitIO 开关），FSM 再写会互抢。
-      背景：驱动 ControlDO 成功后 60s 会 writeDO(0x0000) 全清 DO，且这版驱动
-      kDOOnMask=0x0001 不含背光位，详见
+      看 Tag），DOCKED（归港成功）/ /dock/cancel 关闭。
+      **出港（UNDOCK_EXIT）用 ControlDO start=true 按位控制**（2026-10-20）：
+      有夹爪且抬爪时 mask=0x0003（夹爪 bit0 + 背光 bit1）；无夹爪/不抬爪时
+      mask=2（只开灯）。进入 UNDOCK_SETTLE 写 DO 0 关灯。WAIT_DOCK_RELEASE
+      的 ControlDO 同样用 0x0003，抬爪完成后 FSM 再发一次以保持夹爪+背光。
+      背景：驱动 ControlDO 成功后 60s 会 writeDO(0x0000) 全清 DO，详见
       docs/bug_debug/2026-10-08_RS485驱动ControlDO漏点背光板与60s全清回归.md。
 
 输入：
@@ -67,11 +68,13 @@
   - 入口外状态（ACQUIRE/APPROACH/ALIGN/REACQUIRE）失败 -> IDLE + needs_reapproach；
     坞内状态（BACK_IN/FINAL_DOCK）失败 -> ABORT_EXIT 驶出后再上报。
   - 内部不自动重试：ABORT_EXIT 完成回 IDLE，重试由 dock_mission 决定。
-  - ABORT_EXIT / UNDOCK 完成判据：位姿有效时用 dock 系 x；位姿 INVALID 时
-    控制器只能停车等待（不存在"odom 距离跟踪驶出"），超时兜底并诚实上报
-    "驶出未确认"——ABORT_EXIT：回 IDLE 且 abort_reason=ABORT_EXIT_UNCONFIRMED、
-    needs_reapproach=False、needs_manual_takeover=True（防上层在船仍卡坞内时
-    盲重试）；UNDOCK：FAILED（UNDOCK_TIMEOUT）。
+  - 默认取消盲开（blind_exit_enabled=false，2026-10-20）：
+      UNDOCK_EXIT 只有 pose_source=VISION 才动；无视觉原地等待
+      undock_vision_timeout_sec 后 FAILED（UNDOCK_NO_VISION），不报假成功。
+      ABORT_EXIT 同样只有 VISION 才前进；无视觉停车等待，超时回 IDLE 且
+      abort_reason=ABORT_EXIT_UNCONFIRMED、needs_reapproach=False、
+      needs_manual_takeover=True。
+    仅 blind_exit_enabled=true 时恢复旧的 exit_blind_timeout_sec 开环盲开。
 """
 
 import json
@@ -277,6 +280,22 @@ class DockingFsm(Node):
         # ── ABORT_EXIT ──
         self.declare_parameter("exit_complete_x", -4.0)
         self.declare_parameter("abort_exit_timeout_sec", 45.0)
+        # 无位姿开环驶出总开关（2026-10-20）：默认 false = 取消盲开。
+        #   false: UNDOCK_EXIT 只有新鲜 VISION 才动；无视觉原地等待
+        #          undock_vision_timeout_sec 后 FAILED（UNDOCK_NO_VISION）。
+        #          ABORT_EXIT 允许 ODOM_PREDICTION 闭环前进，但 INVALID 时停车
+        #          等待，超时按 ABORT_EXIT_UNCONFIRMED 交人工；绝不开环盲开。
+        #   true : 恢复旧行为（位姿 INVALID 时开环直行，受 exit_blind_timeout_sec
+        #          限制；undock_unconfirmed_as_success 也只在 true 时生效）。
+        self.declare_parameter("blind_exit_enabled", False)
+        # 盲开上限（仅 blind_exit_enabled=true 时生效）
+        self.declare_parameter("exit_blind_timeout_sec", 15.0)
+        # 相机故障/无位姿盲开 15s 后是否按“人工确认驶出”处理（默认 false）。
+        # 仅在 blind_exit_enabled=true 时有意义；默认关闭盲开时不走这条路。
+        self.declare_parameter("undock_unconfirmed_as_success", False)
+        # 不盲开时：出港无 VISION 最多等待多久（从进入 UNDOCK_EXIT 或最近一次
+        # VISION 丢失起算），超时 FAILED。给 apriltag 通道开启/首帧检测留时间。
+        self.declare_parameter("undock_vision_timeout_sec", 10.0)
 
         # ── UNDOCK ──
         # 出少点：0.45m/s 惯性还要滑 1.5~2m，-4 会冲出再归港触发门
@@ -307,6 +326,8 @@ class DockingFsm(Node):
         self.declare_parameter("wait_io_action", "wait_io")
         # ControlDO 等结果/等 server 的超时（电机动作约 3s，留足余量）
         self.declare_parameter("dock_open_timeout_sec", 15.0)
+        # 出泊抬爪独立超时（2026-10-13 拆分：开/松动作时长不同的船坞可独立调参）
+        self.declare_parameter("dock_release_timeout_sec", 15.0)
         # WaitIO goal 的 max_queries（0 = 用驱动 yaml 默认值 3000）
         self.declare_parameter("wait_io_max_queries", 0)
         # WaitIO 返回失败（非"抓住"）时的重发次数上限，超限 -> ABORT_EXIT
@@ -380,6 +401,7 @@ class DockingFsm(Node):
         self._pose_source = SRC_INVALID
         self._measurement_age = float("inf")
         self._odom_speed = None
+        self._odom_speed_stamp = None
 
         # 计数器 / 计时器
         self._acquire_frames = 0
@@ -399,8 +421,6 @@ class DockingFsm(Node):
         self._reacquire_drive_elapsed = 0.0
         self._staging_hold = 0.0
         self._approach_tag_loss = 0.0
-        # 预备点退化区打转计时（大艏偏持续累计），随状态切换复位
-        self._approach_stuck = 0.0
         # 预备点退化区打转计时（大艏偏持续累计），随状态切换复位
         self._approach_stuck = 0.0
 
@@ -439,6 +459,10 @@ class DockingFsm(Node):
         # 坞内倒船位移停滞检测
         self._stuck_best_x = None
         self._stuck_elapsed = 0.0
+        # 不盲开时的视觉/位姿丢失计时（秒）：UNDOCK_EXIT 无 VISION、
+        # ABORT_EXIT 位姿 INVALID 时累计，恢复后清零。
+        self._undock_vision_lost_elapsed = 0.0
+        self._exit_pose_lost_elapsed = 0.0
 
         # 状态 -> 转移 handler 分派表（IDLE/DOCKED/FAILED 无 handler，等待外部触发）
         self._trans_handlers = {
@@ -462,11 +486,19 @@ class DockingFsm(Node):
 
     # ══════════════ 输入回调 ══════════════
     def _dock_pose_cb(self, msg: PoseStamped):
-        self._dock_x = msg.pose.position.x
-        self._dock_y = msg.pose.position.y
-        self._dock_yaw = yaw_from_quat(
-            msg.pose.orientation.z, msg.pose.orientation.w
-        )
+        x = msg.pose.position.x
+        y = msg.pose.position.y
+        yaw = yaw_from_quat(msg.pose.orientation.z, msg.pose.orientation.w)
+        if not (math.isfinite(x) and math.isfinite(y) and math.isfinite(yaw)):
+            # 非有限帧不更新缓存：控制器虽已丢弃 NaN，FSM 侧缓存污染会让
+            # 走廊/到位判定用 NaN 比较（恒 False）把状态机卡死
+            self.get_logger().warn(
+                "丢弃非有限 dock_pose 帧（NaN/inf）", throttle_duration_sec=2.0
+            )
+            return
+        self._dock_x = x
+        self._dock_y = y
+        self._dock_yaw = yaw
 
     def _tag_visible_cb(self, msg: Bool):
         self._tag_visible = bool(msg.data)
@@ -478,9 +510,23 @@ class DockingFsm(Node):
         self._measurement_age = float(msg.data)
 
     def _odom_cb(self, msg: Odometry):
-        self._odom_speed = math.hypot(
-            msg.twist.twist.linear.x, msg.twist.twist.linear.y
-        )
+        vx = msg.twist.twist.linear.x
+        vy = msg.twist.twist.linear.y
+        if not (math.isfinite(vx) and math.isfinite(vy)):
+            self.get_logger().warn(
+                "丢弃非有限 Odometry 速度帧（NaN/inf）", throttle_duration_sec=2.0
+            )
+            return
+        self._odom_speed = math.hypot(vx, vy)
+        self._odom_speed_stamp = self.get_clock().now()
+
+    def _odom_speed_ok(self) -> bool:
+        """速度源可用：收到过帧且龄期 <=1s（2026-10-13 二审 P1-6：只查非 None
+        会让几小时前的旧帧通过停稳门）。"""
+        if self._odom_speed is None or self._odom_speed_stamp is None:
+            return False
+        age = (self.get_clock().now() - self._odom_speed_stamp).nanoseconds * 1e-9
+        return age <= 1.0
 
     def _abort_request_cb(self, msg: String):
         if not msg.data or self._state in (DockState.IDLE, DockState.FAILED):
@@ -544,8 +590,10 @@ class DockingFsm(Node):
         self.get_logger().info(f"收到 /dock/undock：{self._state} -> ...")
         self._reset_flags()
         self._mission_start_time = self.get_clock().now()
-        # 出港不需要背光；且随后的 ControlDO 会清 bit1，先显式收掉会话
-        self._backlight_session_end("出港")
+        # 出港要点灯（ControlDO mask=2 只开灯、不驱动夹爪）。这里只清会话标志，
+        # 不写 DO 0：set_do 全掩码写会清夹爪位（2026-10-15 拖坞事故）。
+        self._backlight_session_active = False
+        self._backlight_last_send_time = None
         # 夹爪模式：先请求船坞抬爪，成功才驶出（失败则 FAILED 禁止盲动）。
         # 兴飞：出港必须主动抬爪（dock_claw_release_on_undock=true）。
         self._enter(
@@ -592,6 +640,9 @@ class DockingFsm(Node):
         # 坞内倒船位移停滞检测计时随状态切换复位
         self._stuck_best_x = None
         self._stuck_elapsed = 0.0
+        # 不盲开时的视觉/位姿丢失计时随状态切换复位
+        self._undock_vision_lost_elapsed = 0.0
+        self._exit_pose_lost_elapsed = 0.0
 
     def _manage_io_goals_on_enter(self, state: str):
         """Action 生命周期组：夹爪交互 goal 随状态进出创建/取消。
@@ -862,6 +913,61 @@ class DockingFsm(Node):
                 f"set_do 0x{mask:04X}（{reason}）驱动返回失败：{res.message}"
             )
 
+    def _drive_undock_do(self, reason: str):
+        """出港 DO：夹爪松开 + 背光（2026-10-20）。
+
+        - 有夹爪且 `dock_claw_release_on_undock=true`：mask=0x0003（夹爪 bit0
+          + 背光 bit1）；背光关闭时只发 0x0001 保持夹爪。
+        - 无夹爪/不抬爪：只发 mask=2 背光（不碰夹爪位）。
+        ControlDO 在 3s 后返回成功，60s 后自动写 DO 0 全清；出港超时 60s。
+        Fire-and-forget：发送失败/被拒只告警，不阻塞状态机。
+        """
+        light = self._backlight_on() and self._backlight_mask() != 0
+        if self._claw_release_on_undock():
+            mask = 0x0003 if light else 0x0001
+        else:
+            if not light:
+                return
+            mask = 0x0002
+        if not self._ensure_io_clients():
+            return
+        if not self._control_do_client.server_is_ready():
+            self.get_logger().warn(
+                "等待 control_do action server 就绪，暂不发“出港 DO”...",
+                throttle_duration_sec=5.0,
+            )
+            return
+        goal = self._ControlDO.Goal()
+        if not hasattr(goal, "mask"):
+            self.get_logger().warn(
+                "当前 usv_rs485_driver ControlDO 无 mask 字段（旧版本）；"
+                "无法按位控制出港 DO，请更新驱动"
+            )
+            return
+        goal.start = True
+        goal.mask = int(mask) & 0xFFFF
+        future = self._control_do_client.send_goal_async(goal)
+        future.add_done_callback(
+            lambda fut, m=goal.mask, r=reason: self._on_undock_do_goal(fut, m, r)
+        )
+        self.get_logger().info(
+            f"出港 DO：ControlDO mask=0x{goal.mask:04X}（{reason}）"
+        )
+
+    def _on_undock_do_goal(self, future, mask: int, reason: str):
+        try:
+            handle = future.result()
+        except Exception as exc:  # noqa: BLE001
+            self.get_logger().warn(
+                f"出港 DO ControlDO 0x{mask:04X} 发送失败：{exc}"
+            )
+            return
+        if handle is None or not handle.accepted:
+            self.get_logger().warn(
+                f"出港 DO ControlDO 0x{mask:04X} 被拒"
+                "（驱动可能有在途 goal；抬爪动作已带背光位）"
+            )
+
     def _backlight_session_begin(self, reason: str):
         """归港会话开始：点亮并保持整个会话。
 
@@ -884,13 +990,20 @@ class DockingFsm(Node):
         self._backlight_last_send_time = None
 
     def _backlight_on_enter(self, state: str):
-        """状态进入钩子：只有归港成功（DOCKED）关灯；失败/重试保持点亮。
+        """状态进入钩子。
 
+        - DOCKED：归港成功，关灯。
+        - UNDOCK_EXIT：出港只用 ControlDO mask=2 点灯（不驱动夹爪）。
+        - UNDOCK_SETTLE：出港完成，写 DO 0 关灯（此时夹爪已松开，安全）。
         坞内/夹爪动作段由驱动自己驱动 bit1（见 BACKLIGHT_DRIVER_STATES），
         FSM 只在保活 tick 里判断，不在这里动手。
         """
         if state == DockState.DOCKED:
             self._backlight_session_end("归港成功")
+        elif state == DockState.UNDOCK_EXIT:
+            self._drive_undock_do("出港")
+        elif state == DockState.UNDOCK_SETTLE:
+            self._send_set_do(0, "出港完成")
 
     def _backlight_tick(self):
         """会话期间周期保活（覆盖驱动 60s 全清与出港 ControlDO 的残留影响）。"""
@@ -1067,7 +1180,7 @@ class DockingFsm(Node):
             and abs(e_y) <= float(p("approach_y_tol").value)
             and abs(e_yaw)
             <= math.radians(float(p("approach_yaw_tol_deg").value))
-            and self._odom_speed is not None
+            and self._odom_speed_ok()
             and self._odom_speed
             <= float(p("approach_stop_speed").value)
         )
@@ -1274,7 +1387,16 @@ class DockingFsm(Node):
         # 成功 = WaitIO 夹爪抓住（上文），失败 = 压紧超时 -> ABORT_EXIT 由
         # dock_mission 重试。（2026-10-08 删充电信号判据：rs485 驱动改版后
         # 充电状态只在抓住后才发布，该判据不可能先触发）
-        # 段内漂出窗口（浮坞移动/Tag 噪声）不复位计时，避免反复重进
+        # 压紧计时改墙钟（2026-10-13 二审 P1-5）：首次进窗口锁存时刻后单调
+        # 累计，漂出窗口（浮坞移动/Tag 噪声）不暂停不回退——原实现只在窗口内
+        # +=dt，实际压紧时长可能远超 final_push_time_sec 却永不超时
+        if self._final_push_start is not None:
+            self._final_push_elapsed = (
+                self.get_clock().now() - self._final_push_start
+            ).nanoseconds * 1e-9
+            if self._final_push_elapsed > float(p("final_push_time_sec").value):
+                self._abort_corridor("FINAL_PUSH_TIMEOUT")
+                return
         if x is not None and (
             abs(x - float(p("final_target_x").value))
             < float(p("docked_x_tol").value)
@@ -1286,10 +1408,6 @@ class DockingFsm(Node):
                     "FINAL_DOCK 到达死位置，进入压紧段（低速继续倒船，"
                     "等待夹爪抓住）"
                 )
-            self._final_push_elapsed += dt
-            if self._final_push_elapsed > float(p("final_push_time_sec").value):
-                self._abort_corridor("FINAL_PUSH_TIMEOUT")
-                return
         if self._state_elapsed() > float(p("final_dock_timeout_sec").value):
             self._abort_corridor("FINAL_DOCK_TIMEOUT")
 
@@ -1301,6 +1419,7 @@ class DockingFsm(Node):
             success_state=DockState.ACQUIRE_TAG,
             fail_prefix="DOCK_OPEN",
             on_failure=self._abort_and_report,
+            timeout_param="dock_open_timeout_sec",
         )
 
     def _trans_wait_dock_release(self, dt, x, e_y, e_yaw):
@@ -1311,12 +1430,16 @@ class DockingFsm(Node):
             success_state=DockState.UNDOCK_EXIT,
             fail_prefix="DOCK_RELEASE",
             on_failure=self._fail,
+            timeout_param="dock_release_timeout_sec",
         )
 
-    def _trans_wait_dock_io(self, action_desc, success_state, fail_prefix, on_failure):
+    def _trans_wait_dock_io(
+        self, action_desc, success_state, fail_prefix, on_failure, timeout_param
+    ):
         """WAIT_DOCK_OPEN / WAIT_DOCK_RELEASE 公共流程：等 ControlDO 结果，
         成功进 success_state；失败/超时由 on_failure 按各自语义处理
-        （OPEN 失败回 IDLE 上报 needs_reapproach；RELEASE 失败 FAILED 停车）。"""
+        （OPEN 失败回 IDLE 上报 needs_reapproach；RELEASE 失败 FAILED 停车）。
+        timeout_param：开/松爪各自独立的超时参数名（2026-10-13 拆分）。"""
         if self._control_do_result is not None:
             ok, message = self._control_do_result
             if ok:
@@ -1325,7 +1448,7 @@ class DockingFsm(Node):
             else:
                 on_failure(f"{fail_prefix}_FAILED:{message}")
         elif self._state_elapsed() > float(
-            self.get_parameter("dock_open_timeout_sec").value
+            self.get_parameter(timeout_param).value
         ):
             on_failure(f"{fail_prefix}_TIMEOUT")
         else:
@@ -1362,17 +1485,59 @@ class DockingFsm(Node):
 
     def _trans_abort_exit(self, dt, x, e_y, e_yaw):
         p = self.get_parameter
+        blind = bool(p("blind_exit_enabled").value)
+        pose_ok = x is not None and self._pose_source != SRC_INVALID
+        if not blind:
+            # 不盲开：只有新鲜 VISION 才允许前进（控制器同参数门控）；无视觉
+            # 原地等待，超时按“驶出未确认”交人工，绝不开环/推算驶出。
+            vision_ok = self._pose_source == SRC_VISION and x is not None
+            if not vision_ok:
+                self._exit_pose_lost_elapsed += dt
+                if self._exit_pose_lost_elapsed > float(
+                    p("exit_blind_timeout_sec").value
+                ):
+                    self.get_logger().warn(
+                        "ABORT_EXIT 无视觉超限（blind_exit_enabled=false）："
+                        "不盲开，驶出未确认，回 IDLE 上报 ABORT_EXIT_UNCONFIRMED"
+                    )
+                    self._abort_reason = "ABORT_EXIT_UNCONFIRMED"
+                    self._needs_manual_takeover = True
+                    self._enter(DockState.IDLE)
+                return
+            self._exit_pose_lost_elapsed = 0.0
+            if x <= float(p("exit_complete_x").value):
+                self._needs_reapproach = True
+                self._enter(DockState.IDLE)
+                return
+            if self._state_elapsed() > float(p("abort_exit_timeout_sec").value):
+                self.get_logger().warn(
+                    "ABORT_EXIT 超时（视觉有效），回 IDLE 上报 needs_reapproach"
+                )
+                self._needs_reapproach = True
+                self._enter(DockState.IDLE)
+            return
+
+        # ── 旧盲开路径：仅 blind_exit_enabled=true ──
         done = False
-        if x is not None and self._pose_source != SRC_INVALID:
+        if pose_ok:
             done = x <= float(p("exit_complete_x").value)
         if done:
             self._needs_reapproach = True
             self._enter(DockState.IDLE)
-        elif self._state_elapsed() > float(p("abort_exit_timeout_sec").value):
-            if self._pose_source == SRC_INVALID:
-                # 位姿 INVALID 时控制器输出零速（无"odom 距离跟踪驶出"），
-                # 超时退出不得谎报"已驶出"：不置 needs_reapproach，以免
-                # dock_mission 在船仍卡坞内时立刻重试；交人工/上层裁决
+            return
+        elapsed = self._state_elapsed()
+        # 无位姿开环直行：盲开上限先于完整超时触发，到时停车报"驶出未确认"
+        if not pose_ok and elapsed > float(p("exit_blind_timeout_sec").value):
+            self.get_logger().warn(
+                "ABORT_EXIT 盲开超限（位姿始终 INVALID）：驶出未确认，回 IDLE "
+                "上报 ABORT_EXIT_UNCONFIRMED（不置 needs_reapproach）"
+            )
+            self._abort_reason = "ABORT_EXIT_UNCONFIRMED"
+            self._needs_manual_takeover = True
+            self._enter(DockState.IDLE)
+        elif elapsed > float(p("abort_exit_timeout_sec").value):
+            if not pose_ok:
+                # 仅在 exit_blind_timeout_sec 被调得比完整超时还长时才会到这
                 self.get_logger().warn(
                     "ABORT_EXIT 超时且位姿 INVALID：驶出未确认，回 IDLE "
                     "上报 ABORT_EXIT_UNCONFIRMED（不置 needs_reapproach）"
@@ -1388,13 +1553,52 @@ class DockingFsm(Node):
 
     def _trans_undock_exit(self, dt, x, e_y, e_yaw):
         p = self.get_parameter
+        blind = bool(p("blind_exit_enabled").value)
+        if not blind:
+            # 不盲开：只有新鲜 VISION 才允许运动；无视觉原地等待
+            # undock_vision_timeout_sec，超时 FAILED（不报假成功）。
+            vision_ok = self._pose_source == SRC_VISION and x is not None
+            if not vision_ok:
+                self._undock_vision_lost_elapsed += dt
+                if self._undock_vision_lost_elapsed > float(
+                    p("undock_vision_timeout_sec").value
+                ):
+                    self._fail("UNDOCK_NO_VISION")
+                return
+            self._undock_vision_lost_elapsed = 0.0
+            if x <= float(p("undock_complete_x").value):
+                self._undock_success = True
+                self._enter(DockState.UNDOCK_SETTLE)
+                return
+            if self._state_elapsed() > float(p("undock_timeout_sec").value):
+                self._fail("UNDOCK_TIMEOUT")
+            return
+
+        # ── 旧盲开路径：仅 blind_exit_enabled=true ──
+        pose_ok = x is not None and self._pose_source != SRC_INVALID
         done = False
-        if x is not None and self._pose_source != SRC_INVALID:
+        if pose_ok:
             done = x <= float(p("undock_complete_x").value)
         if done:
             self._undock_success = True
             self._enter(DockState.UNDOCK_SETTLE)
-        elif self._state_elapsed() > float(p("undock_timeout_sec").value):
+            return
+        elapsed = self._state_elapsed()
+        if not pose_ok and elapsed > float(p("exit_blind_timeout_sec").value):
+            if bool(p("undock_unconfirmed_as_success").value):
+                # 临时人工确认方案（仅盲开开启时）：现场目视确认已驶出坞时，
+                # 盲开上限到了按成功进 SETTLE；status 里 pose_source 仍为 INVALID。
+                self.get_logger().warn(
+                    "UNDOCK_EXIT_UNCONFIRMED：位姿仍无效，按 "
+                    "undock_unconfirmed_as_success=true 作为人工确认驶出成功"
+                    "（visual_unconfirmed）"
+                )
+                self._undock_success = True
+                self._enter(DockState.UNDOCK_SETTLE)
+                return
+            self._fail("UNDOCK_EXIT_UNCONFIRMED")
+            return
+        if elapsed > float(p("undock_timeout_sec").value):
             # 超时不报假成功：船未确认驶出，FAILED（JSON 映射 DOCK_ABORT）
             self._fail("UNDOCK_TIMEOUT")
 
@@ -1420,7 +1624,7 @@ class DockingFsm(Node):
             and abs(e_y) <= float(p("align_y_tol").value)
             and abs(e_yaw)
             <= math.radians(float(p("approach_yaw_tol_deg").value))
-            and self._odom_speed is not None
+            and self._odom_speed_ok()
             and self._odom_speed <= float(p("approach_stop_speed").value)
         ):
             self._enter(DockState.ALIGN_ENTRY)

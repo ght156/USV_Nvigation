@@ -39,6 +39,8 @@ MUST_MATCH = [
     ("back_in_gate2_yaw_deg", ["docking_fsm", "docking_motion_controller"]),
     ("docked_x_tol", ["docking_fsm", "docking_motion_controller"]),
     ("docked_y_tol", ["docking_fsm", "docking_motion_controller"]),
+    # 出港/撤离盲开总开关：FSM 与控制器必须同时开/关
+    ("blind_exit_enabled", ["docking_fsm", "docking_motion_controller"]),
     # 全局裁决：FSM 与 safety 各自计时/防抖，须同尺
     ("max_docking_duration_sec", ["docking_fsm", "docking_safety"]),
     ("violation_cycles", ["docking_fsm", "docking_safety"]),

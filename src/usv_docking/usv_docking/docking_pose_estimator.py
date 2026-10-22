@@ -175,7 +175,9 @@ class DockingPoseEstimator(Node):
         self.declare_parameter("seed_max_yaw_spread_deg", 15.0)
 
         # ── 超时 ──
-        self.declare_parameter("tag_timeout", 0.30)
+        # 2026-10-15：0.30→0.60。后视相机仅 ~2.5-3.8Hz（帧间隔~0.33s），0.3 会让
+        # VISION 每秒反复掉成 ODOM_PREDICTION、tag_visible 闪；根治是提相机帧率
+        self.declare_parameter("tag_timeout", 0.60)
         # 推算硬上限：ABORT_EXIT/UNDOCK 全靠推算驶出，须 >= 安全节点撤离窗口
         # （safety.abort_exit_odom_timeout=60s）。2026-10-07 改名：本参数与 safety 的
         # odom_prediction_timeout(3s=正常运行窗口) 同名但语义完全不同，容易被误

@@ -6,6 +6,7 @@
 
 import json
 import math
+from types import SimpleNamespace
 
 import pytest
 import rclpy
@@ -528,16 +529,66 @@ def test_failed_maps_dock_abort_in_status(fsm):
     assert status["tag_age_sec"] is None  # inf -> null（严格 JSON）
 
 
-def test_undock_timeout_fails_instead_of_fake_success(fsm):
+def test_undock_no_vision_fails_without_fake_success(fsm):
+    """默认 blind_exit_enabled=false：无 VISION 不盲开，等待超时后 FAILED，
+    绝不报 undock_success（出去了才成功，没出去就失败）。"""
+    fsm.set_parameters([Parameter("undock_vision_timeout_sec", value=0.5)])
     fsm._undock_cb(Bool(data=True))
     fsm._transitions(0.1)
     assert fsm._state == DockState.UNDOCK_EXIT
-    # 位姿 INVALID 且超时 -> FAILED（不报 undock_success）
     _feed(fsm, source=SRC_INVALID, visible=False)
-    _backdate(fsm, 61.0)
+    for _ in range(6):  # 0.6s > 0.5s
+        fsm._transitions(0.1)
+    assert fsm._state == DockState.FAILED
+    assert fsm._undock_success is False
+    assert fsm._abort_reason == "UNDOCK_NO_VISION"
+
+
+def test_undock_prediction_only_also_waits_for_vision(fsm):
+    """ODOM_PREDICTION 不算“能检测二维码”：默认不盲开，等 VISION 超时失败。"""
+    fsm.set_parameters([Parameter("undock_vision_timeout_sec", value=0.5)])
+    fsm._undock_cb(Bool(data=True))
+    fsm._transitions(0.1)
+    assert fsm._state == DockState.UNDOCK_EXIT
+    _feed(fsm, x=-2.5, source="ODOM_PREDICTION", visible=False, age=0.8)
+    for _ in range(6):
+        fsm._transitions(0.1)
+    assert fsm._state == DockState.FAILED
+    assert fsm._undock_success is False
+    assert fsm._abort_reason == "UNDOCK_NO_VISION"
+
+
+def test_undock_blind_exit_capped(fsm):
+    """blind_exit_enabled=true 才恢复旧盲开：15s 上限 -> FAILED + 人工接管。"""
+    fsm.set_parameters([Parameter("blind_exit_enabled", value=True)])
+    fsm._undock_cb(Bool(data=True))
+    fsm._transitions(0.1)
+    assert fsm._state == DockState.UNDOCK_EXIT
+    _feed(fsm, source=SRC_INVALID, visible=False)
+    _backdate(fsm, 16.0)  # > 15s 盲开上限，<< 60s 完整超时
     fsm._transitions(0.1)
     assert fsm._state == DockState.FAILED
     assert fsm._undock_success is False
+    assert fsm._abort_reason == "UNDOCK_EXIT_UNCONFIRMED"
+    assert fsm._needs_manual_takeover is True
+
+
+def test_abort_exit_blind_capped_before_full_timeout(fsm):
+    """blind_exit_enabled=true：ABORT_EXIT 位姿 INVALID 时 15s 盲开上限
+    -> IDLE + ABORT_EXIT_UNCONFIRMED + 人工接管。"""
+    fsm.set_parameters([Parameter("blind_exit_enabled", value=True)])
+    _start(fsm)
+    for _ in range(5):
+        _feed(fsm)
+        fsm._transitions(0.1)
+    fsm._enter(DockState.ABORT_EXIT)
+    _feed(fsm, source=SRC_INVALID, visible=False)
+    _backdate(fsm, 16.0)
+    fsm._transitions(0.1)
+    assert fsm._state == DockState.IDLE
+    assert fsm._needs_reapproach is False
+    assert fsm._abort_reason == "ABORT_EXIT_UNCONFIRMED"
+    assert fsm._needs_manual_takeover is True
 
 
 def test_undock_position_completion(fsm):
@@ -586,8 +637,9 @@ def test_reacquire_return_resets_approach_grace(fsm):
 
 
 def test_abort_exit_timeout_invalid_pose_not_fake_reapproach(fsm):
-    """ABORT_EXIT 超时且位姿 INVALID：控制器只能停车，不得谎报"已驶出"
-    （needs_reapproach=True 会让 dock_mission 在船仍卡坞内时立刻重试）。"""
+    """ABORT_EXIT 位姿 INVALID：默认不盲开，等待超时后 IDLE +
+    ABORT_EXIT_UNCONFIRMED + 人工接管，不得谎报"已驶出"。"""
+    fsm.set_parameters([Parameter("exit_blind_timeout_sec", value=0.0)])
     _start(fsm)
     for _ in range(5):
         _feed(fsm)
@@ -598,9 +650,8 @@ def test_abort_exit_timeout_invalid_pose_not_fake_reapproach(fsm):
         _feed(fsm, x=-1.5, y=0.5)
         fsm._transitions(0.1)
     assert fsm._state == DockState.ABORT_EXIT
-    # 位姿 INVALID + 超时 -> IDLE，上报"驶出未确认"
+    # 位姿 INVALID -> 无视觉计时立即超限 -> IDLE，上报"驶出未确认"
     _feed(fsm, source=SRC_INVALID, visible=False)
-    _backdate(fsm, 46.0)
     fsm._transitions(0.1)
     assert fsm._state == DockState.IDLE
     assert fsm._needs_reapproach is False
@@ -622,18 +673,34 @@ def test_abort_exit_timeout_invalid_pose_not_fake_reapproach(fsm):
 
 
 def test_abort_exit_timeout_valid_pose_still_reapproach(fsm):
-    """ABORT_EXIT 超时但位姿有效（位置已知）：维持原 needs_reapproach=True。"""
+    """ABORT_EXIT 超时但视觉有效（位置已知）：维持原 needs_reapproach=True。"""
+    _start(fsm)
+    for _ in range(5):
+        _feed(fsm)
+        fsm._transitions(0.1)
+    fsm._enter(DockState.ABORT_EXIT)
+    _feed(fsm, x=-2.0, source=SRC_VISION, visible=True, age=0.0)
+    _backdate(fsm, 46.0)
+    fsm._transitions(0.1)
+    assert fsm._state == DockState.IDLE
+    assert fsm._needs_reapproach is True
+    assert fsm._abort_reason is None
+
+
+def test_abort_exit_prediction_only_not_treated_as_vision(fsm):
+    """默认不盲开：ODOM_PREDICTION 也不允许撤离，超时后 ABORT_EXIT_UNCONFIRMED。"""
+    fsm.set_parameters([Parameter("exit_blind_timeout_sec", value=0.0)])
     _start(fsm)
     for _ in range(5):
         _feed(fsm)
         fsm._transitions(0.1)
     fsm._enter(DockState.ABORT_EXIT)
     _feed(fsm, x=-2.0, source="ODOM_PREDICTION", visible=False, age=1.0)
-    _backdate(fsm, 46.0)
     fsm._transitions(0.1)
     assert fsm._state == DockState.IDLE
-    assert fsm._needs_reapproach is True
-    assert fsm._abort_reason is None
+    assert fsm._needs_reapproach is False
+    assert fsm._abort_reason == "ABORT_EXIT_UNCONFIRMED"
+    assert fsm._needs_manual_takeover is True
 
 
 def test_exit_pose_lost_advisory_does_not_change_state(fsm):
@@ -798,7 +865,9 @@ def test_claw_enabled_gates_start_and_undock(fsm):
 
 def test_final_push_timeout_aborts(fsm):
     """压紧段超时：到死位置后位置不再判成功；夹爪始终未抓住，
-    压紧超 final_push_time_sec -> ABORT_EXIT 重试。"""
+    压紧超 final_push_time_sec -> ABORT_EXIT 重试。
+    2026-10-13 起压紧计时为墙钟（首次进窗口锁存，漂出窗口不暂停），
+    测试用回拨 _final_push_start 代替假 dt 循环。"""
     _start(fsm)
     fsm._enter(DockState.FINAL_DOCK)
     # 首次到死位置：进入压紧段（记时间戳），不判 DOCKED
@@ -809,15 +878,24 @@ def test_final_push_timeout_aborts(fsm):
     # 压紧段时长跟随参数（2026-10-08 晚 6.0 -> 15.0：DI 闭合比 6s 晚），
     # 不写死秒数，免得参数一调测试就失效
     push_limit = float(fsm.get_parameter("final_push_time_sec").value)
-    # 未到上限：保持 FINAL_DOCK（旧逻辑 1s 即 DOCKED）
-    for _ in range(int((push_limit - 0.1) / 0.1)):
-        _feed(fsm, x=0.05, y=0.0, yaw=math.pi)
-        fsm._transitions(0.1)
+    # 未到上限（回拨到 limit-1s）：保持 FINAL_DOCK（旧逻辑 1s 即 DOCKED）
+    fsm._final_push_start = fsm.get_clock().now() - Duration(
+        seconds=push_limit - 1.0
+    )
+    _feed(fsm, x=0.05, y=0.0, yaw=math.pi)
+    fsm._transitions(0.1)
     assert fsm._state == DockState.FINAL_DOCK
-    # 超过上限：压紧超时 -> ABORT_EXIT
-    for _ in range(3):
-        _feed(fsm, x=0.05, y=0.0, yaw=math.pi)
-        fsm._transitions(0.1)
+    # 漂出窗口（浮坞移动/Tag 噪声）：墙钟计时不暂停也不复位
+    _feed(fsm, x=0.5, y=0.0, yaw=math.pi)
+    fsm._transitions(0.1)
+    assert fsm._state == DockState.FINAL_DOCK
+    assert fsm._final_push_start is not None
+    # 超过上限（即便当前漂出窗口也判）：压紧超时 -> ABORT_EXIT
+    fsm._final_push_start = fsm.get_clock().now() - Duration(
+        seconds=push_limit + 0.1
+    )
+    _feed(fsm, x=0.5, y=0.0, yaw=math.pi)
+    fsm._transitions(0.1)
     assert fsm._state == DockState.ABORT_EXIT
     assert fsm._abort_reason == "FINAL_PUSH_TIMEOUT"
     # 驶出完成回 IDLE：压紧状态已复位
@@ -1010,9 +1088,16 @@ def test_partial_claw_final_push_timeout_fails(fsm):
     _enable_claw(fsm)
     fsm._enter(DockState.FINAL_DOCK)
     fsm._claw_partial_mask = 2
-    for _ in range(170):  # 17s 压在死位置 > final_push_time_sec(15s)
-        _feed(fsm, x=0.05, y=0.0, yaw=math.pi)
-        fsm._transitions(0.1)
+    _feed(fsm, x=0.05, y=0.0, yaw=math.pi)
+    fsm._transitions(0.1)
+    assert fsm._final_push_start is not None
+    # 墙钟压紧计时（2026-10-13）：回拨锁存时刻模拟压紧超时
+    push_limit = float(fsm.get_parameter("final_push_time_sec").value)
+    fsm._final_push_start = fsm.get_clock().now() - Duration(
+        seconds=push_limit + 0.1
+    )
+    _feed(fsm, x=0.05, y=0.0, yaw=math.pi)
+    fsm._transitions(0.1)
     assert fsm._state == DockState.FAILED
     assert fsm._abort_reason == "FINAL_PUSH_TIMEOUT"
     assert fsm._needs_manual_takeover is True
@@ -1130,11 +1215,11 @@ def test_backlight_off_on_dock_success(fsm):
     assert fsm._backlight_session_active is False
 
 
-def test_backlight_off_on_cancel_and_undock(fsm):
-    """/dock/cancel 与 /dock/undock 是会话的真正结束，关灯。
+def test_backlight_off_on_cancel_undock_lights_only(fsm):
+    """/dock/cancel 关灯；/dock/undock 不写 DO 0，改为 ControlDO mask=2 只开灯。
 
-    注：正常 DOCKED -> /dock/undock 路径上灯已经在 DOCKED 时关了，
-    undock 那次是兜底（会话仍亮着时请求出港，比如失败后人工取消再出港）。"""
+    2026-10-20：出港需要背光照 Tag，但 set_do 全掩码写 0 会清夹爪位；
+    因此 undock 只清会话标志，进入 UNDOCK_EXIT 时发 ControlDO mask=2。"""
     _enable_backlight(fsm)
     calls = _record_set_do(fsm)
     _start(fsm)
@@ -1145,9 +1230,13 @@ def test_backlight_off_on_cancel_and_undock(fsm):
     calls.clear()
     fsm._backlight_session_begin("测试：点亮")
     assert calls[-1][0] == 2
+    lights = []
+    fsm._drive_undock_do = lambda reason: lights.append(reason)
     fsm._state = DockState.IDLE
     fsm._undock_cb(Bool(data=True))
-    assert calls and calls[-1][0] == 0
+    # 不写 DO 0；改发只开灯
+    assert not calls or calls[-1][0] != 0
+    assert lights  # UNDOCK_EXIT 进入时点了灯
     assert fsm._backlight_session_active is False
 
 
@@ -1200,3 +1289,116 @@ def test_backlight_disabled_no_calls(fsm):
     fsm._backlight_tick()
     fsm._enter(DockState.DOCKED)
     assert calls == []
+
+
+# ══════════════ 输入校验（2026-10-13 二审 P1-6）══════════════
+
+
+def test_nan_dock_pose_frame_dropped(fsm):
+    """非有限 dock_pose 帧直接丢弃：缓存不被 NaN 污染（NaN 比较恒 False，
+    会把走廊/到位判定卡死）。"""
+    _feed(fsm, x=-1.0, y=0.2)
+    fsm._dock_pose_cb(_pose(float("nan"), 0.0, math.pi))
+    assert fsm._dock_x == -1.0
+    assert fsm._dock_y == 0.2
+
+
+def test_nan_odom_speed_frame_dropped(fsm):
+    """非有限 Odometry 速度帧丢弃且不刷新新鲜度。"""
+    _feed(fsm, speed=0.1)
+    good_stamp = fsm._odom_speed_stamp
+    bad = Odometry()
+    bad.twist.twist.linear.x = float("nan")
+    fsm._odom_cb(bad)
+    assert fsm._odom_speed == 0.1
+    assert fsm._odom_speed_stamp == good_stamp
+
+
+def test_stale_odom_speed_fails_staging_reached(fsm):
+    """速度帧龄期超 1s：_staging_reached 不通过（几小时前的旧帧不能当
+    停稳证据），且 hold 清零。"""
+    x, e_y, e_yaw = -2.0, 0.0, 0.0  # staging_x=-2.0 上，误差全零
+    reached = False
+    for _ in range(6):  # 0.6s > approach_stop_hold_sec(0.5)
+        _feed(fsm, x=x, y=e_y, speed=0.0)
+        reached = fsm._staging_reached(x, e_y, e_yaw, 0.1)
+    assert reached is True
+
+    fsm._odom_speed_stamp = fsm.get_clock().now() - Duration(seconds=2.0)
+    assert fsm._staging_reached(x, e_y, e_yaw, 0.1) is False
+    assert fsm._staging_hold == 0.0
+
+
+def test_undock_no_claw_uses_control_do_mask2(fsm):
+    """无夹爪/不抬爪时：出港 ControlDO start=true + mask=2（只开灯）。"""
+    _enable_backlight(fsm)
+    sent = []
+
+    class _Goal:
+        start = False
+        mask = 0
+
+    class _Handle:
+        accepted = True
+
+    class _Future:
+        def add_done_callback(self, _cb):
+            pass
+
+        def result(self):
+            return _Handle()
+
+    class _Client:
+        def server_is_ready(self):
+            return True
+
+        def send_goal_async(self, goal):
+            sent.append(goal)
+            return _Future()
+
+    fsm._ControlDO = SimpleNamespace(Goal=_Goal)
+    fsm._control_do_client = _Client()
+    fsm._ensure_io_clients = lambda: True
+
+    fsm._enter(DockState.UNDOCK_EXIT)
+    assert sent, "未发送 ControlDO 只开灯"
+    assert sent[-1].start is True
+    assert sent[-1].mask == 2
+
+
+def test_undock_with_claw_uses_control_do_mask3(fsm):
+    """有夹爪且抬爪：出港 ControlDO mask=0x0003（夹爪 bit0 + 背光 bit1）。"""
+    _enable_backlight(fsm)
+    _enable_claw(fsm)  # dock_claw_release_on_undock 默认 true
+    sent = []
+
+    class _Goal:
+        start = False
+        mask = 0
+
+    class _Handle:
+        accepted = True
+
+    class _Future:
+        def add_done_callback(self, _cb):
+            pass
+
+        def result(self):
+            return _Handle()
+
+    class _Client:
+        def server_is_ready(self):
+            return True
+
+        def send_goal_async(self, goal):
+            sent.append(goal)
+            return _Future()
+
+    fsm._ControlDO = SimpleNamespace(Goal=_Goal)
+    fsm._control_do_client = _Client()
+    fsm._ensure_io_clients = lambda: True
+
+    fsm._enter(DockState.UNDOCK_EXIT)
+    assert sent, "未发送出港 ControlDO"
+    assert sent[-1].start is True
+    assert sent[-1].mask == 0x0003

@@ -51,7 +51,25 @@ REMOTE_CLI = HERE / "remote_nav_cli.py"
 MARK = "@@RESULT@@"
 R_EARTH = 6378137.0
 DEFAULT_HOST = "hkzl"
-DEFAULT_SETUP = "~/usv-main/install/arm/setup.bash"
+
+# 2026-10-16：船端 RMW 默认从 CycloneDDS 改成 FastDDS。
+#   兴飞（hkzl）自 2026-10-15 起全船走 rmw_fastrtps_cpp。客户端若还落 CycloneDDS，
+#   会出现「发现层/话题照旧正常（check 里服务全 ✅、/nav_status 也读得到），
+#   但**服务请求-应答静默超时**」——当天实测 A/B：老默认值下
+#   /mission_bridge/get_geofence 无响应，改 rmw_fastrtps_cpp 立即正常返回；
+#   页面上表现为「下发失败：服务 /mission_bridge/send_waypoints 超时（8s）无响应」。
+#   所以判断客户端中间件是否一致，不能只看 check 的服务列表。
+#   仍用 CycloneDDS 的船/栈（如澄丰 nx）：--rmw rmw_cyclonedds_cpp，或请求体带 "rmw"。
+DEFAULT_RMW = "rmw_fastrtps_cpp"
+# 命令行 --rmw 覆盖它；请求体里的 rmw 优先级最高
+ACTIVE_RMW = DEFAULT_RMW
+# 船端要 source 的工作区，从左到右试第一个存在的（换船不用改参数）
+DEFAULT_SETUPS = (
+    "~/usv-main/install/arm/setup.bash",   # 兴飞 hkzl
+    "~/usv_nav_ws/install/setup.bash",     # 澄丰 nx
+    "~/usv/install/arm/setup.bash",        # 船端 usv 工作区（GI320/RS485 那份）
+)
+DEFAULT_SETUP = DEFAULT_SETUPS[0]
 DEFAULT_HTML = Path("/home/ght/ros_map_tool-main/ros_map_tool_v3_nav2_live.html")
 
 _remote_lock = threading.Lock()
@@ -97,25 +115,38 @@ def bbox_from_anchors(anchors: dict, margin_m: float = 50.0):
 # --------------------------------------------------------------------------- #
 # ssh → 船端
 # --------------------------------------------------------------------------- #
-def build_remote_cmd(remote_setup: str, argv: list) -> str:
-    setup = remote_setup or DEFAULT_SETUP
+def build_remote_cmd(remote_setup: str, argv: list, rmw: str = "") -> str:
+    setups = ([remote_setup] if remote_setup else []) + [
+        s for s in DEFAULT_SETUPS if s != remote_setup
+    ]
+    src_ws = "for s in " + " ".join(setups) + "; do if [ -f \"$s\" ]; then . \"$s\" >/dev/null 2>&1 && break; fi; done; "
+    rmw = (rmw or ACTIVE_RMW or DEFAULT_RMW).strip()
+    if not rmw.replace("_", "").isalnum():
+        rmw = DEFAULT_RMW
+    if rmw == "rmw_cyclonedds_cpp":
+        # 这份 env 里是 CYCLONEDDS_URI=<…Interface eth1…>，只有 CycloneDDS 用得上
+        rmw_env = "if [ -f ~/logs/xingfei_stack/.cyclone_env ]; then . ~/logs/xingfei_stack/.cyclone_env; fi; "
+    else:
+        # FastDDS 下留着它只会把中间件带偏
+        rmw_env = "unset CYCLONEDDS_URI; "
     return (
         "export ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-5}; "
-        "export RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-rmw_cyclonedds_cpp}; "
+        f"export RMW_IMPLEMENTATION=${{RMW_IMPLEMENTATION:-{rmw}}}; "
         "export PYTHONIOENCODING=utf-8; "
-        "if [ -f ~/logs/xingfei_stack/.cyclone_env ]; then . ~/logs/xingfei_stack/.cyclone_env; fi; "
+        + rmw_env +
         ". /opt/ros/humble/setup.bash >/dev/null 2>&1; "
-        f"if [ -f {setup} ]; then . {setup} >/dev/null 2>&1; fi; "
+        + src_ws +
         "exec python3 - " + " ".join(str(a) for a in argv)
     )
 
 
-def run_remote(host: str, argv: list, timeout: float, remote_setup: str = "") -> dict:
+def run_remote(host: str, argv: list, timeout: float, remote_setup: str = "",
+               rmw: str = "") -> dict:
     """把 remote_nav_cli.py 通过 ssh stdin 送到船端执行，返回解析后的结果 dict。"""
     if not REMOTE_CLI.is_file():
         return {"ok": False, "error": f"缺少船端脚本 {REMOTE_CLI}"}
     script = REMOTE_CLI.read_text(encoding="utf-8")
-    cmd = build_remote_cmd(remote_setup, argv)
+    cmd = build_remote_cmd(remote_setup, argv, rmw)
     ssh_argv = [
         "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
         "-o", "ServerAliveInterval=10", "-o", "ServerAliveCountMax=3",
@@ -163,21 +194,24 @@ def run_remote(host: str, argv: list, timeout: float, remote_setup: str = "") ->
     return payload
 
 
-def fetch_status(host: str, remote_setup: str = "", timeout: float = 40.0) -> dict:
-    return run_remote(host, ["status"], timeout, remote_setup)
+def fetch_status(host: str, remote_setup: str = "", timeout: float = 40.0,
+                 rmw: str = "") -> dict:
+    return run_remote(host, ["status"], timeout, remote_setup, rmw)
 
 
-def do_check(host: str, remote_setup: str = "", timeout: float = 60.0) -> dict:
-    return run_remote(host, ["check"], timeout, remote_setup)
+def do_check(host: str, remote_setup: str = "", timeout: float = 60.0,
+             rmw: str = "") -> dict:
+    return run_remote(host, ["check"], timeout, remote_setup, rmw)
 
 
-def watch(host: str, seconds: float, remote_setup: str = "", period: float = 0.5) -> int:
+def watch(host: str, seconds: float, remote_setup: str = "", period: float = 0.5,
+          rmw: str = "") -> int:
     """流式监控船端状态（本地打印，便于盯「终点对准」这类过程）。"""
     if not REMOTE_CLI.is_file():
         print(f"缺少船端脚本 {REMOTE_CLI}")
         return 1
     script = REMOTE_CLI.read_text(encoding="utf-8")
-    cmd = build_remote_cmd(remote_setup, ["watch", f"{seconds:g}", f"{period:g}"])
+    cmd = build_remote_cmd(remote_setup, ["watch", f"{seconds:g}", f"{period:g}"], rmw)
     ssh_argv = [
         "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
         "-o", "ServerAliveInterval=10", host, cmd,
@@ -270,6 +304,7 @@ def dispatch(req: dict) -> dict:
     host = req.get("host") or DEFAULT_HOST
     mode = str(req.get("mode") or "service")
     remote_setup = req.get("remote_setup") or ""
+    rmw = str(req.get("rmw") or "")
     dry_run = bool(req.get("dry_run"))
     allow_obb = bool(req.get("allow_out_of_bounds"))
 
@@ -286,11 +321,13 @@ def dispatch(req: dict) -> dict:
            "mode": mode, "host": host, "mission_id": mission_id}
     if dry_run:
         out["dry_run"] = True
-        out["remote_cmd_preview"] = build_remote_cmd(remote_setup, ["dispatch", mode, "<base64 payload>"])
+        out["remote_cmd_preview"] = build_remote_cmd(
+            remote_setup, ["dispatch", mode, "<base64 payload>"], rmw)
         return out
 
     body = base64.b64encode(json.dumps(payload).encode("utf-8")).decode("ascii")
-    res = run_remote(host, ["dispatch", mode, body], timeout=70.0, remote_setup=remote_setup)
+    res = run_remote(host, ["dispatch", mode, body], timeout=70.0,
+                     remote_setup=remote_setup, rmw=rmw)
     out["remote"] = res.get("remote")
     out["elapsed_sec"] = res.get("elapsed_sec")
     out["ok"] = bool(res.get("ok"))
@@ -308,6 +345,7 @@ class Handler(BaseHTTPRequestHandler):
     html_path = DEFAULT_HTML
     default_host = DEFAULT_HOST
     remote_setup = ""
+    default_rmw = DEFAULT_RMW
 
     # ---- utils ----
     def log_message(self, fmt, *args):
@@ -370,21 +408,22 @@ class Handler(BaseHTTPRequestHandler):
             self._json(400, {"ok": False, "error": str(exc)})
             return
         host = req.get("host") or self.default_host
+        rmw = str(req.get("rmw") or self.default_rmw)
         req.setdefault("remote_setup", self.remote_setup)
         try:
             if path == "/api/check":
-                self._json(200, do_check(host, self.remote_setup))
+                self._json(200, do_check(host, self.remote_setup, rmw=rmw))
             elif path == "/api/status":
-                self._json(200, fetch_status(host, self.remote_setup))
+                self._json(200, fetch_status(host, self.remote_setup, rmw=rmw))
             elif path == "/api/dispatch":
                 self._json(200, dispatch(req))
             elif path == "/api/cancel":
-                self._json(200, run_remote(host, ["cancel"], 45.0, self.remote_setup))
+                self._json(200, run_remote(host, ["cancel"], 45.0, self.remote_setup, rmw))
             elif path == "/api/pause":
                 flag = "1" if req.get("pause", True) else "0"
-                self._json(200, run_remote(host, ["pause", flag], 45.0, self.remote_setup))
+                self._json(200, run_remote(host, ["pause", flag], 45.0, self.remote_setup, rmw))
             elif path == "/api/datum":
-                self._json(200, run_remote(host, ["datum"], 30.0, self.remote_setup))
+                self._json(200, run_remote(host, ["datum"], 30.0, self.remote_setup, rmw))
             elif path == "/api/convert":
                 latlon, meta = convert_waypoints(req, bool(req.get("allow_out_of_bounds")))
                 self._json(200, {"ok": True, "count": len(latlon), "latlon": latlon, "meta": meta})
@@ -434,32 +473,42 @@ def main() -> int:
                     help="--params 时要读值的参数名（逗号分隔）")
     ap.add_argument("--dispatch-file", help="按 JSON 文件下发航点（与网页同格式）")
     ap.add_argument("--dry-run", action="store_true", help="只做坐标换算，不发船端")
+    ap.add_argument("--rmw", default=DEFAULT_RMW,
+                    help=f"船端 DDS 中间件（默认 {DEFAULT_RMW}；"
+                         "澄丰等仍跑 CycloneDDS 的船传 rmw_cyclonedds_cpp）")
     args = ap.parse_args()
+
+    global ACTIVE_RMW
+    ACTIVE_RMW = args.rmw
 
     Handler.html_path = args.html
     Handler.default_host = args.ssh_host
     Handler.remote_setup = args.remote_setup
+    Handler.default_rmw = args.rmw
 
     if args.check:
-        print(json.dumps(do_check(args.ssh_host, args.remote_setup), ensure_ascii=False, indent=2))
+        print(json.dumps(do_check(args.ssh_host, args.remote_setup, rmw=args.rmw),
+                         ensure_ascii=False, indent=2))
         return 0
     if args.status:
-        print(json.dumps(fetch_status(args.ssh_host, args.remote_setup), ensure_ascii=False, indent=2))
+        print(json.dumps(fetch_status(args.ssh_host, args.remote_setup, rmw=args.rmw),
+                         ensure_ascii=False, indent=2))
         return 0
     if args.datum:
-        print(json.dumps(run_remote(args.ssh_host, ["datum"], 30.0, args.remote_setup),
+        print(json.dumps(run_remote(args.ssh_host, ["datum"], 30.0, args.remote_setup, args.rmw),
                          ensure_ascii=False, indent=2))
         return 0
     if args.cancel:
-        print(json.dumps(run_remote(args.ssh_host, ["cancel"], 45.0, args.remote_setup),
+        print(json.dumps(run_remote(args.ssh_host, ["cancel"], 45.0, args.remote_setup, args.rmw),
                          ensure_ascii=False, indent=2))
         return 0
     if args.pause is not None:
-        print(json.dumps(run_remote(args.ssh_host, ["pause", args.pause], 45.0, args.remote_setup),
+        print(json.dumps(run_remote(args.ssh_host, ["pause", args.pause], 45.0,
+                                    args.remote_setup, args.rmw),
                          ensure_ascii=False, indent=2))
         return 0
     if args.watch is not None:
-        return watch(args.ssh_host, args.watch, args.remote_setup, args.watch_period)
+        return watch(args.ssh_host, args.watch, args.remote_setup, args.watch_period, args.rmw)
     if args.diag is not None:
         print(json.dumps(run_remote(args.ssh_host, ["diag", f"{args.diag:g}"], 60.0,
                                     args.remote_setup),
@@ -494,6 +543,7 @@ def main() -> int:
     if args.dispatch_file:
         req = json.loads(Path(args.dispatch_file).read_text(encoding="utf-8"))
         req.setdefault("host", args.ssh_host)
+        req.setdefault("rmw", args.rmw)
         req.setdefault("dry_run", args.dry_run)
         print(json.dumps(dispatch(req), ensure_ascii=False, indent=2))
         return 0

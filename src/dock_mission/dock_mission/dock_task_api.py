@@ -28,6 +28,11 @@ GCS_ACTION_TO_COMMAND = {
 # 与 mission_bridge.py 的 YAW_UNSPECIFIED=65536.0 对齐（度语义）：非法/缺失 dock_yaw 时
 # 让导航按行进方向作为到点朝向。航向接口统一为度，超出 [-360, 360] 一律视为"不指定朝向"。
 DOCK_YAW_UNSPECIFIED = 65536.0
+# 预泊点经纬度的"不指定"哨兵。上层 Decision 取不到泊位时会把 lat/lon/yaw 三者
+# 一律填 65536.0（见 decision DockActuator::sendCommand），所以经纬度也必须接受
+# 该值：任一坐标为哨兵即视为未指定预泊点，回退泊位库（而不是当非法坐标丢弃整条
+# 指令）。与 (0,0)/真正越界（如 lat=91）区分开——后者仍然丢弃。
+DOCK_POINT_UNSPECIFIED = DOCK_YAW_UNSPECIFIED
 
 
 @dataclass(frozen=True)
@@ -36,9 +41,10 @@ class GcsCommand:
 
     dock_lat/dock_lon/dock_yaw 为可选预泊点（靠泊点经纬度 + 船尾朝向船坞角度）。
     三者齐全且合法时，dock_mission 用它覆盖泊位库 gnss_staging 作为归港导航目标点；
-    **dock_yaw 单位为度**（接口统一用度），dock_mission 按度透传给 mission_bridge
-    （MissionWaypoint.yaw 同为度；Nav2 位姿时才转弧度）。仅给经纬度不带 yaw 时，
-    yaw 取 DOCK_YAW_UNSPECIFIED（导航按行进方向）。dock_yaw 超范围（如 65536.0）同样
+    经纬度缺失/null/非数或为 65536.0 哨兵时回退泊位库。**dock_yaw 单位为度**
+    （接口统一用度），dock_mission 按度透传给 mission_bridge（MissionWaypoint.yaw
+    同为度；Nav2 位姿时才转弧度）。仅给经纬度不带 yaw 时，yaw 取
+    DOCK_YAW_UNSPECIFIED（导航按行进方向）。dock_yaw 超范围（如 65536.0）同样
     被视为"不指定朝向"。
 
     dock_yaw 语义（已对照仿真仓与 mission_bridge 核实）：**预泊点处船艏航向**，
@@ -70,6 +76,14 @@ def _opt_float(value: Any) -> Optional[float]:
     except (TypeError, ValueError):
         return None
     return f if math.isfinite(f) else None
+
+
+def _opt_coord(value: Any) -> Optional[float]:
+    """预泊点经纬度解析：65536.0 哨兵（上层“不指定”）归一化为 None。"""
+    f = _opt_float(value)
+    if f is not None and f == DOCK_POINT_UNSPECIFIED:
+        return None
+    return f
 
 
 def is_valid_dock_point(lat: float, lon: float) -> bool:
@@ -125,6 +139,7 @@ def build_task_status(
     camera_ready: bool = True,
     event_ack_ok: bool = True,
     event_ack_failures: int = 0,
+    odom_speed: Optional[float] = None,
 ) -> dict[str, Any]:
     return {
         "schema_version": 1,
@@ -144,6 +159,12 @@ def build_task_status(
         "elapsed_sec": round(float(elapsed_sec), 2),
         "event_ack_ok": bool(event_ack_ok),
         "event_ack_failures": int(event_ack_failures),
+        # SETTLE 停稳门的实测速度（m/s）；缺测/非有限值填 None
+        "odom_speed": (
+            round(float(odom_speed), 3)
+            if odom_speed is not None and math.isfinite(float(odom_speed))
+            else None
+        ),
     }
 
 
@@ -186,7 +207,7 @@ def parse_gcs_command(raw: str) -> Optional[GcsCommand]:
         command=cmd,
         mission_id=mission_id,
         command_id=command_id,
-        dock_lat=_opt_float(data.get("dock_lat")),
-        dock_lon=_opt_float(data.get("dock_lon")),
+        dock_lat=_opt_coord(data.get("dock_lat")),
+        dock_lon=_opt_coord(data.get("dock_lon")),
         dock_yaw=_opt_float(data.get("dock_yaw")),
     )

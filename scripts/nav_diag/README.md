@@ -25,6 +25,44 @@ python3 scripts/nav_diag/nav_diag.py <模式> [参数] [--host hkzl]
 | `count [话题]` | 数一张 OccupancyGrid 的格值分布 | 清代价图前后对比"清掉了没有" |
 | `params [节点]` | 列/读运行中参数 | 可直接照抄去 `ros2 param set` |
 
+## 船端直跑的通用只读探针：`ros_probe.py`
+
+`nav_diag.py` 走的是「本机 ssh 把船端脚本经 stdin 送过去」那一套（面向兴飞的
+`mission_bridge`）。澄丰这类自己跑 rosbridge、没有 `mission_bridge` 的船，用下面这个
+更省事 —— 拷到船端直接跑，只订阅、只列名，不发任何指令：
+
+```bash
+scp scripts/nav_diag/ros_probe.py nx:/tmp/
+ssh nx 'source /opt/ros/humble/setup.bash; source ~/usv_nav_ws/install/setup.bash; \
+        export ROS_DOMAIN_ID=5 RMW_IMPLEMENTATION=rmw_cyclonedds_cpp; \
+        python3 /tmp/ros_probe.py <模式>'
+```
+
+| 模式 | 用途 |
+|---|---|
+| `list` | 列话题 + 发布者数（`ros2` CLI 在船上偶发卡死，用它替代） |
+| `svc` | 列服务（看 `/mission_bridge/*` 这类接口在不在） |
+| `lidar 8` / `pose 5` | 量 `/livox/lidar`、`/usv_map_pose` 的 header age（**负值 = 时间戳超前主机**） |
+| `gngga 6` | 量 `/gi320/gngga`：NMEA 时间字段小数秒、到达相位、fix_type/星数/hdop |
+| `topic <话题> <秒>` | 任意 `PointCloud2 / PoseStamped / OccupancyGrid / Path` 话题的 age |
+
+## 代价图 / 点云对齐专用探针（`ghost*.py`）
+
+2026-10-16 澄丰"局部代价图不跟手 / 标记全丢 / 岸边左右反"那轮留下的探针，
+背景、判据与参数固化见 `docs/bug_debug/2026-10-16_澄丰局部代价图-不跟手_标记丢失_倒装补偿三问.md`（含周一复现清单）。
+用法统一是 `scp scripts/nav_diag/ghost*.py nx:/tmp/` 后在船端
+`ROS_DOMAIN_ID=5 RMW_IMPLEMENTATION=rmw_cyclonedds_cpp python3 /tmp/ghostXX.py [秒数]`。
+
+| 脚本 | 作用 | 判读要点 |
+|---|---|---|
+| `ghost12.py` | **点云 ↔ 局部代价图逐格对比**（逐帧取 TF，按代价图真实参数复算：3D 距离 2~20 m、obs z −0.25~1.5、voxel z 0~1、`mark_threshold` 需 ≥2 层、扣 footprint） | `期望且已标/期望标记格 > 95%` 才算标记正常；另给 odom z 直方图、每列 z 层数分布、船体系 ASCII |
+| `ghost13.py` | 点云 / IMU / TF / 代价图 各路 stamp 与年龄 | 哪一路时间戳不一致一眼看出 |
+| `ghost15.py` | `/tf` 上 `odom→base_link`、`map→odom` 的所有取值族 | 多族 = 双发布者或位姿跳变 |
+| `ghost9.py` | `/tf`、`/tf_static` 全部边 + 四元数分量 | 例：`base_link→livox_frame` = (1.6,0,0.36) + (qx=1,0,0,0) → roll=+180°（倒装补偿） |
+| `ghost8.py` | 船体系左/右分侧统计（静态岸线 vs 代价图标记）+ 点云镜像假设打分 | 岸线/标记同侧 = 自洽；镜像假设明显更高分才怀疑镜像 |
+| `ghost14.py` | 体素层 `/local_costmap/voxel_grid` 与代价图计数 | 体素层有数据但 2D 无致命格 → 看 `mark_threshold` 语义 |
+| `ghost16.py` | 致命格 / 点云到静态岸线的距离分布（较慢，抽样跑） | 中位距离 ≲0.5 m = 对齐良好 |
+
 ## 已经踩过的坑（都实测过，别再重复排查）
 
 1. **清代价图的服务类型**是 `nav2_msgs/srv/ClearEntireCostmap`（不是 `std_srvs/Empty`）：
