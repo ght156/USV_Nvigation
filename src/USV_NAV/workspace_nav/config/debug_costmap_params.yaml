@@ -35,7 +35,9 @@ costmap:
         cost_scaling_factor: 1.0
         inflate_unknown: false
         inflate_around_unknown: false
-        inflation_radius: 5.0
+        # 调试视图用 2.0（导航生产值是 5.0）：膨胀不是调参对象，调小让网页上
+        # 能看清真实障碍格分布；5.0 会把整个窗口染满，误以为"全是障碍"
+        inflation_radius: 2.0
       # —— Voxel 层：与 nav2_params_xingfei.yaml local_costmap.voxel_layer 对齐 ——
       #    （调参就改这里；mark_threshold / max_obstacle_height 支持在线改，
       #      ros2 param set /costmap/costmap voxel_layer.mark_threshold 2 立即生效）
