@@ -479,3 +479,67 @@ ros2 node list | grep lifecycle_manager          # 应有 lifecycle_manager_loca
    `/proc/<pid>/fd` 里的 DDS socket、FastDDS 统计（`/dev/shm` 与 `ss`），
    对比 mission_bridge 与正常节点看到的参与方列表；
 3. 若稳定与 `overlay-test-case.service` 同时出现，让感知侧确认该测试服务是否会长期运行。
+
+---
+
+## 9. 下午：过载导致服务超时、任务被看门狗判死（与 §3.6 无关）
+
+### 9.1 现象
+
+11:18:22 下发 1 个航点，船没动；30 秒后任务 `FAILED`。同期日志在 3 秒内刷出
+41 条 `Behavior Tree tick rate 100.00 was exceeded!` 和 19 条控制器降频告警。
+
+### 9.2 时间线
+
+| 时刻 | 事件 |
+|---|---|
+| 11:18:24.6 | nav2 `Received follow waypoint request` → `Begin navigating (155.29,131.88) → (127.88,128.17)` |
+| 11:18:26.0 | `Control loop missed its desired rate of 20.0000Hz` |
+| 11:18:26.79 | BT 恢复动作 **`clear_entirely_global_costmap` 服务调用超时** |
+| 11:18:26.85 | FollowPath 被取消 → `Goal was canceled. Stopping the robot.` |
+| 11:18:30–45 | **`/cmd_vel_nav` 连续 18 秒为 0** |
+| 11:18:29 | aggregator 因 cmd_vel 静默 2 s 判 `CTRL_STUCK` |
+| 11:18:46 | `spin failed`、`Exceeded time allowance before reaching the Spin goal` |
+| **11:18:48** | **nav2 自己恢复：`/cmd_vel_nav` 回到 20 Hz** |
+| 11:18:59 | mission_bridge `ctrl_stuck_timeout_sec=30` 到点 → **MISSION FAILED → IDLE** |
+
+### 9.3 判读
+
+1. **不是 §3.6 的 `isCurrent()` 卡死**：局部代价图全程 4.8–5.0 Hz，一秒都没停。
+2. 触发点是**服务/动作调用超时**，本次一天里出现过的同类：
+   `clear_entirely_global_costmap`、`compute_path_to_pose` 的 goal ack、
+   `bt_navigator/waypoint_follower.get_state`、`local_costmap.get_parameters`、
+   `nav2_container/_container/load_node`（§4.1 的 map_server 竞态）。
+3. BT 的恢复链全部超时 → FollowPath 被取消 → 速度中断 18 秒 →
+   mission_bridge 的 30 s 看门狗把一次**正在恢复**的任务判死。
+
+### 9.4 负载
+
+`loadavg 12–20`（8 核），`ps` 累计 CPU：
+
+```
+mavros_node 80% | nav2 容器 50% | AI 容器 46% | apriltag 容器 38%
+mission_bridge 27% | dock_mission 27% | nav_status_aggr 25% | mqtt_bridgev2 24% | docking_* ~20%×2
+```
+
+对照：10:54–11:07 同样这套全栈、load 11.5 时，三次任务全部 `Reached the goal`、0 次 abort。
+说明这是**余量不足**的问题，不是某个功能坏了。
+
+### 9.5 同时还核实的事（避免以后重复排查）
+
+| 项 | 结论 |
+|---|---|
+| `Message Filter dropping … livox_frame` | ≈1 次/分钟；`voxel_layer.enabled=false`，代价图不用点云 → **零功能影响** |
+| TF 历史窗口 | 实测 **~9 s 正常**（-1/-3/-5/-8 s 全 OK）。⚠️ 第一次只填充 4 s 缓存就查 -3 s 报 `ExtrapolationException`，是**测量方法错误**，结论作废 |
+| `/livox/lidar` 速率 | 实测 **9.2 Hz**、0.52 MB/帧、4.2 MB/s；短窗口测到的 3.8 Hz 是取样偏差 |
+| `get_state` 超时 | `bt_navigator` / `waypoint_follower` **4 次调用 4 次超时** → 不要用 `ros2 lifecycle get` 判活，用 `get_state` 服务并给足超时 |
+| 地图工具下发 | **可用**；`waypoint_dispatch_bridge.py` 默认 `mode="service"`，走 mission_bridge 的 `send_waypoints`；开机后需等 nav2 全 active（约 1 分钟）否则返回未就绪 |
+| `/waypoint` 话题 | fire-and-forget，脚本里 `create_publisher` 后立刻 publish 会**全丢**（本次 3 帧 0 到达），必须等发现完成或用服务 |
+
+### 9.6 建议
+
+1. **放宽看门狗**：`ctrl_stuck_timeout_sec` 30 → 60~90；更合理的是 `nav_phase == RECOVERY`
+   期间不累计——BT 正在恢复时不该判死。
+2. **测导航时降负载**：停掉 perception / AI / mqtt / docking，只留导航链。
+3. 查 **mavros 为什么占 80% CPU**。
+4. 根治方向仍是 DDS 服务响应延迟，与 §3.1 的 13.5% `RcvbufErrors` 属同一背景。
