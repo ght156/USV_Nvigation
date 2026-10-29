@@ -23,6 +23,7 @@ from typing import Any, Deque, Dict, Optional, Set, Tuple
 
 import rclpy
 from action_msgs.msg import GoalStatus, GoalStatusArray
+from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
 from rcl_interfaces.msg import Log, ParameterType
 from rcl_interfaces.srv import GetParameters
@@ -38,6 +39,8 @@ from tf2_ros.buffer import Buffer
 from tf2_ros.transform_listener import TransformListener
 
 from m_common.msg import NavStatus
+
+from workspace_nav.costmap_reinflate import CostmapReinflater
 
 
 # --------------------------------------------------------------------------- #
@@ -89,14 +92,21 @@ class NavStatusAggregator(Node):
             self.get_parameter("controller_server_node").value)
         self._global_frame = str(self.get_parameter("global_frame").value)
         self._robot_frame = str(self.get_parameter("robot_frame").value)
+        self._cmd_timeout = max(0.1, float(self.get_parameter("cmd_vel_timeout_sec").value))
+        self._cmd_linear_deadband = max(
+            0.0, float(self.get_parameter("cmd_linear_deadband").value))
+        self._cmd_angular_deadband = max(
+            0.0, float(self.get_parameter("cmd_angular_deadband").value))
 
         _status_detail_topic = str(self.get_parameter("status_detail_topic").value)
         _odom_topic = str(self.get_parameter("odom_topic").value)
+        _cmd_vel_topic = str(self.get_parameter("cmd_vel_topic").value)
         _gps_topic = str(self.get_parameter("gps_topic").value)
         _nav_status_topic = str(self.get_parameter("nav_status_topic").value)
         _task_event_topic = str(self.get_parameter("task_event_topic").value)
         _fw_status_topic = str(self.get_parameter("follow_waypoints_status_topic").value)
         _planner_status_topic = str(self.get_parameter("planner_status_topic").value)
+        _fp_status_topic = str(self.get_parameter("follow_path_status_topic").value)
 
         # ---- QoS profiles ----------------------------------------------- #
         # 与 decision 对接说明 §9.5 对齐：/nav_status QoS depth=1
@@ -126,6 +136,9 @@ class NavStatusAggregator(Node):
         self.create_subscription(
             Odometry, _odom_topic, self._cb_odom, 10,
             callback_group=cg)
+        self.create_subscription(
+            Twist, _cmd_vel_topic, self._cb_cmd_vel, 10,
+            callback_group=cg)
         # GPS 为传感器流，统一 BEST_EFFORT（匹配 raw/fix 的 best_effort 发布端，且兼容 reliable 发布端）
         _gps_qos = QoSProfile(
             depth=10,
@@ -140,6 +153,11 @@ class NavStatusAggregator(Node):
             callback_group=cg)
         self.create_subscription(
             GoalStatusArray, _planner_status_topic, self._cb_planner_status, 10,
+            callback_group=cg)
+        # controller_server 的 FollowPath action 状态：判断"控制器真的在跑目标"，
+        # 不靠 TRACKING 推断（见下方 _update_auto_recovery）。
+        self.create_subscription(
+            GoalStatusArray, _fp_status_topic, self._cb_follow_path_status, 10,
             callback_group=cg)
         self.create_subscription(
             Log, "/rosout", self._cb_rosout, qos_profile_system_default,
@@ -188,6 +206,30 @@ class NavStatusAggregator(Node):
         self._last_progress_pose: Optional[Tuple[float, float]] = None
         self._last_progress_time: float = 0.0
         self._controller_stuck: bool = False
+        self._last_cmd_stamp: float = 0.0
+        self._cmd_active: bool = False
+        # 线速度分量单独记录：只有"前进/后退命令 + 实际位移"才算控制进展；
+        # 原地转向命令或无命令时的位移都可能是水流漂移（2026-10-26）。
+        self._cmd_linear_active: bool = False
+        self._cmd_angular_active: bool = False
+
+        # ---- 控制输出静默自愈 -------------------------------------------- #
+        self._follow_path_executing: bool = False
+        self._follow_path_since: float = 0.0
+        self._auto_recover_enabled: bool = bool(
+            self.get_parameter("auto_recover_costmap_current").value)
+        self._auto_recover_silence_sec: float = max(
+            1.0, float(self.get_parameter("auto_recover_silence_sec").value))
+        self._auto_recover_confirm_sec: float = max(
+            2.0, float(self.get_parameter("auto_recover_confirm_sec").value))
+        self._auto_recover_used: bool = False
+        self._auto_recover_done: bool = False
+        self._auto_recover_at: float = 0.0
+        self._costmap_reinflater: Optional[CostmapReinflater] = None
+        if self._auto_recover_enabled:
+            self._costmap_reinflater = CostmapReinflater(
+                self, costmap_node=str(
+                    self.get_parameter("local_costmap_node").value))
 
         # ---- waypoint action status tracking ---------------------------- #
         self._waypoint_goal_active: bool = False
@@ -237,6 +279,10 @@ class NavStatusAggregator(Node):
     def _declare_params(self) -> None:
         self.declare_parameter("status_detail_topic", "/mission_bridge/status_detail")
         self.declare_parameter("odom_topic", "/odometry/filtered")
+        self.declare_parameter("cmd_vel_topic", "/cmd_vel_nav")
+        self.declare_parameter("cmd_vel_timeout_sec", 2.0)
+        self.declare_parameter("cmd_linear_deadband", 0.05)
+        self.declare_parameter("cmd_angular_deadband", 0.03)
         self.declare_parameter("gps_topic", "/gps/fixed_cov")
         self.declare_parameter("follow_waypoints_status_topic",
                                "/follow_waypoints/_action/status")
@@ -256,6 +302,14 @@ class NavStatusAggregator(Node):
         self.declare_parameter("stuck_movement_radius_m", 0.3)
         self.declare_parameter("sync_stuck_from_nav2", True)
         self.declare_parameter("controller_server_node", "/controller_server")
+        # ---- 控制输出静默自愈（Nav2 Humble InflationLayer reset 缺陷）-------- #
+        # FollowPath 正在执行但 /cmd_vel_nav 长时间无消息时，强制一次代价图重膨胀。
+        # 只做「检测 → 触发一次重膨胀」，不改 CTRL_STUCK 的计时与告警流程。
+        self.declare_parameter("auto_recover_costmap_current", True)
+        self.declare_parameter("auto_recover_silence_sec", 5.0)
+        self.declare_parameter("auto_recover_confirm_sec", 10.0)
+        self.declare_parameter("local_costmap_node", "/local_costmap/local_costmap")
+        self.declare_parameter("follow_path_status_topic", "/follow_path/_action/status")
         self.declare_parameter("nav2_param_poll_period_sec", 10.0)
         self.declare_parameter("global_frame", "map")
         self.declare_parameter("robot_frame", "base_link")
@@ -312,6 +366,22 @@ class NavStatusAggregator(Node):
             )
             self._prev_mission_state = prev_state
 
+    def _cb_cmd_vel(self, msg: Twist) -> None:
+        self._last_cmd_stamp = time.time()
+        self._cmd_linear_active = abs(msg.linear.x) > self._cmd_linear_deadband
+        self._cmd_angular_active = abs(msg.angular.z) > self._cmd_angular_deadband
+        self._cmd_active = self._cmd_linear_active or self._cmd_angular_active
+
+    def _cb_follow_path_status(self, msg: GoalStatusArray) -> None:
+        """跟踪 controller_server 的 FollowPath 目标是否真的在执行。"""
+        executing = any(
+            s.status == GoalStatus.STATUS_EXECUTING for s in msg.status_list)
+        if executing and not self._follow_path_executing:
+            self._follow_path_since = time.time()
+        elif not executing:
+            self._follow_path_since = 0.0
+        self._follow_path_executing = executing
+
     def _cb_odom(self, msg: Odometry) -> None:
         """Receive odometry: pose, covariance, stuck detection."""
         now = time.time()
@@ -325,15 +395,6 @@ class NavStatusAggregator(Node):
             if window > 1.0:
                 self._odom_hz = (len(self._odom_stamps) - 1) / window
 
-        # Pose
-        p = msg.pose.pose.position
-        self._pose_x = p.x
-        self._pose_y = p.y
-        q = msg.pose.pose.orientation
-        siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
-        cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
-        self._pose_yaw = math.atan2(siny_cosp, cosy_cosp)
-
         # Twist
         self._linear_v = msg.twist.twist.linear.x
         self._angular_w = msg.twist.twist.angular.z
@@ -343,7 +404,43 @@ class NavStatusAggregator(Node):
         self._position_cov_max = max(cov[0], cov[7], cov[14])
         self._orientation_cov_max = max(cov[21], cov[28], cov[35])
 
-        # Update health and stuck
+        p = msg.pose.pose.position
+        x, y = p.x, p.y
+        q = msg.pose.pose.orientation
+        odom_yaw = math.atan2(
+            2.0 * (q.w * q.z + q.x * q.y),
+            1.0 - 2.0 * (q.y * q.y + q.z * q.z),
+        )
+        tf_yaw = 0.0
+        src_frame = msg.header.frame_id or "odom"
+        if src_frame != self._global_frame:
+            try:
+                tf = self._tf_buffer.lookup_transform(
+                    self._global_frame, src_frame, RTime()
+                )
+            except Exception as exc:
+                self._tf_ok = False
+                self.get_logger().warning(
+                    f"TF {self._global_frame}←{src_frame} 不可用: {exc}",
+                    throttle_duration_sec=2.0,
+                )
+                self._update_loc_health()
+                return
+            t = tf.transform.translation
+            q_tf = tf.transform.rotation
+            tf_yaw = math.atan2(
+                2.0 * (q_tf.w * q_tf.z + q_tf.x * q_tf.y),
+                1.0 - 2.0 * (q_tf.y * q_tf.y + q_tf.z * q_tf.z),
+            )
+            c, s = math.cos(tf_yaw), math.sin(tf_yaw)
+            x, y = t.x + c * x - s * y, t.y + s * x + c * y
+
+        self._tf_ok = True
+        self._pose_x = x
+        self._pose_y = y
+        self._pose_yaw = math.atan2(
+            math.sin(odom_yaw + tf_yaw), math.cos(odom_yaw + tf_yaw)
+        )
         self._update_loc_health()
         self._update_stuck_detection()
 
@@ -605,13 +702,73 @@ class NavStatusAggregator(Node):
                 "CTRL_STUCK 阈值已同步 Nav2 progress_checker: "
                 + ", ".join(changed))
 
+    def _update_auto_recovery(self) -> None:
+        """FollowPath 执行中但 /cmd_vel_nav 长时间静默时，强制一次代价图重膨胀。
+
+        针对 Nav2 Humble ``InflationLayer::reset()`` 不置 ``need_reinflation_`` 的缺陷
+        （见 workspace_nav/costmap_reinflate.py）：清图后 ``current_`` 回不来，
+        controller_server 卡在 ``isCurrent()`` 空转，一个速度包都不发。
+
+        触发条件（缺一不可）：
+          · 任务 RUNNING；
+          · controller_server 的 FollowPath 目标处于 STATUS_EXECUTING —— 用真实 Nav2
+            action 状态，不用 TRACKING 推断；
+          · 自 FollowPath 开始（或最后一条 cmd_vel，取较晚者）起静默超过阈值；
+          · 本任务尚未触发过自动恢复，且恢复器不在忙。
+
+        每个任务最多触发一次；不改动 CTRL_STUCK 的计时与告警，恢复无效仍走原流程。
+        """
+        if not self._auto_recover_enabled or self._costmap_reinflater is None:
+            return
+        if self._mission_state != "RUNNING":
+            self._auto_recover_used = False
+            self._auto_recover_done = False
+            self._auto_recover_at = 0.0
+            return
+        if not self._follow_path_executing or self._follow_path_since <= 0.0:
+            return
+
+        now = time.time()
+        silent = now - max(self._follow_path_since, self._last_cmd_stamp)
+
+        if self._auto_recover_used:
+            if self._auto_recover_done:
+                return
+            if self._last_cmd_stamp > self._auto_recover_at:
+                self._auto_recover_done = True
+                self._push_log("INFO", "controller_server",
+                               "代价图重膨胀自愈成功，控制指令已恢复")
+                self._fire_alarm_clear("CTRL_OUTPUT_SILENT")
+            elif now - self._auto_recover_at > self._auto_recover_confirm_sec:
+                self._auto_recover_done = True
+                self._push_log("ERROR", "controller_server",
+                               "代价图重膨胀自愈后仍无控制指令，保留原有故障处理流程")
+            return
+
+        if silent < self._auto_recover_silence_sec or self._costmap_reinflater.busy:
+            return
+
+        self._auto_recover_used = True
+        self._auto_recover_at = now
+        self._push_log("ERROR", "controller_server",
+                       f"FollowPath 执行中但 /cmd_vel_nav 静默 {silent:.1f}s，"
+                       "触发代价图重膨胀自愈")
+        if self._costmap_reinflater.trigger(f"控制输出静默 {silent:.1f}s"):
+            self._fire_alarm("CTRL_OUTPUT_SILENT", "WARN",
+                             f"控制器输出静默 {silent:.1f}s，已尝试自愈")
+        else:
+            self._push_log("WARN", "controller_server",
+                           "代价图重膨胀未执行："
+                           f"{self._costmap_reinflater.last_result}")
+
     def _update_stuck_detection(self) -> None:
         """Detect if the robot is stuck (no progress while mission RUNNING).
 
-        只看 xy 位移、不看 yaw：原地旋转不算进展，转 >30s 同样触发。
-        阈值默认经 sync_stuck_from_nav2 与 Nav2 progress_checker 同步
-        （实际生效 2.0m/30.0s）；触发只发 CTRL_STUCK 告警，不动任务。
+        位移阈值默认经 sync_stuck_from_nav2 与 Nav2 progress_checker 同步
+        （当前 2.0m/60.0s）。有效控制命令期间的漂移不算控制进展；
+        命令中断也报 CTRL_STUCK。触发只发告警，不动任务。
         """
+        self._update_auto_recovery()
         if self._mission_state != "RUNNING":
             self._controller_stuck = False
             self._last_progress_pose = None
@@ -619,6 +776,22 @@ class NavStatusAggregator(Node):
 
         current_pose = (self._pose_x, self._pose_y)
         now = time.time()
+        if self._last_cmd_stamp > 0.0:
+            cmd_age = now - self._last_cmd_stamp
+            if cmd_age > self._cmd_timeout:
+                if not self._controller_stuck:
+                    self._controller_stuck = True
+                    self._last_error = "CTRL_STUCK"
+                    self._push_log(
+                        "ERROR", "controller_server",
+                        f"Controller command stream stale for {cmd_age:.1f}s")
+                    self.get_logger().error(
+                        f"[nav_status_aggregator]: controller command stream stale | "
+                        f"age={cmd_age:.1f}s"
+                    )
+                    self._fire_alarm(
+                        "CTRL_STUCK", "ERROR", f"控制器输出中断 {cmd_age:.1f}s")
+                return
 
         if self._last_progress_pose is None:
             self._last_progress_pose = current_pose
@@ -629,8 +802,9 @@ class NavStatusAggregator(Node):
         dy = current_pose[1] - self._last_progress_pose[1]
         dist = math.hypot(dx, dy)
 
-        if dist > self._stuck_radius:
-            # Made progress — reset stuck timer
+        if dist > self._stuck_radius and self._cmd_linear_active:
+            # 有前进/后退命令且实际位移超阈值 = 真实控制进展；原地转向命令或
+            # 无命令时的位移都可能是水流漂移，不能用来清 STUCK（2026-10-26）。
             self._last_progress_pose = current_pose
             self._last_progress_time = now
             if self._controller_stuck:
@@ -677,11 +851,33 @@ class NavStatusAggregator(Node):
     # Mission transition detection
     # ----------------------------------------------------------------------- #
 
+    def _reset_stuck_tracking(self) -> None:
+        """任务开始/恢复时重置卡死判定与 cmd_vel 看门狗状态。
+
+        2026-10-26：新任务/恢复开始前最后一条 cmd_vel 可能已超过
+        cmd_vel_timeout_sec，不重置时间戳会立刻误报 CTRL_STUCK
+        （实船：任务开始 0.25s 就报警，正常行驶 28m 仍无法清除）。
+        """
+        self._controller_stuck = False
+        self._last_progress_pose = None
+        self._last_progress_time = 0.0
+        self._last_cmd_stamp = 0.0
+        self._cmd_active = False
+        self._cmd_linear_active = False
+        self._cmd_angular_active = False
+        # 新任务重新给一次自愈机会
+        self._auto_recover_used = False
+        self._auto_recover_done = False
+        self._auto_recover_at = 0.0
+        self._follow_path_since = 0.0
+
     def _detect_mission_transition(
         self, prev: str, curr: str, transition_reason: Optional[str] = None
     ) -> None:
         """Fire task events based on mission state transitions."""
         if prev == "IDLE" and curr == "RUNNING":
+            self._reset_stuck_tracking()
+            self._fire_alarm_clear("CTRL_STUCK")
             self._last_error = None
             self._fire_event("TASK_STARTED", {
                 "task_id": self._task_id,
@@ -734,6 +930,11 @@ class NavStatusAggregator(Node):
             })
 
         elif prev == "PAUSED" and curr == "RUNNING":
+            # 恢复也是控制重新起步：暂停期间 cmd_vel 早已断流，不重置会立刻误报 STUCK
+            self._reset_stuck_tracking()
+            self._fire_alarm_clear("CTRL_STUCK")
+            if self._last_error == "CTRL_STUCK":
+                self._last_error = None
             self._fire_event("TASK_RESUMED", {
                 "task_id": self._task_id,
                 "waypoint_index": self._waypoint_current_index,
@@ -790,6 +991,7 @@ class NavStatusAggregator(Node):
             "LOC_LOST": "检查 GPS/EKF 状态，确认传感器数据正常",
             "LOC_DEGRADED": "检查 GPS 信号强度，确认定位数据质量",
             "CTRL_STUCK": "检查推进器状态，确认无障碍物卡死",
+            "CTRL_OUTPUT_SILENT": "已自动触发代价图重膨胀；未恢复请检查 controller_server 与 local_costmap",
             "PLAN_FAILED": "检查目标航点坐标，确认不在障碍层内",
             "MISSION_FAILED": "检查导航系统状态，确认任务参数正确",
         }

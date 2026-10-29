@@ -37,7 +37,12 @@ mission_bridge:
     # —— 代价图清理（2026-10-21，鬼影对策，见 docs/bug_debug/2026-10-21_局部代价图水面鬼影…md）——
     # 斜装雷达在开阔水面无回波 → 无清除射线，误标格不会自行消失，需主动清。
     # 新任务开始前先清一次局部代价图（清掉上次任务/调试积累的鬼影障碍）
-    clear_costmap_on_mission_start: true
+    # 2026-10-29：暂时关闭。清图会把 InflationLayer 的 current_ 置 false，而本地图当前
+    # 没有启用的观测层（voxel_layer.enabled=false、雷达未开），updateCosts() 永不执行、
+    # current_ 无法恢复 → controller_server 卡在 isCurrent() 空转、船不动（已实船复现）。
+    # 恢复条件：雷达常开且 voxel_layer.enabled=true（届时 reset 能自愈），
+    # 且 reinflate_after_costmap_clear（清图后自动重膨胀）经过回归验证。
+    clear_costmap_on_mission_start: false
     # 任务运行期间周期清图（秒），0=关。整清会把真障碍也抹掉、重标需若干帧，
     # 只有长跑任务实测仍在缓慢积鬼影时才开（建议 300~600）
     costmap_clear_period_sec: 0.0
@@ -53,9 +58,8 @@ nav_status_aggregator:
     #   如果某天 SLAM 模式不跑 mavros：raw/fix 没有发布者，gps_timeout(5s) 到期后
     #   localization_overall 会恒为 DEGRADED；此时应改用其它 NavSatFix 源，或让本节点支持
     #   mapping_gnss/GnssFix（SLAM 侧 /gnss/fix，它的 fix_type 是 NMEA 0..6）。
-    # ⚠️ 判据现状：节点里用 `status.status < 3` 判 DEGRADED，而 mavros 按标准 NavSatStatus
-    #   填的是 0(=FIX) / -1(=NO_FIX)（实船实测 0），所以**当前会一直判 DEGRADED**；
-    #   要让它能判 GOOD，需把判据改成 `status.status < 0`（或改成读 fix_type 0..6 的源）。
+    # 判据：NavSatStatus 只有 -1(NO_FIX) 判坏；0(FIX)/1(SBAS)/2(GBAS/RTK) 不降级，
+    #   定位质量继续由协方差阈值评估。
     gps_topic: "/mavros/gps_input/raw/fix"
     # 定位源话题，与 mission_bridge 保持一致（切 SLAM 建议用 launch 参数 odom_topic 统一覆盖）
     odom_topic: "/mavros/gps_input/local"
@@ -66,9 +70,15 @@ nav_status_aggregator:
     stuck_progress_timeout: 12.0           # CTRL_STUCK 兜底：Nav2 不可达时才用；默认自动同步 Nav2 progress_checker
     stuck_movement_radius_m: 0.3           # CTRL_STUCK 兜底位移阈值（m），同上
     sync_stuck_from_nav2: true             # true=从 controller_server progress_checker 读取
-                                           #   required_movement_radius / movement_time_allowance（当前 2.0m/30.0s），
+                                           #   required_movement_radius / movement_time_allowance（当前 2.0m/60.0s），
                                            #   每 nav2_param_poll_period_sec 秒轮询，调 Nav2 参数即生效，无需改这里
     nav2_param_poll_period_sec: 10.0
+    # 控制输出看门狗：有效运动命令期间，超过位移阈值不再单独视为控制进展，
+    # 防止“控制器卡死 + 船随流漂移”误清 CTRL_STUCK；输出中断超过 2s 直接告警。
+    cmd_vel_topic: "/cmd_vel_nav"
+    cmd_vel_timeout_sec: 2.0
+    cmd_linear_deadband: 0.05          # |linear.x| 超此值算运动命令（m/s）
+    cmd_angular_deadband: 0.03         # |angular.z| 超此值算运动命令（rad/s）
     # 【odom 频率判据】低于 min_odom_hz → DEGRADED（2026-09-17 从 20 降到 8；现已参数化）。
     #   实船两类定位源都到不了 20Hz：MAVROS /mavros/gps_input/local ≈10Hz（每条 INSPVAA 一条）、
     #   SLAM /slam/localization ≈20-29Hz（raw LIO odom，raw_odom_max_hz=20），阈值 20 会误判；

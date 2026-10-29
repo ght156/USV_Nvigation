@@ -42,6 +42,7 @@ from m_common.action import NavigateTask
 from m_common.msg import NavStatus
 from m_common.srv import CancelMission, SendWaypoints, SetPause
 
+from workspace_nav.costmap_reinflate import CostmapReinflater
 from workspace_nav.gps_map_conversion import (
     atomic_write_json,
     datum_lat_lon_from_cfg,
@@ -261,6 +262,11 @@ class MissionBridgeNode(Node):
         # 障碍（斜装雷达在开阔水面无回波→无清除射线，误标格不会自行消失，见
         # docs/bug_debug/2026-10-21_局部代价图水面鬼影-清扫杆遮蔽与观测源改话题.md）。
         self.declare_parameter("clear_costmap_on_mission_start", True)
+        # 清图后自动做一次「参数微调重膨胀」：Nav2 Humble 的 InflationLayer::reset()
+        # 只置 current_=false 不置 need_reinflation_，本地图又没有启用的观测层时
+        # current_ 永远回不来，controller_server 会卡在 isCurrent() 空转、船不动
+        # （2026-10-29 实船定位，见 workspace_nav/costmap_reinflate.py）。
+        self.declare_parameter("reinflate_after_costmap_clear", True)
         # >0 时任务运行期间按此周期（秒）再清，默认 0=关。整清会把真障碍也抹掉、
         # 重新标回需若干帧，只有长跑任务实测仍在缓慢积鬼影时才开。
         self.declare_parameter("costmap_clear_period_sec", 0.0)
@@ -367,6 +373,9 @@ class MissionBridgeNode(Node):
             ClearEntireCostmap, "/local_costmap/clear_entirely_local_costmap"
         )
         self._costmap_clear_timer = None
+        self._costmap_reinflater = None
+        if bool(self.get_parameter("reinflate_after_costmap_clear").value):
+            self._costmap_reinflater = CostmapReinflater(self)
 
         self._odom_topic = self.get_parameter("odom_topic").value
         self._localization_timeout_sec = max(
@@ -426,6 +435,9 @@ class MissionBridgeNode(Node):
         self._ctrl_stuck_since: Optional[float] = None
         self._ctrl_stuck_last_seen_mono: float = 0.0
         self._pose_lock = threading.Lock()
+        # 节点生命周期内保持同一个 odom 订阅。不要在任务结束回调中销毁后重建：
+        # MultiThreadedExecutor 可能仍在 take 该 subscription，触发
+        # InvalidHandle: cannot use Destroyable because destruction was requested。
         self._odom_sub: Optional[Any] = None
         self._send_timer: Optional[Any] = None
         self._idle_transition_timer: Optional[Any] = None
@@ -1217,6 +1229,10 @@ class MissionBridgeNode(Node):
             try:
                 f.result()
                 self.get_logger().info(f"局部代价图已清空（{why}）")
+                # 清图会把 InflationLayer 的 current_ 置 false，这里立刻用一次
+                # 参数微调触发重膨胀，避免控制器卡在 isCurrent()（见 costmap_reinflate.py）
+                if self._costmap_reinflater is not None:
+                    self._costmap_reinflater.trigger(f"清局部代价图后（{why}）")
             except Exception as e:
                 self.get_logger().warn(f"清局部代价图失败（{why}）：{e}")
 
@@ -1252,9 +1268,11 @@ class MissionBridgeNode(Node):
         except Exception:
             pass
 
+        self._have_odom = False
+        self._odom_last_mono = 0.0
+        # 每次任务开始时重置新鲜度宽限；订阅本身跨任务复用。
+        self._odom_sub_started_mono = time.monotonic()
         if self._odom_sub is None:
-            self._odom_last_mono = 0.0
-            self._odom_sub_started_mono = time.monotonic()
             self._odom_sub = self.create_subscription(
                 Odometry, self._odom_topic, self._odom_cb, 10
             )
@@ -1262,13 +1280,34 @@ class MissionBridgeNode(Node):
         self._send_timer = self.create_timer(2.0, self._send_next_waypoint)
 
     def _odom_cb(self, msg: Odometry) -> None:
+        src_frame = msg.header.frame_id or "odom"
+        x = msg.pose.pose.position.x
+        y = msg.pose.pose.position.y
+        if src_frame != self._global_frame:
+            try:
+                tf = self.tf_buffer.lookup_transform(
+                    self._global_frame, src_frame, RTime()
+                )
+            except Exception as exc:
+                self._have_odom = False
+                self.get_logger().warning(
+                    f"TF {self._global_frame}←{src_frame} 不可用: {exc}",
+                    throttle_duration_sec=2.0,
+                )
+                return
+            t = tf.transform.translation
+            q = tf.transform.rotation
+            tf_yaw = math.atan2(
+                2.0 * (q.w * q.z + q.x * q.y),
+                1.0 - 2.0 * (q.y * q.y + q.z * q.z),
+            )
+            c, s = math.cos(tf_yaw), math.sin(tf_yaw)
+            x, y = t.x + c * x - s * y, t.y + s * x + c * y
+
         self._odom_last_mono = time.monotonic()
         self._have_odom = True
         with self._pose_lock:
-            self._current_pose_xy = (
-                msg.pose.pose.position.x,
-                msg.pose.pose.position.y,
-            )
+            self._current_pose_xy = (x, y)
 
     def _robot_xy(self) -> Tuple[float, float]:
         with self._pose_lock:
@@ -1347,10 +1386,9 @@ class MissionBridgeNode(Node):
 
         rx, ry = self._robot_xy()
         dist = math.hypot(x - rx, y - ry)
-        # 过近静默跳过：不对外发"单点到达/跳过"事件，仅心跳 /mission_bridge/status_detail、
-        # /nav_status 与 NavigateTask feedback 的 seq 计数间接 +1；跳过最后一个航点时
-        # 由 _finalize_if_done 走正常完成路径（COMPLETED / RESULT_SUCCESS）。
-        if dist <= self._tolerance:
+        # 不指定朝向时才允许过近跳过；显式 yaw 必须由当前 goal checker 验收。
+        # 跳过最后一个航点时由 _finalize_if_done 走正常完成路径。
+        if dist <= self._tolerance and not yaw_is_specified(yaw):
             self.get_logger().info(
                 f"Waypoint {self.current_index + 1} within tolerance; skipping."
             )
@@ -1440,10 +1478,6 @@ class MissionBridgeNode(Node):
         )
 
     def _goal_result_cb(self, future: Future, send_token: int) -> None:
-        with self._sm_lock:
-            self.navigating = False
-        self._active_goal_handle = None
-
         if send_token != self._mission_token:
             try:
                 raw = future.result()
@@ -1455,11 +1489,17 @@ class MissionBridgeNode(Node):
             )
             return
 
+        with self._sm_lock:
+            self.navigating = False
+        self._active_goal_handle = None
+
         try:
             raw = future.result()
             status = raw.status if raw else GoalStatus.STATUS_UNKNOWN
-        except Exception:
-            status = GoalStatus.STATUS_UNKNOWN
+        except Exception as exc:
+            self.get_logger().error(f"goal result future failed: {exc}")
+            self._on_nav_fatal(error_code="MISSION_FAILED", nav2_error_msg=str(exc))
+            return
 
         if status != GoalStatus.STATUS_SUCCEEDED:
             n2_code = getattr(raw.result, "error_code", 0)
@@ -1538,13 +1578,6 @@ class MissionBridgeNode(Node):
             NavigateTask.Result.RESULT_SUCCESS, "", "all waypoints reached", "succeed"
         )
 
-        try:
-            if self._odom_sub is not None:
-                self.destroy_subscription(self._odom_sub)
-                self._odom_sub = None
-        except Exception:
-            pass
-
         self._state_to_idle_relaxed()
 
     def _clear_waypoint_file(self) -> None:
@@ -1574,13 +1607,6 @@ class MissionBridgeNode(Node):
                 self._send_timer = None
         except Exception:
             pass
-        try:
-            if self._odom_sub is not None:
-                self.destroy_subscription(self._odom_sub)
-                self._odom_sub = None
-        except Exception:
-            pass
-
         self.get_logger().error(
             f"MISSION FAILED — STATE -> FAILED "
             f"error_code={error_code} nav2_error_code={nav2_error_code} nav2_error_msg={nav2_error_msg}"
@@ -1605,6 +1631,10 @@ class MissionBridgeNode(Node):
 
     def _idle_once_cb(self) -> None:
         self._defer_idle()
+        # 订阅由节点持有到 shutdown；这里只清任务态。显式 destroy 会和多线程
+        # executor 的 take 路径竞争并导致整个 mission_bridge 退出。
+        self._have_odom = False
+        self._odom_last_mono = 0.0
         if self._idle_transition_timer is not None:
             try:
                 self._idle_transition_timer.cancel()

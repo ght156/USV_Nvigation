@@ -24,8 +24,17 @@ import os
 import sys
 
 from ament_index_python.packages import get_package_share_directory
+
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, OpaqueFunction
+from launch.actions import (
+    DeclareLaunchArgument,
+    ExecuteProcess,
+    IncludeLaunchDescription,
+    OpaqueFunction,
+    SetEnvironmentVariable,
+    TimerAction,
+)
+from launch.logging import launch_config
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
@@ -120,6 +129,12 @@ def _setup(context, *args, **kwargs):
     )
 
     # 只加载 map_server（不含 amcl）：定位由外部定位栈负责。
+    #
+    # 2026-10-29：map_server 与它的 lifecycle_manager 必须拆成两次 LoadComposableNodes。
+    # 容器忙时 load_node 的服务响应会超时
+    #   "failed to send response to /nav2_container/_container/load_node (timeout)"
+    # 同一次调用里的第二个组件会被静默丢弃 → map_server 停在 unconfigured、/map 没有
+    # 发布者、global_costmap 静态层为空（实船 09:13 启动复现，最近 33 次启动里 1 次）。
     load_map_server = LoadComposableNodes(
         target_container='/nav2_container',
         composable_node_descriptions=[
@@ -129,6 +144,12 @@ def _setup(context, *args, **kwargs):
                 name='map_server',
                 parameters=[configured_params],
                 remappings=remappings),
+        ],
+    )
+
+    load_lifecycle_manager_map = LoadComposableNodes(
+        target_container='/nav2_container',
+        composable_node_descriptions=[
             ComposableNode(
                 package='nav2_lifecycle_manager',
                 plugin='nav2_lifecycle_manager::LifecycleManager',
@@ -137,6 +158,22 @@ def _setup(context, *args, **kwargs):
                             {'autostart': autostart},
                             {'node_names': ['map_server']}]),
         ],
+    )
+
+    # 启动兜底：上面两次装载仍然可能失败（组件缺失、管理器自己抽风）。map_server_guard
+    # 在 20s 后检查 /map_server 状态，仍停在 unconfigured/inactive 就自己 configure →
+    # activate，并打 ERROR 便于事后统计。正常启动时它不做任何事。
+    map_server_guard = ExecuteProcess(
+        cmd=[sys.executable, '-u',
+             os.path.join(package_share.perform(context),
+                          'scripts', 'map_server_guard.py'),
+             '--node-name', '/map_server',
+             '--start-delay', '20.0',
+             '--check-period', '3.0',
+             '--timeout', '90.0'],
+        name='map_server_guard',
+        output='screen',
+        condition=IfCondition(autostart),
     )
 
     navigation = IncludeLaunchDescription(
@@ -189,7 +226,14 @@ def _setup(context, *args, **kwargs):
         condition=IfCondition(enable_livox_cloud_filter),
     )
 
-    return [container, load_map_server, navigation, mission_bridge, rviz, livox_filter]
+    # 地图两件套延迟 3s 装载：等容器自身初始化完，降低 load_node 服务响应超时的概率。
+    load_map_stack = TimerAction(
+        period=3.0,
+        actions=[load_map_server, load_lifecycle_manager_map],
+    )
+
+    return [container, load_map_stack, map_server_guard, navigation,
+            mission_bridge, rviz, livox_filter]
 
 
 def generate_launch_description():
@@ -273,6 +317,7 @@ def generate_launch_description():
     )
 
     return LaunchDescription([
+        SetEnvironmentVariable("ROS_LOG_DIR", launch_config.log_dir),
         declare_map,
         declare_use_sim_time,
         declare_params_file,
