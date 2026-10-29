@@ -26,13 +26,121 @@
 
 ## 3. 排查路径与证据
 
-### 3.1 先排除网络 / UDP（负结果，别再走这条路）
+### 3.0 时间线（含被否定的假设）
 
-| 假设 | 核查 | 结论 |
+| 时间 | 动作 | 结果 |
 |---|---|---|
-| 内核 UDP 缓冲太小 | 空闲 8 s 采样：全局 `RcvbufErrors` 增量 **0**，`ss -uanpm` 每个 socket `skmem d=0`；`/dev/shm` 只用 18 MB / 7.7 GB | **否定** |
-| MQTT 再订阅一份 raw 图像挤爆 DDS | `mqtt_bridgev2` **没在跑**（nav-only 栈）；`/camera_back_video/color/image_raw` 只有 1 发布 1 订阅 | **否定** |
-| CPU 过载直接导致 | `RcvbufErrors` 只在 load 12–24 时出现，是"进程来不及 recv"的**结果**；同样负载下 07:57 的任务能正常出 17.9 Hz 速度 | 降级为背景因素 |
+| 07:50 | 现象："船不动"，外部判断指向 DDS/UDP 缓冲 | 启动 DDS/资源探针 |
+| 07:52–08:00 | 探针 1（`usv_dds_watch`），07:57 一次任务 | **任务成功**（`/cmd_vel_nav` 17.9 Hz）→ 栈本身能跑，问题不是"永远不能跑" |
+| 08:01 | 重启导航栈 | — |
+| 08:02:45 | `clear entirely local costmap` | 之后该进程内所有任务必卡 |
+| 08:04 | 任务 1 | 卡死：151 次 `Aborting handle`、0 个 cmd_vel、60 s 后 CTRL_STUCK |
+| 08:05:50 | 任务 2 | 同样卡死，08:07:19 取消 |
+| 08:40 | 卡死专用探针上线 | 抓到 100 Hz 空转线程（200 次上下文切换/秒） |
+| 08:42 | 任务 3 | 复现，85 次 abort，`/cmd_vel_nav` 全程 0 |
+| 09:02 | **单变量恢复实验**：`inflation_radius 5.0→5.01→5.0` | 09:03 任务成功（20–21 Hz、`Reached the goal!`、0 新增 abort）→ 因果闭环 |
+| 09:13 | 重启栈 | `map_server` 停在 unconfigured，`/map` 无发布者（新问题） |
+| 09:24 | 手工 `configure`+`activate` | 地图恢复 |
+| 09:31 | 部署 `map_server_guard` + 拆分装载 | guard 空跑/故障路径均验证通过 |
+| 09:47–09:56 | 三次重启 | 暴露 **launch 回归**（TimerAction 作用域、autostart 类型）→ 修复 |
+| 09:57 | 开机验证 | `map_server` + `lifecycle_manager_localization` 正常，nav2 六个 server 全 active |
+| 10:01 | 下发任务 | **新问题**：mission_bridge 接住（RUNNING）但 FollowWaypoints 未到 nav2；aggregator 也收不到 status_detail（详见 §8） |
+| 10:25 | 重启；10:28 监控重开 | 船侧全 IDLE；平台侧仍记着 10:01 那条未结束任务，拒绝新下发 |
+
+**被否定或降级的假设**（详见 §3.1）：内核 UDP 缓冲太小、MQTT raw 图像订阅挤爆 DDS、
+CPU 负载直接导致、每秒重发 FollowPath 目标本身异常（恢复后证明每秒重发是正常的）。
+
+### 3.1 DDS / UDP 排查（完整数据，负结果——别再走这条路）
+
+#### 3.1.1 当时要验证的假设
+
+外部分析提出：`mqtt.zip` 里用 `create_generic_subscription` 又订阅了一份 raw 图像 →
+6.22 MB/帧挤爆 DDS → 内核 `RcvbufErrors` 暴涨 → action/service 响应超时 → FollowPath 被 abort。
+下面逐条用实测数据验证。
+
+#### 3.1.2 方法（都能复现）
+
+| 目的 | 手段 |
+|---|---|
+| 全局 UDP 计数 | `/proc/net/snmp` 的 `Udp:` 行（InDatagrams / RcvbufErrors / InErrors / IgnoredMulti） |
+| 逐 socket 缓冲与丢包 | `ss -uanpm`，看 `skmem` 的 `d`（drops）与 `rb`（rcvbuf 占用） |
+| **丢包归因到进程** | `/proc/net/udp` 的 inode → `/proc/<pid>/fd` 反查 socket |
+| 线程级调度 | `/proc/<tid>/schedstat` 的 runqueue 等待纳秒数 |
+| 共享内存 | `/dev/shm` 用量与条目数 |
+| 内核参数 | `sysctl net.core.rmem_max rmem_default wmem_max netdev_max_backlog` |
+
+以上全部由 `usv_dds_watch.py`（每秒）与 `usv_extra_probe.py`（`kind=udp_owners`，每 10 秒）
+自动落盘，不需要人工守着。
+
+#### 3.1.3 实测数据
+
+内核参数（本船默认值）：
+
+```
+net.core.rmem_max = net.core.rmem_default = net.core.wmem_max = 212992
+net.core.netdev_max_backlog = 1000
+```
+
+全局计数（本次开机 10:25 起约 35 分钟）：
+
+```
+Udp: InDatagrams 1618204  RcvbufErrors 218189  InErrors 218189
+     IgnoredMulti 761     MemErrors 0          SndbufErrors 0
+```
+
+→ **RcvbufErrors 占入站 13.5%**，确实不低。
+
+按进程的累计 socket 丢包（同一时刻快照）：
+
+```
+component_container(nav2) 67094 | mavros_node 36709 | decision_node 21211
+nav_status_aggr 15901 | docking_pose_es 15558 | zone_monitor 14614
+```
+
+→ **nav2 容器第一、mavros 第二**，符合"谁在高频收发小消息"。
+
+**关键：按任务窗口切开的丢包速率**（`~/usv_diag_runs/20261029_080258_raw/extra.jsonl`，
+同一份探针同时覆盖了 08:04 的失败任务、08:42 的失败任务和 09:03 恢复后的成功任务）：
+
+| 窗口 | mavros_node（丢包/秒） | nav2 容器（丢包/秒） | mission_bridge |
+|---|---|---|---|
+| 空闲 08:20–08:40 | 86.3 | 55.0 | 2.2 |
+| **失败任务 08:04–08:07** | **1735.3** | **1263.2** | 63.1 |
+| **成功任务 09:03–09:05** | **804.3** | **603.4** | 15.5 |
+| 空闲 09:20–09:40 | 325.6 | 263.3 | 13.5 |
+
+共享内存：`/dev/shm` 总量 7.7 GB，实际只用了 **15 MB**，条目 43 个（其中 DDS 相关 21 个）。
+
+#### 3.1.4 判读：为什么否定它是根因
+
+1. **成功任务同样大量丢包**：09:03 那次船正常跑完全程（20–21 Hz 速度、`Reached the goal!`），
+   期间 mavros 804/s、nav2 603/s，与失败任务的 1735/1263 只差约 2 倍，而不是"有 / 无"的差别。
+2. **失败任务丢包更高是结果不是原因**：卡死时 BT 每秒重发 FollowPath、waypoint_follower
+   以 20 Hz 刷 `Processing waypoint 0...`，本身制造了额外流量。
+3. **空闲时也在丢**（86/55 每秒），船却是正常的。
+4. QoS 层面：action/service 是 RELIABLE，丢了会重传（表现为延迟，不会静默失败）；
+   传感器话题是 BEST_EFFORT，丢了只影响那一帧感知，不影响控制回路。
+5. 真正区分失败/成功的是控制器有没有卡在 `isCurrent()`（§3.6），与丢包量无关。
+
+结论：**UDP 缓冲偏小是长期存在的背景噪声，值得治理，但不是本次"船不动"的原因。**
+把 `rmem_max` 调大能把这 13.5% 压下去，但不会改变故障是否发生。
+（注：不要用"全局累计值"下结论，会被开机时长稀释；必须按窗口算速率。）
+
+#### 3.1.5 MQTT raw 图像订阅（另一条被否定的线索）
+
+- `mqtt_bridgev2` 的 `config/sensor_monitor.yaml` 确实订阅了
+  `/camera_back_video/color/image_raw` 与 `/camera_front_gemini/color/image_raw`；
+- 但走的是 `create_generic_subscription`，**不反序列化**，只把"有消息"当相机在线心跳
+  （`mqtt_bridgev2_node_impl.cpp:621`，`observe_offline_sensor`）；
+- 而且 nav-only 栈里 `mqtt_bridgev2` **根本没运行**，故障照样复现；
+- 带宽代价是真的（raw 6.22 MB×6 Hz ≈ 38.7 MB/s，compressed 约 3 MB/s，见 10-28 记录），
+  但改不改 compressed 不影响本故障。
+
+#### 3.1.6 遗留的优化项（非本故障，别混为一谈）
+
+- `net.core.rmem_max` 212992 → 16 MB（sysctl 后需重启栈生效），预期把 RcvbufErrors 压到接近 0；
+- MQTT 相机心跳改订阅 `.../image_raw/compressed`（属 mqtt 包，需对方改）；
+- 以后要复查丢包，直接用 `usv_extra_probe.py` 的 `kind=udp_owners` 按窗口算速率。
 
 ### 3.2 关键日志：151 次 abort 的归属
 
@@ -324,3 +432,50 @@ ros2 node list | grep lifecycle_manager          # 应有 lifecycle_manager_loca
 5. **栈级证明缺口**：`ptrace_scope=1` 导致非 root 无法 gdb 附加容器；若以后需要调用栈级证据，
    需用 sudo 在卡死瞬间 `gdb -p <pid> -batch -ex "thread apply all bt"`。
 6. 本次没有再碰 UDP 缓冲 / BT Action 超时 —— 单变量实验已证明它们不是这条故障链上的变量。
+
+---
+
+## 8. 未结案：mission_bridge 的消息投递失败（2026-10-29 10:01）
+
+**这是一个与本篇主线无关的新问题，独立记录。**
+
+### 8.1 现象
+
+10:01:11 平台下发 1 个航点，mission_bridge 正常接住并进入 RUNNING，但船不动；
+此后 20 分钟任务一直挂着，平台因收不到终态而拒绝新任务。
+
+### 8.2 证据
+
+| 环节 | 观测 |
+|---|---|
+| 地面站 → mission_bridge | ✅ `[navigate] accept goal: 1 waypoints` → `STATE -> RUNNING` → `Sending waypoint 1/1 x=232.99, y=139.96` |
+| mission_bridge → nav2（`/follow_waypoints` action） | ❌ nav2 容器日志**没有任何** `Received follow waypoint request`；`/follow_waypoints/_action/status` 无消息；`/cmd_vel_nav` 全程 0 |
+| mission_bridge → aggregator（`/mission_bridge/status_detail`） | ❌ aggregator 一直显示 IDLE；但 `ros2 topic echo` 新订阅者能收到 mission_bridge 的 2 Hz 消息 |
+| aggregator 自身 | ✅ **正常**：手工往 `/mission_bridge/status_detail` 发一条相同内容的 RUNNING，`/nav_status` 立刻变 `RUNNING / 1 航点` |
+
+同一个话题、同一对节点、QoS 匹配（双方均 RELIABLE/VOLATILE），**老读者收不到、新读者收得到**。
+
+### 8.3 判断
+
+不是数据内容问题，也不是 aggregator 代码问题（已用注入消息证伪），而是
+**mission_bridge 这个 DDS participant 与其他进程之间的端点匹配失效**。
+同一现象也解释了 FollowWaypoints 目标未送达（action 的 goal service 同样走 DDS 请求/应答）。
+
+### 8.4 可疑时间点
+
+`overlay-test-case.service`（**transient** 单元，`systemd-run` 起的感知 overlay 测试）
+在 **10:01:12** 启动，即任务被接受的下一秒，制造了 4 个重名节点：
+
+```
+/ai_detector ×2  /attitude_provider ×2  /overlay_controller ×2  /rtsp2_multi_source_node ×2
+```
+
+时间高度重合，但不能据此下结论（也可能是巧合）。
+
+### 8.5 待办
+
+1. 重启后（10:25）船侧全部 IDLE，**待复现**；
+2. 若复现，在故障现场抓：`ros2 node info /mission_bridge` 全量端点、
+   `/proc/<pid>/fd` 里的 DDS socket、FastDDS 统计（`/dev/shm` 与 `ss`），
+   对比 mission_bridge 与正常节点看到的参与方列表；
+3. 若稳定与 `overlay-test-case.service` 同时出现，让感知侧确认该测试服务是否会长期运行。
