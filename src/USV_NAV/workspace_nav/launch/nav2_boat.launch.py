@@ -32,7 +32,6 @@ from launch.actions import (
     IncludeLaunchDescription,
     OpaqueFunction,
     SetEnvironmentVariable,
-    TimerAction,
 )
 from launch.logging import launch_config
 from launch.conditions import IfCondition
@@ -85,6 +84,11 @@ def _setup(context, *args, **kwargs):
     enable_mission_bridge = LaunchConfiguration('enable_mission_bridge')
     mission_params_file = LaunchConfiguration('mission_params_file')
     enable_livox_cloud_filter = LaunchConfiguration('enable_livox_cloud_filter')
+
+    # 注意：参数表里 autostart 必须保持 LaunchConfiguration，不能换成普通字符串——
+    # LifecycleManager 把 autostart 声明成 bool，传字符串会抛
+    #   "parameter 'autostart' has invalid type ... is of type {bool}"
+    # 而 LaunchConfiguration 会按节点声明的类型正确转换。2026-10-29 踩过一次。
 
     # odom_topic：空 = 不注入（尊重 params_file）；非空 = 改写 Nav2 全部 odom_topic 并透传 mission 栈
     odom_topic = LaunchConfiguration('odom_topic').perform(context).strip()
@@ -226,14 +230,14 @@ def _setup(context, *args, **kwargs):
         condition=IfCondition(enable_livox_cloud_filter),
     )
 
-    # 地图两件套延迟 3s 装载：等容器自身初始化完，降低 load_node 服务响应超时的概率。
-    load_map_stack = TimerAction(
-        period=3.0,
-        actions=[load_map_server, load_lifecycle_manager_map],
-    )
-
-    return [container, load_map_stack, map_server_guard, navigation,
-            mission_bridge, rviz, livox_filter]
+    # 注意：这里**不能**用 TimerAction 延迟装载。本文件被上游以 scoped include 引入，
+    # 延迟动作在作用域退出后才执行，其中任何 LaunchConfiguration（autostart /
+    # use_sim_time / map ...）都会抛
+    #   "Caught exception in launch: launch configuration 'xxx' does not exist"
+    # 并触发全局 shutdown。2026-10-29 首次开机验证踩到，systemd 重启 6 次。
+    # 拆成两次装载已经足够解决"第二个组件被静默丢弃"，不需要延迟。
+    return [container, load_map_server, load_lifecycle_manager_map, map_server_guard,
+            navigation, mission_bridge, rviz, livox_filter]
 
 
 def generate_launch_description():
