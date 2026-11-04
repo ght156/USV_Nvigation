@@ -23,7 +23,7 @@ import rclpy
 from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Odometry
-from nav2_msgs.action import FollowWaypoints
+from nav2_msgs.action import ComputePathThroughPoses, FollowWaypoints
 from nav2_msgs.srv import ClearEntireCostmap
 from rclpy.action import ActionClient, ActionServer, CancelResponse, GoalResponse
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallbackGroup
@@ -40,7 +40,7 @@ from tf2_ros.transform_listener import TransformListener
 
 from m_common.action import NavigateTask
 from m_common.msg import NavStatus
-from m_common.srv import CancelMission, SendWaypoints, SetPause
+from m_common.srv import CancelMission, PlanMission, SendWaypoints, SetPause
 
 from workspace_nav.costmap_reinflate import CostmapReinflater
 from workspace_nav.gps_map_conversion import (
@@ -225,6 +225,8 @@ class MissionBridgeNode(Node):
         self.declare_parameter("waypoint_topic", "/waypoint")
         self.declare_parameter("color_topic", "/color_code")
         self.declare_parameter("follow_waypoints_action", "follow_waypoints")
+        self.declare_parameter("compute_path_through_poses_action", "compute_path_through_poses")
+        self.declare_parameter("mission_plan_timeout_sec", 15.0)
         self.declare_parameter("global_frame", "map")
         self.declare_parameter("robot_frame", "base_link")
         self.declare_parameter("map_yaml_path", "")
@@ -368,6 +370,12 @@ class MissionBridgeNode(Node):
             FollowWaypoints,
             self.get_parameter("follow_waypoints_action").value,
             callback_group=cg,
+        )
+        self._path_client = ActionClient(
+            self,
+            ComputePathThroughPoses,
+            self.get_parameter("compute_path_through_poses_action").value,
+            callback_group=ReentrantCallbackGroup(),
         )
         self._clear_costmap_client = self.create_client(
             ClearEntireCostmap, "/local_costmap/clear_entirely_local_costmap"
@@ -516,6 +524,9 @@ class MissionBridgeNode(Node):
         self._srv_send = self.create_service(
             SendWaypoints, 'mission_bridge/send_waypoints',
             self._cb_send_waypoints, callback_group=self._srv_cg)
+        self._srv_plan = self.create_service(
+            PlanMission, 'mission_bridge/plan_mission',
+            self._cb_plan_mission, callback_group=self._srv_cg)
         self._srv_pause = self.create_service(
             SetPause, 'mission_bridge/set_pause',
             self._cb_set_pause, callback_group=self._srv_cg)
@@ -523,7 +534,7 @@ class MissionBridgeNode(Node):
             CancelMission, 'mission_bridge/cancel_mission',
             self._cb_cancel_mission, callback_group=self._srv_cg)
         self.get_logger().info(
-            "Service servers ready: send_waypoints, set_pause, cancel_mission")
+            "Service servers ready: send_waypoints, plan_mission, set_pause, cancel_mission")
         self._publish_status_detail()
 
         # ------------------------------------------------------------------ #
@@ -1758,6 +1769,118 @@ class MissionBridgeNode(Node):
                 return f"航点 #{i} ({lat:.7f}, {lon:.7f}) 在作业区外（围栏 {fence_id}）"
             return f"航点 #{i} ({lat:.7f}, {lon:.7f}) 落在禁止区内（围栏 {fence_id}）"
         return None
+
+    def _cb_plan_mission(self, request: PlanMission.Request,
+                         response: PlanMission.Response) -> PlanMission.Response:
+        """仅规划完整航线并返回路径，不启动或修改当前任务。"""
+        def _fail(message: str) -> PlanMission.Response:
+            response.success = False
+            response.message = message
+            self.get_logger().warning(f"[service] plan_mission: {message}")
+            return response
+
+        if not request.waypoints:
+            return _fail("Waypoints list is empty")
+        with self._sm_lock:
+            state = self._state
+        if state not in (MissionState.IDLE, MissionState.COMPLETED, MissionState.FAILED):
+            return _fail(f"Cannot plan mission in state {state.value}")
+
+        ll: List[Tuple[float, float]] = []
+        yaws: List[float] = []
+        for i, wp in enumerate(request.waypoints):
+            lat = float(wp.latitude)
+            lon = float(wp.longitude)
+            if not (math.isfinite(lat) and math.isfinite(lon)):
+                return _fail(f"Waypoint #{i} lat/lon not finite: ({lat}, {lon})")
+            if lat == 0.0 and lon == 0.0:
+                return _fail(f"Waypoint #{i} is (0, 0)")
+            if lat < -90.0 or lat > 90.0 or lon < -180.0 or lon > 180.0:
+                return _fail(f"Waypoint #{i} lat/lon out of range: ({lat}, {lon})")
+            ll.append((lat, lon))
+            yaws.append(float(wp.yaw))
+
+        try:
+            document = lat_lon_list_to_waypoints_document(
+                ll,
+                self._datum_lat,
+                self._datum_lon,
+                self._datum_easting,
+                self._datum_northing,
+                self._projection,
+                self._datum_source,
+                self._map_yaml_resolved,
+                self._ref_key,
+                self._map_ox,
+                self._map_oy,
+                self._map_origin_yaw,
+            )
+            goal = ComputePathThroughPoses.Goal()
+            goal.use_start = False
+            for i, entry in enumerate(document["waypoints"]):
+                yaw = yaws[i] if yaw_is_specified(yaws[i]) else 0.0
+                goal.goals.append(self.create_pose_msg(
+                    float(entry["x"]), float(entry["y"]), 0.0, yaw
+                ))
+        except Exception as exc:
+            return _fail(f"Failed to convert waypoints: {exc}")
+
+        timeout_sec = max(0.1, float(self.get_parameter("mission_plan_timeout_sec").value))
+        if not self._path_client.wait_for_server(timeout_sec=timeout_sec):
+            return _fail("ComputePathThroughPoses server not available")
+
+        completed = threading.Event()
+        outcome: Dict[str, Any] = {}
+
+        def _result_done(future: Future) -> None:
+            try:
+                outcome["result"] = future.result()
+            except Exception as exc:
+                outcome["error"] = str(exc)
+            completed.set()
+
+        def _goal_done(future: Future) -> None:
+            try:
+                goal_handle = future.result()
+                if not goal_handle.accepted:
+                    outcome["error"] = "ComputePathThroughPoses goal rejected"
+                    completed.set()
+                    return
+                outcome["goal_handle"] = goal_handle
+                result_future = goal_handle.get_result_async()
+                result_future.add_done_callback(_result_done)
+            except Exception as exc:
+                outcome["error"] = str(exc)
+                completed.set()
+
+        try:
+            goal_future = self._path_client.send_goal_async(goal)
+            goal_future.add_done_callback(_goal_done)
+        except Exception as exc:
+            return _fail(f"Failed to send ComputePathThroughPoses goal: {exc}")
+        if not completed.wait(timeout=timeout_sec):
+            goal_handle = outcome.get("goal_handle")
+            if goal_handle is not None:
+                try:
+                    goal_handle.cancel_goal_async()
+                except Exception:
+                    pass
+            return _fail(f"ComputePathThroughPoses timed out after {timeout_sec:.1f}s")
+        if "error" in outcome:
+            return _fail(outcome["error"])
+
+        raw = outcome.get("result")
+        if raw is None or raw.status != GoalStatus.STATUS_SUCCEEDED:
+            status = raw.status if raw is not None else GoalStatus.STATUS_UNKNOWN
+            return _fail(f"ComputePathThroughPoses failed with status {status}")
+        if not raw.result.path.poses:
+            return _fail("ComputePathThroughPoses returned an empty path")
+
+        response.success = True
+        response.path = raw.result.path
+        response.message = f"Planned {len(goal.goals)} waypoints, {len(response.path.poses)} path poses"
+        self.get_logger().info(f"[service] plan_mission: {response.message}")
+        return response
 
     def _cb_send_waypoints(self, request: SendWaypoints.Request,
                            response: SendWaypoints.Response) -> SendWaypoints.Response:

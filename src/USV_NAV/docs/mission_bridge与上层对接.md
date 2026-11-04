@@ -8,7 +8,7 @@
 ## 1. 架构（默认）
 
 ```text
-竞赛上层 ── Service ×3 ──┐
+竞赛上层 ── Service ×4 ──┐
 Decision ── Action ×1 ───┤
 地面站 GCS ── Topic ─────┼──► mission_bridge ──► FollowWaypoints ──► Nav2
                          │
@@ -18,9 +18,18 @@ nav_status_aggregator ◄──┘ status_detail / odom / GPS / planner
          └── /task_event
 ```
 
-上层接口明细：Service `send_waypoints` / `set_pause` / `cancel_mission`，Action `/mission_bridge/navigate`（NavigateTask）。
+上层接口明细：Service `send_waypoints` / `plan_mission` / `set_pause` / `cancel_mission`，Action `/mission_bridge/navigate`（NavigateTask）。
 
 **Legacy（勿并行）**：`waypoint_transform` + `waypoint_with_state` + `target_buoy`。
+
+### 导航前预规划
+
+`/mission_bridge/plan_mission`（`m_common/srv/PlanMission`）接收全量 `MissionWaypoint[]`，调用 Nav2 `ComputePathThroughPoses` 并返回 `map` 系 `nav_msgs/Path`。它不写航点文件、不启动或修改任务；`RUNNING` / `PAUSED` / `WAITING_SYSTEM` 中拒绝调用。上层自行累加相邻路径点的 XY 距离并决定是否执行，规划失败不影响原任务逻辑。
+
+```bash
+ros2 service call /mission_bridge/plan_mission m_common/srv/PlanMission \
+  "{waypoints: [{latitude: 31.0, longitude: 120.0, yaw: 65536.0, seq: 1}, {latitude: 31.0001, longitude: 120.0001, yaw: 65536.0, seq: 2}]}"
+```
 
 ---
 
@@ -70,6 +79,8 @@ Nav2 使用非默认地图时再传：`map_yaml_path:=<与 Nav2 map:= 相同的�
 | `waypoint_topic` | `/waypoint` | 生效，GCS 航线话题 |
 | `color_topic` | `/color_code` | 生效，目标色话题 |
 | `follow_waypoints_action` | `follow_waypoints` | 生效，Nav2 action 名 |
+| `compute_path_through_poses_action` | `compute_path_through_poses` | 生效，预规划使用的 Nav2 多航点 action 名 |
+| `mission_plan_timeout_sec` | `15.0` | 生效，预规划等待规划器与结果的超时（秒） |
 | `global_frame` / `robot_frame` | `map` / `base_link` | 生效，TF 就绪检查与位姿帧 |
 | `map_yaml_path` | 空 | 生效；空时由 launch 注入，代码兜底 `share/config/map.yaml` |
 | `waypoints_json_path` / `target_buoy_json_path` | 空 | 生效；空时走 `TARGET_JSON_PATH` 环境变量或包内默认路径 |

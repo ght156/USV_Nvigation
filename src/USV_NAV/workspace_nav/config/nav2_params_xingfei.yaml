@@ -109,7 +109,7 @@ controller_server:
       plugin: "nav2_controller::SimpleGoalChecker"
       # —— 到达判定容差：xy (米) / yaw (弧度) ——
       # 2026-10-12：0.5→1.0。水测末段在水流中船位在 0.5m 圈沿反复骑线难 latch，
-      # 放宽到 1.0 后正常判到（末段精对准仍由 rotate_to_heading_min_angle=0.3 保证）
+      # 放宽后正常判到（general_goal_checker 不约束终点 yaw）
       # 2026-10-19：1.0→2.0。现场在 1m 圈沿持续转圈，放宽到 2.0 后由 Nav2 判到，
       # 上层 mission_bridge 继续下一航点；归港预泊用 docking_goal_checker（见下）。
       xy_goal_tolerance: 2.0
@@ -120,9 +120,10 @@ controller_server:
     docking_goal_checker:
       stateful: true
       plugin: "nav2_controller::SimpleGoalChecker"
-      # 2026-10-20：0.5/0.15→1.0/0.4。预泊交接位置/艏向放宽，交给 usv_docking
+      # 2026-11-03：预泊位置容差 1.0→2.0，避免在预泊点 1m 圈沿持续绕圈；
+      # 艏向仍保持 0.4 rad，交给 usv_docking 的 APPROACH/ALIGN 收。
       # 的 APPROACH/ALIGN 收（dock_mission.yaml 同名参数须保持一致，运行时会覆盖本文件）
-      xy_goal_tolerance: 1.0
+      xy_goal_tolerance: 2.0
       yaw_goal_tolerance: 0.4
     FollowPath:
       plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
@@ -141,6 +142,7 @@ controller_server:
       # 与最小转弯半径 R_min 匹配（宜 min ≥ R_min，与 regulated_linear_scaling_min_radius 同量级）：
       #   min 过小：carrot 在弯内侧，船未转完前瞻点已到近处 → S 线、左右震荡，严重时像反向拧。
       #   max 过大：沿路径直行过久 → 转弯滞后、有效半径大，目标在船后时先冲很远再拐。
+      #前视距离是最直接的一个旋钮。偏小会导致跟踪振荡，偏大则在窄通道里切角。出现“左右摆头”时优先加大前视距离，出现“贴不住路径”时优先减小。
       # —— max 的硬上限：≤ 局部窗口半宽(24/2=12m) − 船头前伸(2.9m) = 9.1m ——
       #   RPP 碰撞检测的仿真弧最远到 carrot，弧上 footprint 顶点一旦越过局部代价地图边界就按
       #   LETHAL_OBSTACLE(254) 处理 → 无障碍物也会报 "detected collision ahead!" 急停
@@ -181,22 +183,22 @@ controller_server:
       min_approach_linear_velocity: 0.15
       # 2026-10-12：3.0→5.0。3.0 时 2.9m 外全速 1.0 冲点，重船（桥限 decel 0.3）末段刹不住、
       # 视觉冲点凶；5.0 提前进线性区（3m 处 v≈0.6），实测记录见 /tmp/rpp_probe3.log。
-      approach_velocity_scaling_dist: 8.0   #剩余路径长度小于此值，开始线性降速，直到最小线速度min_approach_linear_velocity
+      approach_velocity_scaling_dist: 5.0   #剩余路径长度小于此值，开始线性降速，直到最小线速度min_approach_linear_velocity
 
       # —— 转向控制 ——
       use_rotate_to_heading: true              # 机器人航向与路径起点航向偏差过大（超过 rotate_to_heading_min_angle），或者在接近终点（在容差内）需要调整终态朝向时（rotate_to_heading_angular_vel调整速度），会停止线速度，进行原地旋转。对齐前瞻点方向
       rotate_to_heading_angular_vel: 0.25   # 原地旋转目标角速度；2026-10-12：0.15→0.25（= 10-05 水测角速度
                                             # 上限 ~0.25 rad/s，缩短末段对准耗时）；下游桥硬限幅 ±0.30，调大需同步改桥的 max_*_angular_z
-      rotate_to_heading_min_angle: 0.3  # ≈17度；2026-10-12 水测：0.785(45°) 末段对准太糙就放线速度 →
-     
+      rotate_to_heading_min_angle: 0.5236  # 30°；2026-10-27 由45°下调试验，减少末段原地找向
+
       # —— 碰撞检测（硬急停，与上面代价减速独立）——
       # 沿当前 (vx, ω) 向前仿真一条弧，弧长 = min(v × 本参数, 前瞻距离 carrot_dist)，
       # 弧上任何位姿 footprint 压到障碍 → 抛异常急停/恢复。RViz 看 /lookahead_collision_arc。
       # 水面惯量大、制动慢，时间窗宜 ≥ 3s。本参数×当前速度 = 实际检查距离：
-      #   v=1.0(导航最高速)×5s = 5.0m，加船头 2.9m = 7.9m < 半窗 12m，仍有余量。
+      #   v=1.0(导航最高速)×7s = 7.0m，加船头 2.9m = 9.9m < 半窗 12m，仍有余量。
       # ⚠ 不要照搬澄丰的 20s：弧长一旦超过 9.1m（= 半窗 − 船头）就会假报碰撞急停。
       use_collision_detection: true
-      max_allowed_time_to_collision_up_to_carrot: 5.0
+      max_allowed_time_to_collision_up_to_carrot: 7.0
       # 碰撞弧上按 footprint 插值补点再查代价，false 会漏查大步长中间的栅格；保持 true
       use_interpolation: true
       # 控制器查路径 TF 的外推容差 (s)：2026-10-21 实测 map→odom 中位延迟
@@ -210,8 +212,8 @@ local_costmap:
   local_costmap:
     ros__parameters:
       # —— 更新/发布频率 (Hz)。点云密时 CPU 偏高可适当降低 ——
-      update_frequency: 5.0
-      publish_frequency: 5.0
+      update_frequency: 5.0  #内部用
+      publish_frequency: 2.0 #调试工具显示用，设置0不发布
       global_frame: odom
       robot_base_frame: base_link
       use_sim_time: false
@@ -246,14 +248,15 @@ local_costmap:
       # —— Voxel 层：将 3D 点云投影为 2D 障碍标记 ——
       voxel_layer:
         plugin: "nav2_costmap_2d::VoxelLayer"
-        # 2026-10-21：水面 ghost 尚未调好，联调期间暂时关闭点云局部障碍源。
-        # 恢复时把 enabled 改回 true 即可（支持在线改）：观测源已接 livox_cloud_filter
-        # 过滤云（见下方 topic 注释），船头清扫杆/水雾不会再入图。
-        enabled: false
+        # 2026-11-03：在抬高观测源最小障碍高度后重新启用局部点云障碍源。
+        # enabled 支持在线修改：观测源默认接原始 /livox/lidar，
+        # 不使用 livox_cloud_filter（该节点默认关）；如需过滤，把下方 topic 改回
+        # /livox/lidar_filtered，并以 enable_livox_cloud_filter:=true 启动。
+        enabled: true
         # —— 是否清空机器人 footprint 覆盖范围内的旧障碍标记（船体近距由本体遮挡/反光，清空更稳）——
         footprint_clearing_enabled: true
         # —— 发布体素网格 (RViz 可订阅 /local_costmap/voxel_grid 查看) ——调试时true,实船false
-        publish_voxel_map: true
+        publish_voxel_map: false
         # —— 体素 z 轴范围：origin_z=-0.42, z_res=0.1, z_voxels=12 → 覆盖 odom [-0.42, +0.78]。
         #    底边(-0.42)在水面(≈-0.48)之上 0.06；顶边 +0.78 高于本层上限 0.6，不会提前截断。 ——
         origin_z: -0.42      # odom z 区间：base_link≈0、水面≈-0.48、激光≈+0.28
@@ -266,7 +269,7 @@ local_costmap:
         max_obstacle_height: 0.6
         # —— 想让岸的上部也入图，可放到 1.0（观测源上限已是 1.0）；0.6 是压制水面杂波的当前选择 ——
         #    本层没有 min_obstacle_height 的作用：voxel 标记路径不读它（2026-10-09 实测，
-        #    A/B 把它改 -0.35 致命格数完全不变）；下界由观测源的 min_obstacle_height(-0.30) 决定。
+        #    A/B 把它改 -0.35 致命格数完全不变）；下界由观测源的 min_obstacle_height(-0.35) 决定。
         # —— 标记阈值：**不是"点数"**，而是"该格被标过的 z 体素数"，且比较是【严格大于】——
         #    源码 nav2_voxel_grid/voxel_grid.hpp::markVoxelInMap() 取该列 16 位 z 掩码的置位数
         #    （marked_bits = *col >> 16），条件是 popcount > mark_threshold（bitsBelowThreshold）。
@@ -281,12 +284,14 @@ local_costmap:
         #    （本参数是少数【支持在线改】的，立即生效），代价是每列凑不齐 3 层的目标
         #    （远岸/平岸/水面漂浮物，掠射角下再高也只有 1~2 层）也不标——2026-10-10 实测
         #    阈值 2 时较高的岸边也丢了，故在线值已回到 1。
-        #    更治本的压噪是把观测源 min_obstacle_height 提高；2026-10-21 已从 -0.35 抬到 -0.30。
+        #    更治本的压噪是把观测源 min_obstacle_height 提高。
+        #    2026-11-03 在当前船端 -0.40 的基础上再提高 5cm 到 -0.35。
         #    噪点来源之一还有【船行波/尾流】：舷侧和船尾的浪回波贴着水面（odom z≈-0.48±0.2）、
         #    大多单层 z 体素、且跟着船走——rolling 窗口下它随船持续标新格，射线又清不干净
         #    （浪在射线路径上时有时无）。压它的手段同上：阈值 2 或抬源级下界；
         #    footprint_clearing 管不到它（只清船体投影+padding 0.1m 内，浪在舷外）。
-        mark_threshold: 1
+        # 2026-11-03：抬高高度的同时切到 2，过滤只占 1~2 层 z 体素的水面回波。
+        mark_threshold: 2
         # —— 体素列被判为 unknown 的点数阈值（源码默认 15，一般无需调整）——
         unknown_threshold: 15
         # —— 多层/多源叠加：1=max 取最大代价(推荐)；0=overwrite 直接覆盖 ——
@@ -315,11 +320,12 @@ local_costmap:
         #    详见 docs/bug_debug/2026-10-10_代价图与点云不吻合-观测源参数在线无效与栈重启生效.md
         # ===========================================================================
         livox_cloud:
-          # —— 2026-10-21 改：原始 /livox/lidar 经 livox_cloud_filter 节点滤除船头正前
-          #    清扫杆/水雾区（base_link x 2.70~3.70 / y -1.20~+1.40 / z -0.40~0.65）后再入图。
-          #    该杆随船动且是射线端点，标上的格子永远清不掉（开阔水面无回波→无清除射线），
-          #    是局部代价图"水面全是鬼影障碍"的最大持续标记源。左右舷侧真实物体不在盒内，不受影响。
-          topic: /livox/lidar_filtered
+          # —— 2026-10-28：默认不吃过滤节点的输出，直接用原始 /livox/lidar ——
+          #    livox_cloud_filter 仍保留（nav2_boat.launch.py 的 enable_livox_cloud_filter，
+          #    默认 false）；若要启用它，这里必须同步改回 /livox/lidar_filtered，
+          #    否则代价图会收不到点云（过滤节点开着也没人订阅）。
+          #    2026-11-03：盲区从 1.4 m 放大到 2.0 m，清扫杆/水雾和近船回波基本归零。
+          topic: /livox/lidar
           data_type: "PointCloud2"
           # —— 观测点保留时间：0=立即过期（动态环境建议 0，配合 clearing）——
           observation_persistence: 0.0
@@ -328,8 +334,8 @@ local_costmap:
           # —— marking: true → 该源点云写入致命格；⚠️ 在线改 false 不生效（见上方警告）——
           marking: true
           # —— 障碍距离与高度过滤（距离以点云坐标系原点 = 激光雷达光心为球心算 3D 斜距，含 z）——
-          #    雷达挂在船头（base_link 前 2.05m），半径 1.4m 的球覆盖船头本体 → 自反射不入图
-          obstacle_min_range: 1.4
+          #    雷达挂在船头（base_link 前 2.05m），半径 2.0m 的球覆盖船头本体 → 自反射不入图
+          obstacle_min_range: 2.0
           # —— 最大检测距离 (m)：24×24 滚动窗口（2026-10-07 由 20 提到 24）半对角 ≈17.0，
           #    取 18 覆盖全窗；更大的值只是让窗口外的点白算一遍（worldToMap 失败后丢弃），徒增 CPU。
           #    2026-10-09 由 15.0 提到 18.0：15 会丢掉窗口四角（改前实测 15~30m 有 1198 点/帧进不来）——
@@ -338,11 +344,14 @@ local_costmap:
           # —— 射线清除最大距离 (m)：比 obstacle_max_range 略大，保证能清到窗口边缘 ——
           raytrace_max_range: 20.0
           # —— 障碍高度筛选 (ObservationBuffer 裁剪，相对 odom z = 初始 base_link 位置) ——
-          #    min=-0.30：水面在 odom≈-0.48，从 -0.35 再提高 5cm，减少船体翘头时水面被误标。
+          #    min=-0.35：水面在 odom≈-0.48，从 -0.40 提高 5cm，减少船体翘头时水面被误标。
           #    max=1.0：观测源刻意放宽，真正的上限交给 voxel_layer.max_obstacle_height(0.6，可在线调)。
-          min_obstacle_height: -0.30
+          min_obstacle_height: -0.35
           max_obstacle_height: 1.0
-      always_send_full_costmap: true #稳定后改false
+      # —— 局部图首帧全量、之后只发 costmap_updates 增量（topic: /local_costmap/costmap_updates）——
+      #    地图工具网页不解析增量；保持每次发送完整帧。工具侧已把订阅节流为 1Hz，
+      #    240×240 局部图的带宽可以接受。控制/避障仍使用内部代价图。
+      always_send_full_costmap: True
       
 global_costmap:
   global_costmap:
@@ -403,14 +412,14 @@ global_costmap:
           data_type: "PointCloud2"
           clearing: true
           marking: true
-          obstacle_min_range: 1.4    # 同 local（以雷达光心为球心）
+          obstacle_min_range: 2.0    # 同 local（以雷达光心为球心）
           # —— 全局远距离检测 (m)：global 非滚动窗口可要更远（远处岸线/障碍预判），
           #    2026-10-09 由 15.0 提到 30.0（远岸多在 15~30 m；本层默认 enabled=false，开启后生效）——
           obstacle_max_range: 30.0
           raytrace_min_range: 0.5
           raytrace_max_range: 32.0
-          # —— 高度筛选 (相对 odom z)：local=-0.30，global=-0.35，max=1.0 ——
-          min_obstacle_height: -0.35
+          # —— 高度筛选 (相对 odom z)：local=-0.35，global=-0.30，max=1.0 ——
+          min_obstacle_height: -0.30
           max_obstacle_height: 1.0
           observation_persistence: 0.0
       # —— 静态地图层 ——
@@ -437,8 +446,12 @@ global_costmap:
         #    ⚠ 硬禁区只到内切半径(≈0.7m)，填 2.0 这类小值等于让规划贴着障碍走、船头(2.9m)插进去。
         #    外接半径(含 padding)≈3.08，取 3.5 ≈ 船身 + 0.4m 余量；再大窄道会被夹住甚至无解 ——
         inflation_radius: 3.5
-      # —— true：每轮都发完整全局代价地图（RViz/上位机看得全，代价是带宽/CPU）——
-      always_send_full_costmap: True
+      # —— false：首帧发完整全局代价地图，之后只在变化时发 costmap_updates 增量 ——
+      #    全局图 1795×1455，全量一帧约 2.6 MB；正常运行时 /global_costmap/costmap
+      #    无订阅者（网页端只看 /local_costmap/costmap，RViz 未接），关掉省带宽/CPU。
+      #    规划/控制用内部代价图；smoother_server 订阅的是 costmap_raw（独立话题、始终全量），
+      #    不受本参数影响。需要 RViz/上位机每帧全量时再改回 true（2026-10-26）。
+      always_send_full_costmap: False
       
 map_server:
   ros__parameters:
@@ -465,8 +478,8 @@ planner_server:
       tolerance: 0.5
       # —— 代价穿越乘数：>1 时规划器更倾向绕开代价区而非穿越。水面避障建议 2.0~3.0 ——
       cost_travel_multiplier: 3.0
-      downsample_costmap: false
-      downsampling_factor: 1
+      downsample_costmap: false #规划用途是否下采样
+      downsampling_factor: 1   # factor*分辨率  0.2*1
       # —— 允许穿越未知区域 (true=允许，false=只有已知空闲可走) ——
       allow_unknown: false
       max_iterations: 1000000

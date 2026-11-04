@@ -135,7 +135,7 @@ ros2 run workspace_ros target_buoy
 
 ### mission 栈做什么
 
-- **mission_bridge**：接收航线（GCS `/waypoint` 话题防抖、上层 3 个 Service、Decision 的 `NavigateTask` action），经纬度→map 坐标转换，写 `waypoints.json`，逐点调 Nav2 `FollowWaypoints`；状态机 `WAITING_SYSTEM/IDLE/RUNNING/PAUSED/COMPLETED/FAILED`，电子围栏预校验，发布 `/mission_bridge/state` 与 `/mission_bridge/status_detail`。
+- **mission_bridge**：接收航线（GCS `/waypoint` 话题防抖、上层 4 个 Service、Decision 的 `NavigateTask` action），经纬度→map 坐标转换，写 `waypoints.json`，逐点调 Nav2 `FollowWaypoints`；`/mission_bridge/plan_mission` 仅预规划全量航点并返回 `nav_msgs/Path`，不启动或修改任务；状态机 `WAITING_SYSTEM/IDLE/RUNNING/PAUSED/COMPLETED/FAILED`，电子围栏预校验，发布 `/mission_bridge/state` 与 `/mission_bridge/status_detail`。
 - **nav_status_aggregator**（纯观察，不干预导航）：汇总任务/定位/规划/控制状态 → `/nav_status`（2Hz NavStatus）+ `/task_event`（JSON 事件：TASK_STARTED/COMPLETED/FAILED/CANCELLED/PAUSED/RESUMED、ALARM_RAISED/CLEARED）。
 - **zone_manager / zone_monitor**：作业区/禁止区/硬边界电子围栏（KeepoutFilter 掩码 + 越界监控）。
 
