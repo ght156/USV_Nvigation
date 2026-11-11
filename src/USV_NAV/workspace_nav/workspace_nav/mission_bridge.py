@@ -2014,6 +2014,10 @@ class MissionBridgeNode(Node):
             self._running_mission_hash = mh
             self._transition_state(MissionState.RUNNING)
         self._mission_start_wall = time.time()
+        # Service 与 NavigateTask 共用此入口；新任务只在此处清一次，恢复树不再整清。
+        if bool(self.get_parameter("clear_costmap_on_mission_start").value):
+            self._clear_local_costmap("新任务开始")
+        self._setup_costmap_clear_timer()
         self._start_nav_stack()
         return mh
 

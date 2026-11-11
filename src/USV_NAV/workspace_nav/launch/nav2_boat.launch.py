@@ -93,13 +93,14 @@ def _setup(context, *args, **kwargs):
     # odom_topic：空 = 不注入（尊重 params_file）；非空 = 改写 Nav2 全部 odom_topic 并透传 mission 栈
     odom_topic = LaunchConfiguration('odom_topic').perform(context).strip()
 
-    nav2_bringup_share = get_package_share_directory('nav2_bringup')
-    navigation_launch_path = os.path.join(nav2_bringup_share, 'launch', 'navigation_launch.py')
+    # 本地副本只增加 behavior_server cmd_vel→cmd_vel_nav，保证恢复动作进入实船速度桥。
+    navigation_launch_path = os.path.join(
+        package_share.perform(context), 'launch', 'navigation.launch.py')
     mission_bridge_launch = PathJoinSubstitution(
         [package_share, 'launch', 'mission_bridge.launch.py'])
 
     # 与 nav2_bringup/bringup_launch.py 相同的参数重写：yaml_filename 替换为 map:= 路径。
-    # navigation_launch.py 会从磁盘重读 params_file 且只重写 use_sim_time/autostart，
+    # navigation.launch.py 会从磁盘重读 params_file 且只重写 use_sim_time/autostart，
     # 所以必须把这里 RewrittenYaml 的产物（临时文件）传给它，odom_topic 注入才会生效。
     param_rewrites = {
         'use_sim_time': use_sim_time,

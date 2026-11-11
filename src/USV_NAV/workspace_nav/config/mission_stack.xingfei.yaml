@@ -34,17 +34,13 @@ mission_bridge:
     waypoint_commit_delay_sec: 0.45
     allow_replace_running_mission: false   # true = 允许新任务顶掉正在跑的任务
     mission_cancel_topic: "/gcs_mission/cancel"
-    # —— 代价图清理（2026-10-21，鬼影对策，见 docs/bug_debug/2026-10-21_局部代价图水面鬼影…md）——
-    # 斜装雷达在开阔水面无回波 → 无清除射线，误标格不会自行消失，需主动清。
-    # 新任务开始前先清一次局部代价图（清掉上次任务/调试积累的鬼影障碍）
-    # 2026-10-29：暂时关闭。清图会把 InflationLayer 的 current_ 置 false，而本地图当前
-    # 没有启用的观测层（voxel_layer.enabled=false、雷达未开），updateCosts() 永不执行、
-    # current_ 无法恢复 → controller_server 卡在 isCurrent() 空转、船不动（已实船复现）。
-    # 恢复条件：雷达常开且 voxel_layer.enabled=true（届时 reset 能自愈），
-    # 且 reinflate_after_costmap_clear（清图后自动重膨胀）经过回归验证。
-    clear_costmap_on_mission_start: false
-    # 任务运行期间周期清图（秒），0=关。整清会把真障碍也抹掉、重标需若干帧，
-    # 只有长跑任务实测仍在缓慢积鬼影时才开（建议 300~600）
+    # —— 代价图清理：仅新任务启动时清一次，恢复行为和任务运行期间不整清 ——
+    # 清掉上次任务积累的水面 ghost；当前局部 voxel_layer 已启用，清图后由新点云恢复标记，
+    # reinflate_after_costmap_clear 负责触发膨胀层恢复。
+    # 整清也会删除真实障碍：只在船静止且船周已确认安全时启动新任务；后向/2m 盲区内的
+    # 障碍不会因等待新点云而自动恢复，不能把清图后的空闲格当成已确认安全区域。
+    clear_costmap_on_mission_start: true
+    # 周期整清保持关闭，避免航行中前向路径上的近场真实障碍被抹掉。
     costmap_clear_period_sec: 0.0
 
 nav_status_aggregator:

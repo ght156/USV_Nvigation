@@ -19,7 +19,7 @@
 #     与 odom→base_link 同源；map_server 用同一份 map.yaml
 #   - 各 odom_topic 统一为 /mavros/gps_input/local
 #
-# 速度链：controller_server → /cmd_vel_nav → ardupilot_velocity_bridge
+# 速度链：controller_server / behavior_server → /cmd_vel_nav → ardupilot_velocity_bridge
 #   → /mavros/setpoint_velocity/cmd_vel_unstamped
 #   （桥只做转发/超时归零/限速；切模式与解锁由外部负责，桥不再接管）
 #
@@ -522,14 +522,25 @@ behavior_server:
   ros__parameters:
     costmap_topic: local_costmap/costmap_raw
     footprint_topic: local_costmap/published_footprint
-    cycle_frequency: 1.0
+    # 10 Hz 给速度桥 command_timeout_sec=1.0 留足裕量；1 Hz 会因调度抖动被桥判超时归零。
+    # 同时决定 Spin/BackUp 的控制、距离完成判断和碰撞预测步长。
+    cycle_frequency: 10.0
     behavior_plugins: ["spin", "backup", "drive_on_heading", "assisted_teleop", "wait"]
     spin:
       plugin: "nav2_behaviors/Spin"
     backup:
       plugin: "nav2_behaviors/BackUp"
+      # BackUp 继承 DriveOnHeading；加减速采用正加速/负减速，任一设 0 都会关闭整段斜坡逻辑。
+      # 与兴飞速度桥 max_linear_accel/max_linear_decel=0.3 对齐；桥仍会再做一次输出限幅。
+      acceleration_limit: 0.3
+      deceleration_limit: -0.3
+      # 到点前允许连续减到 0；不要为克服船体死区在这里抬下限，先单独水测 backup_speed。
+      minimum_speed: 0.0
     drive_on_heading:
       plugin: "nav2_behaviors/DriveOnHeading"
+      acceleration_limit: 0.3
+      deceleration_limit: -0.3
+      minimum_speed: 0.0
     wait:
       plugin: "nav2_behaviors/Wait"
     assisted_teleop:
@@ -542,12 +553,22 @@ behavior_server:
     transform_tolerance: 0.1
     use_sim_time: false
 
-    # —— Spin 恢复行为参数（本 fork 无插件名前缀，直接挂 behavior_server 顶层）——
+    # —— Spin/BackUp/DriveOnHeading 共用碰撞预测时长；不是动作总超时 ——
+    # 预测会按剩余距离提前截断；BackUp 的速度方向为负，因此实际检查船尾方向。
     simulate_ahead_time: 3.0
-    # —— 旋转恢复速度限制 (rad/s)；2026-10-05 水测角速度上限 ~0.25，加速度与桥 0.5 对齐 ——
+    # —— Spin 参数在 Humble 源码中无 spin. 前缀，直接挂 behavior_server 顶层 ——
+    # 2026-10-05 水测角速度上限 ~0.25，速度桥两个方向硬限幅均为 0.30，加速度与桥 0.5 对齐。
     max_rotational_vel: 0.25
     min_rotational_vel: 0.2
     rotational_acc_lim: 0.5
+
+    # —— AssistedTeleop 调试参数（Humble 同样无 assisted_teleop. 前缀）——
+    # 从 cmd_vel_teleop 接收人工速度，向未来 projection_time 秒预测碰撞并逐步缩速；
+    # 首步碰撞则直接归零。preempt_teleop 是固定结束话题，不是参数。
+    projection_time: 1.0
+    simulation_time_step: 0.1
+    cmd_vel_teleop: cmd_vel_teleop
+    # Wait 无插件参数；Spin/BackUp 的目标角度/距离/速度/time_allowance 均在 BT XML 中。
 
 waypoint_follower:
   ros__parameters:

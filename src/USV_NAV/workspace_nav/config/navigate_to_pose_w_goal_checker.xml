@@ -1,0 +1,38 @@
+<!--
+  navigate_to_pose_w_goal_checker.xml（2026-10-09）
+
+  = Nav2 Humble 默认 navigate_to_pose_w_replanning_and_recovery.xml
+    + FollowPath 显式指定 goal_checker_id="general_goal_checker"。
+
+  为什么需要：默认 BT 不给 FollowPath 传 goal_checker_id，控制器回落到
+  未声明的 current_goal_checker（空名），每次 FollowPath 立即 abort ——
+  "目标被接受、路径能规划、船一步不动"（2026-10-07 实船，见
+  docs/bug_debug/2026-10-07_Nav2导航不动-行为树缺goal_checker与RPP原地旋转阈值.md；
+  2026-10-09 地图工具下发复现）。
+
+  注意：dock_mission 的 /goal_checker_selector 话题（String）要生效需要 BT 里有
+  GoalCheckerSelector 节点，本 BT 没有 —— 与 10-07 以来的实际状态一致
+  （profile 收紧实际由 nav2_goal_checker.py 的 Plan B 参数回落路径完成）。
+-->
+<root main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <RecoveryNode number_of_retries="6" name="NavigateRecovery">
+      <PipelineSequence name="NavigateWithReplanning">
+        <RateController hz="1.0">
+          <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased"/>
+        </RateController>
+        <FollowPath path="{path}" controller_id="FollowPath" goal_checker_id="general_goal_checker"/>
+      </PipelineSequence>
+      <ReactiveFallback name="RecoveryFallback">
+        <GoalUpdated/>
+        <!-- 斜装前向雷达有后向/近场盲区：恢复期间不整清局部或全局代价图。 -->
+        <RoundRobin name="RecoveryActions">
+          <Spin spin_dist="1.57" time_allowance="10.0"/>
+          <Wait wait_duration="10"/>
+          <BackUp backup_dist="0.50" backup_speed="0.2" time_allowance="10.0"/>
+          <DriveOnHeading dist_to_travel="0.30" speed="0.2" time_allowance="10.0"/>
+        </RoundRobin>
+      </ReactiveFallback>
+    </RecoveryNode>
+  </BehaviorTree>
+</root>

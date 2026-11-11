@@ -52,7 +52,7 @@ source ~/USV_NAV/install/setup.bash   # 按实际路径
 
 mission 栈（mission_bridge + nav_status_aggregator + zone_manager/zone_monitor）**默认不启动**，需要 GCS/上层对接时加 `enable_mission_bridge:=true`。mission 参数默认 `mission_stack.chengfeng.yaml`，一般不必手传。详见 [`docs/项目运行与联调.md`](../docs/项目运行与联调.md)。
 
-**控制链**：Nav2 `controller` → `/cmd_vel_nav` →（可选 `velocity_smoother` → `/cmd_vel`）→ `nav2_cmd_vel_to_mavros`（默认 `/cmd_vel_nav`）→ PX4 OFFBOARD。
+**控制链**：Nav2 `controller` 和 `behavior_server`（Spin/BackUp 等恢复行为）→ `/cmd_vel_nav` →（可选 `velocity_smoother` → `/cmd_vel`）→ `nav2_cmd_vel_to_mavros`（默认 `/cmd_vel_nav`）→ PX4 OFFBOARD。本包 `navigation.launch.py` 已在组合/非组合两种模式下重映射恢复速度，不要让桥再长期同时订阅 `/cmd_vel`，否则会与 smoother 互相抢指令。
 
 详细步骤、TF、HOME、换图、**`/cmd_vel`↔`/cmd_vel_nav` 调试命令**：[`docs/项目运行与联调.md`](../docs/项目运行与联调.md)。
 
