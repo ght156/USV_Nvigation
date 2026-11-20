@@ -348,7 +348,7 @@ MONITOR_DOCK（等 /dock/status success 或 needs_reapproach）
 
 ```bash
 cd src/dock_mission
-./test/run_tests.sh          # 48 项 pytest
+colcon test --packages-select dock_mission --event-handlers console_direct+  # C++ 核心 + ROS 集成测试
 ```
 
 详见 [`test/README.md`](test/README.md)。

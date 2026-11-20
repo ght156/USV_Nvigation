@@ -25,8 +25,8 @@
 #
 # RPP 前瞻 L≈clamp(v×lookahead_time, min, max)：
 #   min 过小 → carrot 在转弯半径内侧 → S 线/震荡；max 过大 → 先冲远再拐（目标在船后明显）
-#   min 宜 ≥ 船头前伸(2.9m = footprint 2.7 + padding 0.2) 且 ≥ 最小转弯半径（见 regulated_linear_scaling_min_radius）
-#   max 另有硬上限：≤ 局部窗口半宽(12m) − 船头前伸(2.9m) = 9.1m，见 FollowPath 的碰撞检测注释
+#   min 宜 ≥ 船头前伸(2.8m = footprint 2.7 + padding 0.1) 且 ≥ 最小转弯半径（见 regulated_linear_scaling_min_radius）
+#   max 另有硬上限：≤ 局部窗口半宽(12m) − 船头前伸(2.8m) = 9.2m，见 FollowPath 的碰撞检测注释
 #
 # 保守下水：速度与 ardupilot_velocity_bridge 的 max_linear_x / max_angular_z 同量级，先小后大。
 # Livox：/livox/lidar；footprint 见 local/global costmap 注释。
@@ -138,12 +138,12 @@ controller_server:
       allow_reversing: false #与原地旋转不能同时开启
 
       # —— 前瞻 (lookahead / carrot)，L≈clamp(v×lookahead_time, min, max) ——
-      # 船头在 base_link 前方约 2.9 m（footprint 2.7 + padding 0.2）：min 须 > 2.9，否则 carrot 落在船体内。
+      # 船头在 base_link 前方约 2.8 m（footprint 2.7 + padding 0.1）：min 须 > 2.8，否则 carrot 落在船体内。
       # 与最小转弯半径 R_min 匹配（宜 min ≥ R_min，与 regulated_linear_scaling_min_radius 同量级）：
       #   min 过小：carrot 在弯内侧，船未转完前瞻点已到近处 → S 线、左右震荡，严重时像反向拧。
       #   max 过大：沿路径直行过久 → 转弯滞后、有效半径大，目标在船后时先冲很远再拐。
       #前视距离是最直接的一个旋钮。偏小会导致跟踪振荡，偏大则在窄通道里切角。出现“左右摆头”时优先加大前视距离，出现“贴不住路径”时优先减小。
-      # —— max 的硬上限：≤ 局部窗口半宽(24/2=12m) − 船头前伸(2.9m) = 9.1m ——
+      # —— max 的硬上限：≤ 局部窗口半宽(24/2=12m) − 船头前伸(2.8m) = 9.2m ——
       #   RPP 碰撞检测的仿真弧最远到 carrot，弧上 footprint 顶点一旦越过局部代价地图边界就按
       #   LETHAL_OBSTACLE(254) 处理 → 无障碍物也会报 "detected collision ahead!" 急停
       #   （2026-09-21 湖中心实测；见 docs/bug_debug/2026-09-21_RPP误报碰撞-局部代价地图窗口过小.md）。
@@ -151,9 +151,9 @@ controller_server:
       lookahead_dist: 7.0                     # 静态Fallback距离，use_velocity_scaled_lookahead_dist: true时无效
       lookahead_time: 10.0                    # L=clamp(v×10, min, max)；≤10 才落在 nav2_tune_gui.py 可调范围(1~10)
       use_velocity_scaled_lookahead_dist: true
-      min_lookahead_dist: 5.5                 # 2026-10-07 兴飞（重船大惯量）：5.0→5.5，更早切弯
+      min_lookahead_dist: 4.5                 # 2026-11-18：5.0→4.5 现场 A/B；前次 bag 对比未增加曲率正负反转
       max_lookahead_dist: 8.0                 # 7.0→8.0；巡航包络 R≈13m（0.9m/s 时 wz≤0.07），
-                                              # 上限 9.1m（24m 半窗 12 − 船头 2.9）留 1.1m 余量
+                                              # 上限 9.2m（24m 半窗 12 − 船头 2.8）留 1.2m 余量
 
       # —— 曲率限速：路径转弯半径 < min_radius 时线速度向 min_speed 靠拢 ——
       # min_radius 宜与船体最小转弯半径、min_lookahead_dist 同量级；过小 → 频繁压到 min_speed 走走停停
@@ -170,7 +170,7 @@ controller_server:
       # gain=1.0 即线性：4.5m 全速、2.25m 半速、贴障趋于 0。只管"提前慢"，不管停。
       use_cost_regulated_linear_velocity_scaling: true
       # 开始减速的距离门槛 (m)：按 base_link 到障碍的距离算，须 ≤ local inflation_radius(5.0)。
-      # 船头前伸 2.9 m，故须 > 2.9，否则要等船头贴到障碍才开始减速；取 4.5 留约 1.6 m 余量。
+      # 船头前伸 2.8 m，故须 > 2.8，否则要等船头贴到障碍才开始减速；取 4.5 留约 1.7 m 余量。
       cost_scaling_dist: 4.5
       cost_scaling_gain: 1.0        # 减速强度：1.0 线性比例；调小更保守（同距离给速更少）
       # 反算距离用的膨胀衰减系数，须与 local_costmap 膨胀层 cost_scaling_factor 一致（已对齐 1.0）
@@ -189,14 +189,14 @@ controller_server:
       use_rotate_to_heading: true              # 机器人航向与路径起点航向偏差过大（超过 rotate_to_heading_min_angle），或者在接近终点（在容差内）需要调整终态朝向时（rotate_to_heading_angular_vel调整速度），会停止线速度，进行原地旋转。对齐前瞻点方向
       rotate_to_heading_angular_vel: 0.25   # 原地旋转目标角速度；2026-10-12：0.15→0.25（= 10-05 水测角速度
                                             # 上限 ~0.25 rad/s，缩短末段对准耗时）；下游桥硬限幅 ±0.30，调大需同步改桥的 max_*_angular_z
-      rotate_to_heading_min_angle: 0.5236  # 30°；2026-10-27 由45°下调试验，减少末段原地找向
+      rotate_to_heading_min_angle: 0.5236  # 60°；2026-11-18 由30°上调，减少障碍附近原地旋转扫碰
 
       # —— 碰撞检测（硬急停，与上面代价减速独立）——
       # 沿当前 (vx, ω) 向前仿真一条弧，弧长 = min(v × 本参数, 前瞻距离 carrot_dist)，
       # 弧上任何位姿 footprint 压到障碍 → 抛异常急停/恢复。RViz 看 /lookahead_collision_arc。
       # 水面惯量大、制动慢，时间窗宜 ≥ 3s。本参数×当前速度 = 实际检查距离：
-      #   v=1.0(导航最高速)×7s = 7.0m，加船头 2.9m = 9.9m < 半窗 12m，仍有余量。
-      # ⚠ 不要照搬澄丰的 20s：弧长一旦超过 9.1m（= 半窗 − 船头）就会假报碰撞急停。
+      #   v=1.0(导航最高速)×7s = 7.0m，加船头 2.8m = 9.8m < 半窗 12m，仍有余量。
+      # ⚠ 不要照搬澄丰的 20s：弧长一旦超过 9.2m（= 半窗 − 船头）就会假报碰撞急停。
       use_collision_detection: true
       max_allowed_time_to_collision_up_to_carrot: 7.0
       # 碰撞弧上按 footprint 插值补点再查代价，false 会漏查大步长中间的栅格；保持 true
@@ -219,16 +219,16 @@ local_costmap:
       use_sim_time: false
       rolling_window: true
       # —— 窗口尺寸 (米)：宽 24 × 高 24，分辨率 0.1 m/格 ——
-      # 2026-10-07：20→24，lookahead max 硬上限从 7.2 提到 9.1m（半窗12−船头2.9）
+      # 2026-10-07：20→24，lookahead max 硬上限随 padding 0.1 为 9.2m（半窗12−船头2.8）
       width: 24
       height: 24
       resolution: 0.1
       # —— 船体 footprint (米)：前向 2.7 / 后向 0.5 / 半宽 0.84（以 base_link 为原点）——
       #    base_link = RTK/GI320 报告点（见 urdf/cleaning_boat_xingfei.xacro），船头在其前方 2.7 m
       footprint: "[[2.7, 0.84], [2.7, -0.84], [-0.5, -0.84], [-0.5, 0.84]]"
-      # —— footprint 外扩安全边 (m)：现 0.2。膨胀层内切半径因此 ≈0.7 m（最近边是船尾，-0.5-0.2）——
-      # 2026-10-08：0.1→0.2 安全边加大；窄航道（净宽 < ~2.5m）若规划不出路可回退 0.1
-      footprint_padding: 0.2
+      # —— footprint 外扩安全边 (m)：2026-11-19 由 0.3 回退为 0.1。
+      # 内切半径约为 0.6 m（最近边是船尾 -0.5 - 0.1）；窄航道按此值减少占用。
+      footprint_padding: 0.1
       # —— TF 外推容差 (s)：默认 0.3。定位 TF(odom→base_link) 低于 ~10Hz 时不要再调小，
       #    否则代价地图更新会报 "Lookup would require extrapolation into the future" ——
       transform_tolerance: 0.3
@@ -243,7 +243,7 @@ local_costmap:
         inflate_unknown: false
         inflate_around_unknown: false
         # —— 膨胀半径 (m)：从障碍格向外染色，RPP 代价减速能感知的最远距离 = 此值 ——
-        #    须 ≥ RPP cost_scaling_dist(4.5)。船头 2.9m，取 5.0 让船位在「船头距障 ~2.1m」时开始响应 ——
+        #    须 ≥ RPP cost_scaling_dist(4.5)。船头 2.8m，取 5.0 让船位在「船头距障 ~2.2m」时开始响应 ——
         inflation_radius: 5.0
       # —— Voxel 层：将 3D 点云投影为 2D 障碍标记 ——
       voxel_layer:
@@ -334,8 +334,9 @@ local_costmap:
           # —— marking: true → 该源点云写入致命格；⚠️ 在线改 false 不生效（见上方警告）——
           marking: true
           # —— 障碍距离与高度过滤（距离以点云坐标系原点 = 激光雷达光心为球心算 3D 斜距，含 z）——
-          #    雷达挂在船头（base_link 前 2.05m），半径 2.0m 的球覆盖船头本体 → 自反射不入图
-          obstacle_min_range: 2.0
+          #    雷达挂在船头（base_link 前 2.05m）。2026-11-13：局部图盲区调整为 1.6m，
+          #    避免近船回波/清扫杆进入局部代价图；全局图参数保持不变。
+          obstacle_min_range: 1.6
           # —— 最大检测距离 (m)：24×24 滚动窗口（2026-10-07 由 20 提到 24）半对角 ≈17.0，
           #    取 18 覆盖全窗；更大的值只是让窗口外的点白算一遍（worldToMap 失败后丢弃），徒增 CPU。
           #    2026-10-09 由 15.0 提到 18.0：15 会丢掉窗口四角（改前实测 15~30m 有 1198 点/帧进不来）——
@@ -373,10 +374,9 @@ global_costmap:
       resolution: 0.2
       # 未知格：true=保持未知（能否穿越看规划器 allow_unknown）；false=当 free（可通行）
       track_unknown_space: True
-      # —— global 挂 voxel_layer 用于远距离障碍预判（obstacle_max_range 30m，2026-10-09 由 15 提到 30）。
-      #    注意：非滚动窗口下，动态物（行人/车辆）离开后其标记可能残留（clearing 需要射线穿过旧体素，
-      #    动态物走后无新射线穿过原位置则永久残留）。水上动态物少时影响不大；
-      #    若岸测/码头出现大量 ghost，可临时删掉 voxel_layer 或设 enabled: false ——
+      # —— global 挂 voxel_layer，让 SmacPlanner2D 能绕开实时点云障碍。
+      #    非滚动窗口下旧标记仍依赖 clearing 射线清除，动态障碍离开后可能残留；
+      #    恢复行为树不整清代价图，需通过实船记录检查 ghost 和误封航道。
       # —— keepout_filter 必须排在 inflation_layer 之前，膨胀才会覆盖禁行区边缘 ——
       plugins: ["static_layer", "keepout_filter", "voxel_layer", "inflation_layer"]
       # —— 禁行过滤层（作业区/禁止区/硬边界）——
@@ -386,22 +386,20 @@ global_costmap:
         plugin: "nav2_costmap_2d::KeepoutFilter"
         filter_info_topic: "/keepout_filter/costmap_filter_info"
         transform_tolerance: 0.1
-      # —— Voxel 层（全局远距离） ——
-      #    默认关闭(enabled: false)，仅作远距离障碍预判备胎。全局走 static_layer + keepout_filter 即可；
-      #    若开启会引入动态物残留/水面 ghost(非滚动窗口下 clearing 需射线穿旧体素，水上难清除)。
-      #    下面各值已与 local_costmap 对齐（z 网格 / 高度带 / 盲区），启用后行为与 local 一致。
+      # —— Voxel 层：除近距标记盲区外，观测、标记和高度参数与 local_costmap 对齐。
+      #    全局盲区 2.0m、局部 1.6m：全局进一步抑制近船自反射，近场障碍由局部图兜底。
+      #    全局与局部最大检测距离统一为 18m，避免额外处理更远点云及扩大水面误标范围。
       voxel_layer:
         plugin: "nav2_costmap_2d::VoxelLayer"
-        enabled: false
+        enabled: true
         publish_voxel_map: false
         footprint_clearing_enabled: true
         origin_z: -0.42    # 与 local 一致（odom z 底面）
         z_resolution: 0.1
         z_voxels: 12       # 与 local 一致，覆盖 odom [-0.42, +0.78]
-        # —— 高度上限 (m)：与 local_costmap 一致，滤高于 0.6 m 的点 ——
         max_obstacle_height: 0.6
-        # —— 同 local：mark_threshold 计的是"该格被标过的 z 体素数"，不是点数（见 local 段注释）——
-        mark_threshold: 1
+        # mark_threshold 计的是"该格被标过的 z 体素数"，不是点数（见 local 段注释）。
+        mark_threshold: 2
         unknown_threshold: 15
         combination_method: 1
         observation_sources: livox_cloud
@@ -412,14 +410,11 @@ global_costmap:
           data_type: "PointCloud2"
           clearing: true
           marking: true
-          obstacle_min_range: 2.0    # 同 local（以雷达光心为球心）
-          # —— 全局远距离检测 (m)：global 非滚动窗口可要更远（远处岸线/障碍预判），
-          #    2026-10-09 由 15.0 提到 30.0（远岸多在 15~30 m；本层默认 enabled=false，开启后生效）——
-          obstacle_max_range: 30.0
+          obstacle_min_range: 2.0
+          obstacle_max_range: 18.0
           raytrace_min_range: 0.5
-          raytrace_max_range: 32.0
-          # —— 高度筛选 (相对 odom z)：local=-0.35，global=-0.30，max=1.0 ——
-          min_obstacle_height: -0.30
+          raytrace_max_range: 20.0
+          min_obstacle_height: -0.35
           max_obstacle_height: 1.0
           observation_persistence: 0.0
       # —— 静态地图层 ——
@@ -443,9 +438,10 @@ global_costmap:
         inflate_unknown: false
         inflate_around_unknown: false
         # —— 全局膨胀半径 (m)：规划器按 base_link 点搜索，此值≈船离静态障碍多远 ——
-        #    ⚠ 硬禁区只到内切半径(≈0.7m)，填 2.0 这类小值等于让规划贴着障碍走、船头(2.9m)插进去。
-        #    外接半径(含 padding)≈3.08，取 3.5 ≈ 船身 + 0.4m 余量；再大窄道会被夹住甚至无解 ——
-        inflation_radius: 3.5
+        #    ⚠ 硬禁区只到内切半径(≈0.6m)，填 2.0 这类小值等于让规划贴着障碍走、船头(2.8m)插进去。
+        #    外接半径(含 padding 0.1)≈2.95；2026-11-19 恢复为 5.0。
+        #    全局膨胀用于规划代价，RPP 仍按实际 padded footprint 做碰撞检查。
+        inflation_radius: 5.0
       # —— false：首帧发完整全局代价地图，之后只在变化时发 costmap_updates 增量 ——
       #    全局图 1795×1455，全量一帧约 2.6 MB；正常运行时 /global_costmap/costmap
       #    无订阅者（网页端只看 /local_costmap/costmap，RViz 未接），关掉省带宽/CPU。

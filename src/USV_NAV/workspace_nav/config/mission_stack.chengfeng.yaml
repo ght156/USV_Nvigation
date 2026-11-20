@@ -36,6 +36,8 @@ mission_bridge:
 
 nav_status_aggregator:
   ros__parameters:
+    # 归港 FSM 状态；FINAL_DOCK 压紧段暂停 CTRL_STUCK 位置停滞检测
+    docking_state_topic: "/docking/state"
     # —— GNSS 健康监控（订阅 sensor_msgs/NavSatFix，BEST_EFFORT）——
     # 作用：与 odom 超时、TF 可用性、pose 协方差一起判定 localization_overall(GOOD/DEGRADED/LOST)，
     #   并写入 /nav_status：localization_gps_fix（int，0=无 / 3=3D fix）、alerts_gps_stale；

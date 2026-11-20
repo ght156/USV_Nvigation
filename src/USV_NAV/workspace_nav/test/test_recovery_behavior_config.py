@@ -53,8 +53,59 @@ def test_recovery_tree_uses_motion_without_clearing_costmaps():
     assert drive["time_allowance"] == "10.0"
 
 
-def test_xingfei_clears_only_once_at_mission_start():
+def test_xingfei_clears_local_and_global_only_once_at_mission_start():
     params_path = PACKAGE_ROOT / "config" / "mission_stack.xingfei.yaml"
     params = yaml.safe_load(params_path.read_text())["mission_bridge"]["ros__parameters"]
     assert params["clear_costmap_on_mission_start"] is True
     assert params["costmap_clear_period_sec"] == 0.0
+
+    source = (PACKAGE_ROOT / "src" / "mission_bridge_node.cpp").read_text()
+    assert '"/local_costmap/clear_entirely_local_costmap"' in source
+    assert '"/global_costmap/clear_entirely_global_costmap"' in source
+    assert source.count('clear_local_costmap("new mission");') == 2
+    assert source.count('clear_global_costmap("new mission");') == 2
+    assert 'clear_global_costmap("periodic")' not in source
+
+
+def test_xingfei_heading_alignment_threshold_and_padding():
+    params_path = PACKAGE_ROOT / "config" / "nav2_params_xingfei.yaml"
+    params = yaml.safe_load(params_path.read_text())
+    follow_path = params["controller_server"]["ros__parameters"]["FollowPath"]
+    assert follow_path["rotate_to_heading_min_angle"] == 0.5236
+    assert params["local_costmap"]["local_costmap"]["ros__parameters"]["footprint_padding"] == 0.1
+    assert params["global_costmap"]["global_costmap"]["ros__parameters"]["footprint_padding"] == 0.1
+
+
+def test_xingfei_global_inflation_is_five_metres():
+    params_path = PACKAGE_ROOT / "config" / "nav2_params_xingfei.yaml"
+    params = yaml.safe_load(params_path.read_text())
+    global_layer = params["global_costmap"]["global_costmap"]["ros__parameters"]["inflation_layer"]
+    local_layer = params["local_costmap"]["local_costmap"]["ros__parameters"]["inflation_layer"]
+    assert global_layer["inflation_radius"] == 5.0
+    assert local_layer["inflation_radius"] == 5.0
+
+
+def test_global_voxel_matches_local_except_wider_blind_zone():
+    params_path = PACKAGE_ROOT / "config" / "nav2_params_xingfei.yaml"
+    params = yaml.safe_load(params_path.read_text())
+    local = params["local_costmap"]["local_costmap"]["ros__parameters"]["voxel_layer"]
+    global_voxel = params["global_costmap"]["global_costmap"]["ros__parameters"]["voxel_layer"]
+
+    assert global_voxel["enabled"] is True
+    for key in (
+        "origin_z",
+        "z_resolution",
+        "z_voxels",
+        "max_obstacle_height",
+        "mark_threshold",
+        "unknown_threshold",
+        "combination_method",
+        "observation_sources",
+    ):
+        assert global_voxel[key] == local[key]
+
+    local_cloud = dict(local["livox_cloud"])
+    global_cloud = dict(global_voxel["livox_cloud"])
+    assert local_cloud.pop("obstacle_min_range") == 1.6
+    assert global_cloud.pop("obstacle_min_range") == 2.0
+    assert global_cloud == local_cloud

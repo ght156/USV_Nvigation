@@ -7,23 +7,30 @@
   <maintainer email="yildiz.usv@outlook.com">YILDIZ USV</maintainer>
   <license>Apache-2.0</license>
 
-  <exec_depend>rclpy</exec_depend>
-  <exec_depend>geometry_msgs</exec_depend>
-  <exec_depend>nav_msgs</exec_depend>
-  <exec_depend>std_msgs</exec_depend>
-  <exec_depend>std_srvs</exec_depend>
-  <exec_depend>tf2_ros</exec_depend>
-  <exec_depend>m_common</exec_depend>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <depend>rclcpp</depend>
+  <depend>rclcpp_action</depend>
+  <depend>ament_index_cpp</depend>
+  <depend>rcl_interfaces</depend>
+  <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>std_srvs</depend>
+  <depend>tf2_ros</depend>
+  <depend>m_common</depend>
+  <depend>nlohmann-json-dev</depend>
+  <depend>yaml-cpp</depend>
   <exec_depend>ament_index_python</exec_depend>
   <exec_depend>python3-yaml</exec_depend>
-
-  <test_depend>ament_copyright</test_depend>
-  <test_depend>ament_flake8</test_depend>
-  <test_depend>ament_pep257</test_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <depend>usv_rs485_driver</depend>
+  <test_depend>ament_cmake_gtest</test_depend>
+  <test_depend>ament_cmake_pytest</test_depend>
   <test_depend>python3-pytest</test_depend>
   <test_depend>python3-yaml</test_depend>
-
+  <test_depend>rclpy</test_depend>
   <export>
-    <build_type>ament_python</build_type>
+    <build_type>ament_cmake</build_type>
   </export>
 </package>

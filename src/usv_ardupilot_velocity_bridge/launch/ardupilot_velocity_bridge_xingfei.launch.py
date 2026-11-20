@@ -55,6 +55,8 @@ def _setup(context, *_args, **_kwargs):
                 "output_cmd_topic": ps("output_cmd_topic"),
                 "publish_rate_hz": pf("publish_rate_hz"),
                 "command_timeout_sec": pf("command_timeout_sec"),
+                "publish_zero_on_timeout": pb("publish_zero_on_timeout"),
+                "timeout_zero_grace_sec": pf("timeout_zero_grace_sec"),
                 "max_linear_x": pf("max_linear_x"),
                 "max_linear_y": pf("max_linear_y"),
                 "max_linear_z": pf("max_linear_z"),
@@ -88,6 +90,9 @@ def _setup(context, *_args, **_kwargs):
                 "yaw_brake_release_rate": pf("yaw_brake_release_rate"),
                 "yaw_brake_cmd_deadband": pf("yaw_brake_cmd_deadband"),
                 "imu_timeout_sec": pf("imu_timeout_sec"),
+                "yaw_rate_source": ps("yaw_rate_source"),
+                "yaw_rate_lpf_alpha": pf("yaw_rate_lpf_alpha"),
+                "yaw_rate_timeout_sec": pf("yaw_rate_timeout_sec"),
             }],
         ),
     ]
@@ -109,6 +114,12 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument("publish_rate_hz", default_value="20.0"),
         DeclareLaunchArgument("command_timeout_sec", default_value="1.0"),
+        DeclareLaunchArgument(
+            "publish_zero_on_timeout", default_value="false",
+            description="Keep publishing zero after the timeout grace period"),
+        DeclareLaunchArgument(
+            "timeout_zero_grace_sec", default_value="3.0",
+            description="How long to publish zero and yaw brake after the last input"),
 
         # Hard safety rails. 2026-10-05 水测：最大前进速度 ~1.0 m/s，
         # 角速度上限 ~0.25 rad/s，硬限幅略高于实测上限即可。
@@ -136,10 +147,10 @@ def generate_launch_description():
         # 微调豁免：|wz| 低于此值的指令视为闭环微调（如归港对角度），原样透传不抬升
         DeclareLaunchArgument("in_place_floor_trigger", default_value="0.08"),
 
-        # In-place rotation position hold (ROS-side P loop on /mavros/local_position/odom).
+        # In-place rotation position hold (ROS-side P loop on the selected odometry).
         # Enabled by default on xingfei: GUIDED turn-rate-and-speed has no position
         # loop, so pure-rotation commands drift without this.
-        DeclareLaunchArgument("pose_topic", default_value="/mavros/local_position/odom"),
+        DeclareLaunchArgument("pose_topic", default_value="/mavros/gps_input/local"),
         DeclareLaunchArgument("enable_in_place_hold", default_value="true"), #纯旋转位置保持开关
         DeclareLaunchArgument("hold_linear_deadband", default_value="0.02"), #|vx|低于此值视为原地旋转
         DeclareLaunchArgument("hold_angular_min", default_value="0.05"), #|wz|高于此值才触发保持
@@ -162,6 +173,13 @@ def generate_launch_description():
         DeclareLaunchArgument("yaw_brake_release_rate", default_value="0.02"), #低于此值退出
         DeclareLaunchArgument("yaw_brake_cmd_deadband", default_value="0.01"), #|wz指令|低于此值算空闲
         DeclareLaunchArgument("imu_timeout_sec", default_value="0.5"), #IMU超时s
+
+        # 偏航角速度来源（2026-10-29）：兴飞改用里程计求导，避开飞控 IMU 的坏值。
+        # "odom" = 用 pose_topic 的里程计差分（切定位源时自动跟着换）；
+        # "imu"  = 旧行为，读 imu_topic 的 angular_velocity.z。
+        DeclareLaunchArgument("yaw_rate_source", default_value="odom"),
+        DeclareLaunchArgument("yaw_rate_lpf_alpha", default_value="0.35"), #odom 求导 EMA 系数
+        DeclareLaunchArgument("yaw_rate_timeout_sec", default_value="0.30"), #odom 求导超时s
 
         OpaqueFunction(function=_setup),
     ])

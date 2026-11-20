@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <functional>
 #include <memory>
 #include <sstream>
@@ -10,6 +11,7 @@
 
 #include <geometry_msgs/msg/twist.hpp>
 #include <mavros_msgs/msg/state.hpp>
+#include <mlogger/mlogger.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <sensor_msgs/msg/imu.hpp>
 #include <rclcpp/rclcpp.hpp>
@@ -18,6 +20,23 @@ using namespace std::chrono_literals;
 
 namespace
 {
+
+std::string log_root()
+{
+  const char * usv_home = std::getenv("USV_HOME");
+  return usv_home != nullptr && usv_home[0] != '\0' ?
+         std::string(usv_home) + "/logs" : "logs";
+}
+
+bool log_throttled(std::chrono::steady_clock::time_point & last, int interval_ms)
+{
+  const auto now = std::chrono::steady_clock::now();
+  if (now - last < std::chrono::milliseconds(interval_ms)) {
+    return false;
+  }
+  last = now;
+  return true;
+}
 
 double clamp_value(double value, double min_value, double max_value)
 {
@@ -83,6 +102,10 @@ public:
 
     publish_rate_hz_ = this->declare_parameter<double>("publish_rate_hz", 20.0);
     command_timeout_sec_ = this->declare_parameter<double>("command_timeout_sec", 1.0);
+    publish_zero_on_timeout_ =
+      this->declare_parameter<bool>("publish_zero_on_timeout", false);
+    timeout_zero_grace_sec_ =
+      this->declare_parameter<double>("timeout_zero_grace_sec", 3.0);
 
     // Absolute limits. These are safety rails, not the 2-D boat envelope itself.
     max_linear_x_ = this->declare_parameter<double>("max_linear_x", 1.10);
@@ -126,7 +149,7 @@ public:
     // correction is impossible on this hull; the rotating heading lets the
     // body-x correction cover the drift over time.
     pose_topic_ =
-      this->declare_parameter<std::string>("pose_topic", "/mavros/local_position/odom");
+      this->declare_parameter<std::string>("pose_topic", "/mavros/gps_input/local");
     enable_in_place_hold_ =
       this->declare_parameter<bool>("enable_in_place_hold", false);
     hold_linear_deadband_ =
@@ -163,6 +186,22 @@ public:
     yaw_brake_cmd_deadband_ =
       this->declare_parameter<double>("yaw_brake_cmd_deadband", 0.01);
     imu_timeout_sec_ = this->declare_parameter<double>("imu_timeout_sec", 0.5);
+
+    // 偏航角速度来源（2026-10-29）：飞控 /mavros/imu/data 的 angular_velocity.z
+    // 在本船出现过静止报 -0.49 rad/s 的坏值，会把 yaw brake 打成满舵。
+    //   "odom"：用 pose_topic 的里程计求导（与原地保持同一个话题，切定位源时
+    //           yaw 源自动跟着换；33 Hz，比飞控 IMU 的 7 Hz 新鲜）
+    //   "imu" ：旧行为，直接读 imu_topic 的 angular_velocity.z
+    yaw_rate_source_ = this->declare_parameter<std::string>("yaw_rate_source", "imu");
+    yaw_rate_lpf_alpha_ =
+      this->declare_parameter<double>("yaw_rate_lpf_alpha", 0.35);
+    yaw_rate_timeout_sec_ =
+      this->declare_parameter<double>("yaw_rate_timeout_sec", 0.30);
+    if (yaw_rate_source_ != "odom" && yaw_rate_source_ != "imu") {
+      MLOGGER_WARN(
+        "Unknown yaw_rate_source '{}', falling back to 'imu'", yaw_rate_source_);
+      yaw_rate_source_ = "imu";
+    }
 
     // Conservative LUTs derived from the 100-point sea-trial dataset, updated
     // with the 2026-10-05 on-water bridge calibration (env_probe phase):
@@ -212,10 +251,8 @@ public:
     if (input_cmd_qos_ == "reliable") {
       input_qos = rclcpp::QoS(rclcpp::KeepLast(10)).reliable();
     } else if (input_cmd_qos_ != "best_effort") {
-      RCLCPP_WARN(
-        this->get_logger(),
-        "Unknown input_cmd_qos '%s', falling back to best_effort",
-        input_cmd_qos_.c_str());
+      MLOGGER_WARN(
+        "Unknown input_cmd_qos '{}', falling back to best_effort", input_cmd_qos_);
     }
 
     for (const auto & topic : input_cmd_topics_) {
@@ -244,13 +281,15 @@ public:
       topics_oss << input_cmd_topics_[i];
     }
 
-    RCLCPP_INFO(
-      this->get_logger(),
-      "ardupilot_velocity_bridge ready, input=[%s] qos=%s output=%s envelope=%s safety=%.2f in_place_hold=%s yaw_brake=%s",
-      topics_oss.str().c_str(), input_cmd_qos_.c_str(), output_cmd_topic_.c_str(),
+    MLOGGER_INFO(
+      "ardupilot_velocity_bridge ready, input=[{}] qos={} output={} envelope={} "
+      "safety={:.2f} in_place_hold={} yaw_brake={} yaw_rate_src={} publish_zero_on_timeout={}",
+      topics_oss.str(), input_cmd_qos_, output_cmd_topic_,
       enable_velocity_envelope_ ? "ON" : "OFF", envelope_safety_factor_,
       enable_in_place_hold_ ? "ON" : "OFF",
-      enable_yaw_brake_ ? "ON" : "OFF");
+      enable_yaw_brake_ ? "ON" : "OFF",
+      yaw_rate_source_,
+      publish_zero_on_timeout_ ? "ON" : "OFF");
   }
 
 private:
@@ -261,13 +300,37 @@ private:
 
   void pose_cb(const nav_msgs::msg::Odometry::SharedPtr msg)
   {
-    pose_x_ = msg->pose.pose.position.x;
-    pose_y_ = msg->pose.pose.position.y;
+    const rclcpp::Time now = this->now();
     const auto & q = msg->pose.pose.orientation;
-    pose_yaw_ = std::atan2(
+    const double yaw = std::atan2(
       2.0 * (q.w * q.z + q.x * q.y),
       1.0 - 2.0 * (q.y * q.y + q.z * q.z));
-    last_pose_time_ = this->now();
+
+    // odom 求导角速度（yaw_rate_source="odom" 时给 yaw brake 用）。
+    // 相邻两帧差分 + EMA 低通；dt 不合理（重连/时间跳变）时重置，避免假角速度。
+    if (has_pose_) {
+      const double dt = (now - last_pose_time_).seconds();
+      if (dt > 1e-3 && dt < 0.5) {
+        double dyaw = yaw - pose_yaw_;
+        while (dyaw > M_PI) dyaw -= 2.0 * M_PI;
+        while (dyaw < -M_PI) dyaw += 2.0 * M_PI;
+        const double rate = dyaw / dt;
+        if (has_yaw_rate_) {
+          yaw_rate_odom_ += yaw_rate_lpf_alpha_ * (rate - yaw_rate_odom_);
+        } else {
+          yaw_rate_odom_ = rate;
+        }
+        has_yaw_rate_ = true;
+        last_yaw_rate_time_ = now;
+      } else {
+        has_yaw_rate_ = false;
+      }
+    }
+
+    pose_x_ = msg->pose.pose.position.x;
+    pose_y_ = msg->pose.pose.position.y;
+    pose_yaw_ = yaw;
+    last_pose_time_ = now;
     has_pose_ = true;
   }
 
@@ -285,7 +348,7 @@ private:
 
     if (!has_received_command_) {
       has_received_command_ = true;
-      RCLCPP_INFO(this->get_logger(), "Received first velocity command");
+      MLOGGER_INFO("Received first velocity command");
     }
 
     stale_warned_ = false;
@@ -297,6 +360,13 @@ private:
            (this->now() - last_cmd_time_).seconds() <= command_timeout_sec_;
   }
 
+  bool zero_grace_active() const
+  {
+    return publish_zero_on_timeout_ ||
+           (has_received_command_ &&
+           (this->now() - last_cmd_time_).seconds() <= timeout_zero_grace_sec_);
+  }
+
   geometry_msgs::msg::Twist requested_command()
   {
     if (command_is_fresh()) {
@@ -305,10 +375,10 @@ private:
 
     if (has_received_command_ && !stale_warned_) {
       stale_warned_ = true;
-      RCLCPP_WARN(
-        this->get_logger(),
-        "Velocity command timeout %.2fs exceeded, publishing zero command",
-        command_timeout_sec_);
+      MLOGGER_WARN(
+        "Velocity command timeout {:.2f}s exceeded, {}",
+        command_timeout_sec_, zero_grace_active() ?
+        "publishing zero command" : "suppressing velocity output");
     }
 
     return geometry_msgs::msg::Twist();
@@ -335,10 +405,11 @@ private:
       const double floor_mag = std::min(min_in_place_angular_z_, cap);
       if (std::abs(cmd.angular.z) >= in_place_floor_trigger_ &&
           std::abs(cmd.angular.z) < floor_mag) {
-        RCLCPP_DEBUG_THROTTLE(
-          this->get_logger(), *this->get_clock(), 500,
-          "In-place rotation floor: wz %.3f -> %.3f",
-          cmd.angular.z, std::copysign(floor_mag, cmd.angular.z));
+        if (log_throttled(last_floor_debug_log_, 500)) {
+          MLOGGER_DEBUG(
+            "In-place rotation floor: wz {:.3f} -> {:.3f}",
+            cmd.angular.z, std::copysign(floor_mag, cmd.angular.z));
+        }
         cmd.angular.z = std::copysign(floor_mag, cmd.angular.z);
       }
     }
@@ -359,10 +430,11 @@ private:
     }
 
     if (cmd.linear.x > vx_limit) {
-      RCLCPP_DEBUG_THROTTLE(
-        this->get_logger(), *this->get_clock(), 500,
-        "Envelope limiting vx %.3f -> %.3f at wz %.3f",
-        cmd.linear.x, vx_limit, cmd.angular.z);
+      if (log_throttled(last_envelope_debug_log_, 500)) {
+        MLOGGER_DEBUG(
+          "Envelope limiting vx {:.3f} -> {:.3f} at wz {:.3f}",
+          cmd.linear.x, vx_limit, cmd.angular.z);
+      }
       cmd.linear.x = vx_limit;
     }
 
@@ -385,7 +457,7 @@ private:
     if (!in_place || !pose_fresh) {
       if (hold_active_) {
         hold_active_ = false;
-        RCLCPP_INFO(this->get_logger(), "In-place position hold released");
+        MLOGGER_INFO("In-place position hold released");
       }
       return;
     }
@@ -395,9 +467,8 @@ private:
       anchor_x_ = pose_x_;
       anchor_y_ = pose_y_;
       hold_engage_time_ = this->now();
-      RCLCPP_INFO(
-        this->get_logger(), "In-place position hold engaged at (%.2f, %.2f)",
-        anchor_x_, anchor_y_);
+      MLOGGER_INFO(
+        "In-place position hold engaged at ({:.2f}, {:.2f})", anchor_x_, anchor_y_);
       return;
     }
 
@@ -438,10 +509,36 @@ private:
     const double correction = clamp_value(hold_kp_ * ex_body, -eff_max, eff_max);
     target.linear.x += correction;
 
-    RCLCPP_DEBUG_THROTTLE(
-      this->get_logger(), *this->get_clock(), 500,
-      "In-place hold: err %.2f m, body-x %.2f m, vx correction %.3f (max %.2f)",
-      mag, ex_body, correction, eff_max);
+    if (log_throttled(last_hold_debug_log_, 500)) {
+      MLOGGER_DEBUG(
+        "In-place hold: err {:.2f} m, body-x {:.2f} m, vx correction {:.3f} (max {:.2f})",
+        mag, ex_body, correction, eff_max);
+    }
+  }
+
+  // 当前选用的偏航角速度及其新鲜度（yaw_rate_source: odom / imu）
+  double measured_yaw_rate(bool & fresh)
+  {
+    fresh = false;
+    const rclcpp::Time now = this->now();
+    if (yaw_rate_source_ == "odom") {
+      if (!has_yaw_rate_) {
+        return 0.0;
+      }
+      if ((now - last_yaw_rate_time_).seconds() > yaw_rate_timeout_sec_) {
+        return 0.0;
+      }
+      fresh = true;
+      return yaw_rate_odom_;
+    }
+    if (!has_imu_) {
+      return 0.0;
+    }
+    if ((now - last_imu_time_).seconds() > imu_timeout_sec_) {
+      return 0.0;
+    }
+    fresh = true;
+    return imu_wz_;
   }
 
   void apply_yaw_brake(geometry_msgs::msg::Twist & target)
@@ -450,68 +547,72 @@ private:
       return;
     }
 
-    const bool imu_fresh = has_imu_ &&
-      (this->now() - last_imu_time_).seconds() <= imu_timeout_sec_;
+    bool yaw_fresh = false;
+    const double w_meas = measured_yaw_rate(yaw_fresh);
 
     // Only when upstream is idle: no translation and no rotation requested.
     const bool idle = std::abs(target.linear.x) <= hold_linear_deadband_ &&
       std::abs(target.angular.z) <= yaw_brake_cmd_deadband_;
 
-    if (!idle || !imu_fresh) {
+    if (!idle || !yaw_fresh) {
       if (brake_active_) {
         brake_active_ = false;
-        RCLCPP_INFO(this->get_logger(), "Yaw brake released");
+        MLOGGER_INFO("Yaw brake released");
       }
       return;
     }
 
     if (!brake_active_) {
-      if (std::abs(imu_wz_) >= yaw_brake_engage_rate_) {
+      if (std::abs(w_meas) >= yaw_brake_engage_rate_) {
         brake_active_ = true;
-        RCLCPP_INFO(
-          this->get_logger(), "Yaw brake engaged at w_meas %.3f rad/s", imu_wz_);
+        MLOGGER_INFO("Yaw brake engaged at w_meas {:.3f} rad/s (src={})",
+                     w_meas, yaw_rate_source_);
       } else {
         return;
       }
     }
 
-    if (std::abs(imu_wz_) < yaw_brake_release_rate_) {
+    if (std::abs(w_meas) < yaw_brake_release_rate_) {
       brake_active_ = false;
-      RCLCPP_INFO(this->get_logger(), "Yaw brake released (stopped)");
+      MLOGGER_INFO("Yaw brake released (stopped)");
       return;
     }
 
     target.angular.z = clamp_value(
-      -yaw_brake_kd_ * imu_wz_, -yaw_brake_max_, yaw_brake_max_);
+      -yaw_brake_kd_ * w_meas, -yaw_brake_max_, yaw_brake_max_);
 
-    RCLCPP_DEBUG_THROTTLE(
-      this->get_logger(), *this->get_clock(), 500,
-      "Yaw brake: w_meas %.3f -> wz %.3f", imu_wz_, target.angular.z);
+    if (log_throttled(last_brake_debug_log_, 500)) {
+      MLOGGER_DEBUG(
+        "Yaw brake: w_meas {:.3f} (src={}) -> wz {:.3f}",
+        w_meas, yaw_rate_source_, target.angular.z);
+    }
   }
 
   geometry_msgs::msg::Twist apply_slew_limits(
     const geometry_msgs::msg::Twist & target,
     double dt)
   {
-    if (!has_previous_output_ || dt <= 0.0) {
-      return target;
+    const geometry_msgs::msg::Twist previous_output = has_previous_output_ ?
+      previous_output_ : geometry_msgs::msg::Twist();
+    if (dt <= 0.0) {
+      return previous_output;
     }
 
     geometry_msgs::msg::Twist out = target;
 
-    const double dv = target.linear.x - previous_output_.linear.x;
+    const double dv = target.linear.x - previous_output.linear.x;
     if (dv >= 0.0 && max_linear_accel_ > 0.0) {
       const double max_dv = max_linear_accel_ * dt;
-      out.linear.x = previous_output_.linear.x + clamp_value(dv, -max_dv, max_dv);
+      out.linear.x = previous_output.linear.x + clamp_value(dv, -max_dv, max_dv);
     } else if (dv < 0.0 && max_linear_decel_ > 0.0) {
       const double max_dv = max_linear_decel_ * dt;
-      out.linear.x = previous_output_.linear.x + clamp_value(dv, -max_dv, max_dv);
+      out.linear.x = previous_output.linear.x + clamp_value(dv, -max_dv, max_dv);
     }
 
     if (max_angular_accel_ > 0.0) {
-      const double dw = target.angular.z - previous_output_.angular.z;
+      const double dw = target.angular.z - previous_output.angular.z;
       const double max_dw = max_angular_accel_ * dt;
-      out.angular.z = previous_output_.angular.z + clamp_value(dw, -max_dw, max_dw);
+      out.angular.z = previous_output.angular.z + clamp_value(dw, -max_dw, max_dw);
     }
 
     // Do not slew y/z; they are normally zero and should remain safety-clamped.
@@ -526,8 +627,12 @@ private:
   void control_loop()
   {
     if (!current_state_.connected) {
-      RCLCPP_INFO_THROTTLE(
-        this->get_logger(), *this->get_clock(), 3000, "Waiting for FCU connection");
+      previous_output_ = geometry_msgs::msg::Twist();
+      has_previous_output_ = false;
+      last_output_time_ = this->now();
+      if (log_throttled(last_fcu_info_log_, 3000)) {
+        MLOGGER_INFO("Waiting for FCU connection");
+      }
       return;
     }
 
@@ -539,9 +644,13 @@ private:
     geometry_msgs::msg::Twist target = apply_static_limits(requested_command());
     apply_in_place_hold(target, fresh);
 
-    // Timeout / stop must win immediately. Do not slowly ramp through a stale-command stop.
-    // The yaw brake still applies on the stale path: after the command stops it is
-    // exactly when the residual spin needs killing.
+    if (!fresh && !zero_grace_active()) {
+      previous_output_ = geometry_msgs::msg::Twist();
+      has_previous_output_ = false;
+      return;
+    }
+
+    // Stop immediately on timeout, then keep yaw brake available during the grace period.
     geometry_msgs::msg::Twist final_cmd;
     if (!fresh) {
       final_cmd = geometry_msgs::msg::Twist();
@@ -565,6 +674,8 @@ private:
 
   double publish_rate_hz_{20.0};
   double command_timeout_sec_{1.0};
+  bool publish_zero_on_timeout_{false};
+  double timeout_zero_grace_sec_{3.0};
 
   double max_linear_x_{1.10};
   double max_linear_y_{0.0};
@@ -595,6 +706,14 @@ private:
   bool has_imu_{false};
   double imu_wz_{0.0};
   bool brake_active_{false};
+
+  // 偏航角速度来源与 odom 求导状态
+  std::string yaw_rate_source_{"imu"};
+  double yaw_rate_lpf_alpha_{0.35};
+  double yaw_rate_timeout_sec_{0.30};
+  double yaw_rate_odom_{0.0};
+  bool has_yaw_rate_{false};
+  rclcpp::Time last_yaw_rate_time_;
 
   std::string pose_topic_;
   bool enable_in_place_hold_{false};
@@ -632,6 +751,11 @@ private:
   rclcpp::Time last_pose_time_;
   rclcpp::Time last_imu_time_;
   rclcpp::Time hold_engage_time_;
+  std::chrono::steady_clock::time_point last_floor_debug_log_;
+  std::chrono::steady_clock::time_point last_envelope_debug_log_;
+  std::chrono::steady_clock::time_point last_hold_debug_log_;
+  std::chrono::steady_clock::time_point last_brake_debug_log_;
+  std::chrono::steady_clock::time_point last_fcu_info_log_;
 
   rclcpp::Subscription<mavros_msgs::msg::State>::SharedPtr state_sub_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr pose_sub_;
@@ -643,6 +767,7 @@ private:
 
 int main(int argc, char ** argv)
 {
+  MLOGGER_MODULE_INIT(log_root(), "velocity_bridge", "ardupilot_velocity_bridge");
   rclcpp::init(argc, argv);
   rclcpp::spin(std::make_shared<OffboardController>());
   rclcpp::shutdown();

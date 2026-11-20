@@ -55,6 +55,8 @@ def _setup(context, *_args, **_kwargs):
                 "output_cmd_topic": ps("output_cmd_topic"),
                 "publish_rate_hz": pf("publish_rate_hz"),
                 "command_timeout_sec": pf("command_timeout_sec"),
+                "publish_zero_on_timeout": pb("publish_zero_on_timeout"),
+                "timeout_zero_grace_sec": pf("timeout_zero_grace_sec"),
                 "max_linear_x": pf("max_linear_x"),
                 "max_linear_y": pf("max_linear_y"),
                 "max_linear_z": pf("max_linear_z"),
@@ -109,6 +111,12 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument("publish_rate_hz", default_value="20.0"),
         DeclareLaunchArgument("command_timeout_sec", default_value="1.0"),
+        DeclareLaunchArgument(
+            "publish_zero_on_timeout", default_value="false",
+            description="Keep publishing zero after the timeout grace period"),
+        DeclareLaunchArgument(
+            "timeout_zero_grace_sec", default_value="3.0",
+            description="How long to publish zero and yaw brake after the last input"),
 
         # Hard safety rails.
         DeclareLaunchArgument("max_linear_x", default_value="1.10"),
@@ -132,8 +140,8 @@ def generate_launch_description():
         # 微调豁免：|wz| 低于此值的指令视为闭环微调（如归港对角度），原样透传不抬升
         DeclareLaunchArgument("in_place_floor_trigger", default_value="0.08"),
 
-        # In-place rotation position hold (ROS-side P loop on /mavros/local_position/odom).
-        DeclareLaunchArgument("pose_topic", default_value="/mavros/local_position/odom"),
+        # In-place rotation position hold (ROS-side P loop on the selected odometry).
+        DeclareLaunchArgument("pose_topic", default_value="/mavros/gps_input/local"),
         DeclareLaunchArgument("enable_in_place_hold", default_value="false"), #纯旋转位置保持开关
         DeclareLaunchArgument("hold_linear_deadband", default_value="0.02"), #|vx|低于此值视为原地旋转
         DeclareLaunchArgument("hold_angular_min", default_value="0.05"), #|wz|高于此值才触发保持

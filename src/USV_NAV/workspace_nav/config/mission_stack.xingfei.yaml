@@ -34,9 +34,9 @@ mission_bridge:
     waypoint_commit_delay_sec: 0.45
     allow_replace_running_mission: false   # true = 允许新任务顶掉正在跑的任务
     mission_cancel_topic: "/gcs_mission/cancel"
-    # —— 代价图清理：仅新任务启动时清一次，恢复行为和任务运行期间不整清 ——
-    # 清掉上次任务积累的水面 ghost；当前局部 voxel_layer 已启用，清图后由新点云恢复标记，
-    # reinflate_after_costmap_clear 负责触发膨胀层恢复。
+    # —— 代价图清理：仅新任务启动时局部和全局各清一次，恢复行为和任务运行期间不整清 ——
+    # 清掉上次任务积累的局部/全局水面 ghost；清图后由新点云恢复标记，
+    # reinflate_after_costmap_clear 负责触发局部膨胀层恢复，全局静态层重新加载地图。
     # 整清也会删除真实障碍：只在船静止且船周已确认安全时启动新任务；后向/2m 盲区内的
     # 障碍不会因等待新点云而自动恢复，不能把清图后的空闲格当成已确认安全区域。
     clear_costmap_on_mission_start: true

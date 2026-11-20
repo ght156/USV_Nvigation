@@ -27,7 +27,9 @@
 
 from launch import LaunchDescription
 import os
+import sys
 
+from ament_index_python.packages import get_package_share_directory
 from launch.actions import DeclareLaunchArgument, ExecuteProcess, LogInfo, OpaqueFunction
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
@@ -35,6 +37,45 @@ from launch_ros.actions import LoadComposableNodes, Node
 from launch_ros.descriptions import ComposableNode, ParameterFile
 from launch_ros.substitutions import FindPackageShare
 from nav2_common.launch import RewrittenYaml
+
+
+def _default_app_map_yaml() -> str:
+    """统一地图来源：部署根 app/map/map.yaml（船端即 ~/usv-test/app/map）。
+
+    与 nav2_boat.launch.py 同一解析顺序：USV_HOME → 安装位置向上查找 →
+    包内 config/map.yaml 兜底。
+    """
+    candidates = []
+    usv_home = os.environ.get('USV_HOME', '').strip()
+    if usv_home:
+        candidates.append(os.path.join(usv_home, 'app', 'map', 'map.yaml'))
+    here = os.path.abspath(get_package_share_directory('workspace_nav'))
+    while True:
+        candidates.append(os.path.join(here, 'app', 'map', 'map.yaml'))
+        parent = os.path.dirname(here)
+        if parent == here:
+            break
+        here = parent
+    for candidate in candidates:
+        if os.path.isfile(candidate):
+            return candidate
+    print(
+        '[map_view] app/map/map.yaml 未找到（USV_HOME=%r），回退包内 config/map.yaml'
+        % usv_home, file=sys.stderr)
+    return os.path.join(
+        get_package_share_directory('workspace_nav'), 'config', 'map.yaml')
+
+
+def _default_pose_bridge_script() -> str:
+    """地面站/船端都能用：优先本机已有脚本，找不到时给地面站默认值。"""
+    for path in (
+        '/home/ght/ros_map_tool-main/usv_map_pose_bridge.py',
+        os.path.expanduser('~/usv_nav_ws/scripts/usv_map_pose_bridge.py'),
+        os.path.expanduser('~/usv_map_pose_bridge.py'),
+    ):
+        if os.path.isfile(path):
+            return path
+    return '/home/ght/ros_map_tool-main/usv_map_pose_bridge.py'
 
 
 def _setup(context, *args, **kwargs):
@@ -133,14 +174,14 @@ def _setup(context, *args, **kwargs):
 def generate_launch_description():
     package_share = FindPackageShare('workspace_nav')
 
-    map_default = PathJoinSubstitution([package_share, 'config', 'map.yaml'])
+    map_default = _default_app_map_yaml()
     params_default = PathJoinSubstitution([package_share, 'config', 'map_view_params.yaml'])
 
     return LaunchDescription([
         DeclareLaunchArgument(
             'map',
             default_value=map_default,
-            description='地图 yaml；可 map:=/绝对路径/其它.yaml 覆盖'),
+            description='默认 <USV_HOME>/app/map/map.yaml；可 map:=/绝对路径/其它.yaml 覆盖'),
         DeclareLaunchArgument(
             'params_file',
             default_value=params_default,
@@ -163,7 +204,7 @@ def generate_launch_description():
             description='是否启动 usv_map_pose_bridge（/usv_map_pose 船位话题）'),
         DeclareLaunchArgument(
             'pose_bridge_script',
-            default_value='/home/ght/ros_map_tool-main/usv_map_pose_bridge.py',
-            description='usv_map_pose_bridge.py 路径（船端路径不同可用此参数覆盖）'),
+            default_value=_default_pose_bridge_script(),
+            description='usv_map_pose_bridge.py 路径（自动找地面站/船端常见位置，可覆盖）'),
         OpaqueFunction(function=_setup),
     ])

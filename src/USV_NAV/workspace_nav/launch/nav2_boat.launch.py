@@ -20,8 +20,12 @@
 #   zone_monitor）。归港栈同理：ros2 launch usv_docking docking.launch.py odom_topic:=...
 # ----------------------------------------------------------------------------------------------- #
 
+import datetime
 import os
+import shutil
+import socket
 import sys
+from pathlib import Path
 
 from ament_index_python.packages import get_package_share_directory
 
@@ -33,7 +37,6 @@ from launch.actions import (
     OpaqueFunction,
     SetEnvironmentVariable,
 )
-from launch.logging import launch_config
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
@@ -41,6 +44,25 @@ from launch_ros.actions import LoadComposableNodes, Node
 from launch_ros.descriptions import ComposableNode, ParameterFile
 from launch_ros.substitutions import FindPackageShare
 from nav2_common.launch import RewrittenYaml
+
+
+def _configure_native_ros_logging() -> str:
+    home = os.path.abspath(os.path.expanduser(os.environ.get('USV_HOME') or os.getcwd()))
+    root = Path(home) / 'logs' / 'navigation' / 'ros'
+    startup = root / (
+        datetime.datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+        + '_' + socket.gethostname() + '_' + str(os.getpid())
+    )
+    startup.mkdir(parents=True, exist_ok=False)
+    (startup / '.navigation_ros_startup').touch()
+    startup_dirs = sorted(
+        (path for path in root.iterdir()
+         if path.is_dir() and (path / '.navigation_ros_startup').is_file()),
+        key=lambda path: path.name,
+    )
+    for stale in startup_dirs[:-10]:
+        shutil.rmtree(stale)
+    return str(startup)
 
 
 def _default_app_map_yaml() -> str:
@@ -168,14 +190,14 @@ def _setup(context, *args, **kwargs):
     # 启动兜底：上面两次装载仍然可能失败（组件缺失、管理器自己抽风）。map_server_guard
     # 在 20s 后检查 /map_server 状态，仍停在 unconfigured/inactive 就自己 configure →
     # activate，并打 ERROR 便于事后统计。正常启动时它不做任何事。
-    map_server_guard = ExecuteProcess(
-        cmd=[sys.executable, '-u',
-             os.path.join(package_share.perform(context),
-                          'scripts', 'map_server_guard.py'),
-             '--node-name', '/map_server',
-             '--start-delay', '20.0',
-             '--check-period', '3.0',
-             '--timeout', '90.0'],
+    map_server_guard = Node(
+        package='workspace_nav',
+        executable='map_server_guard',
+        arguments=[
+            '--node-name', '/map_server',
+            '--start-delay', '20.0',
+            '--check-period', '3.0',
+            '--timeout', '90.0'],
         name='map_server_guard',
         output='screen',
         condition=IfCondition(autostart),
@@ -243,6 +265,7 @@ def _setup(context, *args, **kwargs):
 
 def generate_launch_description():
     package_share = FindPackageShare('workspace_nav')
+    native_ros_log_dir = _configure_native_ros_logging()
 
     real_nav2_config = PathJoinSubstitution(
         [package_share, 'config', 'nav2_params_xingfei.yaml'])
@@ -322,7 +345,7 @@ def generate_launch_description():
     )
 
     return LaunchDescription([
-        SetEnvironmentVariable("ROS_LOG_DIR", launch_config.log_dir),
+        SetEnvironmentVariable("ROS_LOG_DIR", native_ros_log_dir),
         declare_map,
         declare_use_sim_time,
         declare_params_file,

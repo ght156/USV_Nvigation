@@ -12,9 +12,11 @@
 import os
 
 import yaml
+
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, OpaqueFunction
+from launch.actions import DeclareLaunchArgument, OpaqueFunction, SetEnvironmentVariable
+from launch.logging import launch_config
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
@@ -77,6 +79,7 @@ def _launch_setup(context, *args, **kwargs):
 def generate_launch_description() -> LaunchDescription:
     return LaunchDescription(
         [
+            SetEnvironmentVariable("ROS_LOG_DIR", launch_config.log_dir),
             DeclareLaunchArgument("profile", default_value="real"),
             DeclareLaunchArgument("use_sim_time", default_value="false"),
             DeclareLaunchArgument(

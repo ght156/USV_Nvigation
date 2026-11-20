@@ -22,7 +22,7 @@
 
 ## 四节点管线架构
 
-**核心改动**（2026-07 重构）：全程倒船（船尾朝坞，无线充电对接）；Tag 经 TF 输出（不再用 Float64MultiArray 话题）；odom 锚定/推算解耦为独立估计器；状态机/控制器/安全监督分离。
+**核心改动**（2026-07 重构）：全程倒船（船尾朝坞，无线充电对接）；Tag 经 TF 输出（不再用 Float64MultiArray 话题）；odom 锚定/推算解耦为独立估计器；状态机/控制器/安全监督分离。2026-11 起运行节点均为 C++17/rclcpp：估计器保持独立进程，FSM、控制器和安全监督以组件形式分次加载到 `docking_core_container`，四个逻辑节点及话题契约不变；日志写入 `$USV_HOME/logs/docking/<节点名>.log`。
 
 ```text
 AprilTag TF (camera_rear→dock_frame) + odom→base_link TF
@@ -87,8 +87,7 @@ ros2 topic echo /docking/pose_source            # VISION/ODOM_PREDICTION/INVALID
 ros2 topic echo /docking/abort_request          # 安全撤离请求（正常为空串）
 
 # ── 步骤 6：结束清理（pkill 模式用字符类防自杀）──
-pkill -9 -f "docking_pose_estimato[r]"; pkill -9 -f "docking_fs[m]"
-pkill -9 -f "docking_motion_controlle[r]"; pkill -9 -f "docking_safet[y]"
+pkill -9 -f "docking_pose_estimato[r]"; pkill -9 -f "docking_core_containe[r]"
 pkill -9 -f "docking\.l[a]unch"
 pgrep -c -f "docking_pose_estimato[r]"          # 确认 0 才算清干净
 ```
@@ -98,11 +97,11 @@ pgrep -c -f "docking_pose_estimato[r]"          # 确认 0 才算清干净
   再查是否多套并存：`ros2 node list | grep docking` 每个节点应只有一个。
 - 一直 REACQUIRE 打转 → 看 `/docking/pose_source` 是否频繁 INVALID；RViz 里 `odom→dock_est` 锚点是否还在。
 - 想看船在坞系实时位置：`ros2 topic echo /docking/dock_pose`（x 向 0 收敛=倒入中，y=横偏）。
-- 单元测试（67 项，无需仿真）：
+- C++ 核心单测、参数面检查与真实 ROS/容器集成测试（无需仿真）：
 
 ```bash
 source install/setup.bash
-python3 -m pytest src/usv_docking/test/ -q
+colcon test --packages-select usv_docking --event-handlers console_direct+
 ```
 
 **仿真验证记录**（Gazebo）：

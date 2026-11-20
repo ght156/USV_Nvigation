@@ -24,7 +24,7 @@ USV_NAV/
 
 ## 依赖与编译
 
-见下文 **Step 1–5**；系统包需含 `ros-humble-mavros`、`ros-humble-nav2-bringup`、`ros-humble-robot-localization`（仅当将来补 EKF launch 时）。
+见下文 **Step 1–5**；系统包需含 `ros-humble-mavros`、`ros-humble-nav2-bringup`、`ros-humble-robot-localization`（仅当将来补 EKF launch 时）。`workspace_nav`、`dock_mission` 和 `usv_docking` 的运行节点均使用 C++17/rclcpp（launch 与测试仍用 Python）；C++ 构建还需 `yaml-cpp`、`OpenSSL`、`nlohmann-json3-dev`、`Eigen3` 以及现有 `usv_rs485_driver` 接口。精靠泊估计器独立运行，FSM/控制器/安全监督共享 `docking_core_container`。节点日志使用 `m_common::mlogger`：导航写入 `$USV_HOME/logs/navigation/<节点名>.log`，归港写入 `$USV_HOME/logs/docking/<节点名>.log`，同时保留控制台输出。Nav2 容器等 ROS 原生日志写入 `$USV_HOME/logs/navigation/ros/<启动标识>/`，保留最近 10 次带导航标记的启动目录。
 
 ```bash
 source /opt/ros/humble/setup.bash
@@ -135,7 +135,7 @@ ros2 run workspace_ros target_buoy
 
 ### mission 栈做什么
 
-- **mission_bridge**：接收航线（GCS `/waypoint` 话题防抖、上层 4 个 Service、Decision 的 `NavigateTask` action），经纬度→map 坐标转换，写 `waypoints.json`，逐点调 Nav2 `FollowWaypoints`；`/mission_bridge/plan_mission` 仅预规划全量航点并返回 `nav_msgs/Path`，不启动或修改任务；状态机 `WAITING_SYSTEM/IDLE/RUNNING/PAUSED/COMPLETED/FAILED`，电子围栏预校验，发布 `/mission_bridge/state` 与 `/mission_bridge/status_detail`。
+- **mission_bridge**（C++/rclcpp）：接收航线（GCS `/waypoint` 话题防抖、上层 4 个 Service、Decision 的 `NavigateTask` action），经纬度→map 坐标转换，写 `waypoints.json`，逐点调 Nav2 `FollowWaypoints`；`/mission_bridge/plan_mission` 仅预规划全量航点并返回 `nav_msgs/Path`，不启动或修改任务；状态机 `WAITING_SYSTEM/IDLE/RUNNING/PAUSED/COMPLETED/FAILED`，电子围栏预校验，发布 `/mission_bridge/state` 与 `/mission_bridge/status_detail`。
 - **nav_status_aggregator**（纯观察，不干预导航）：汇总任务/定位/规划/控制状态 → `/nav_status`（2Hz NavStatus）+ `/task_event`（JSON 事件：TASK_STARTED/COMPLETED/FAILED/CANCELLED/PAUSED/RESUMED、ALARM_RAISED/CLEARED）。
 - **zone_manager / zone_monitor**：作业区/禁止区/硬边界电子围栏（KeepoutFilter 掩码 + 越界监控）。
 

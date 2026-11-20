@@ -14,9 +14,18 @@
   <author>Kerem Demirbent</author>
   <author>Harun Kurt</author>
 
-  <buildtool_depend>ament_python</buildtool_depend>
-  
-  <depend>rclpy</depend>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <test_depend>rclpy</test_depend>
+  <depend>rclcpp</depend>
+  <depend>rclcpp_action</depend>
+  <depend>ament_index_cpp</depend>
+  <depend>rcl_interfaces</depend>
+  <depend>yaml-cpp</depend>
+  <depend>openssl</depend>
+  <depend>nlohmann-json-dev</depend>
+  <depend>eigen</depend>
+  <depend>lifecycle_msgs</depend>
   <depend>m_common</depend>
   <depend>launch</depend>
   <depend>launch_ros</depend>
@@ -33,14 +42,13 @@
   <depend>tf2</depend>
   <depend>tf2_ros</depend>
   <depend>nav2_bringup</depend>
-  <exec_depend>python3-yaml</exec_depend>
+  <test_depend>python3-yaml</test_depend>
 
-  <test_depend>ament_copyright</test_depend>
-  <test_depend>ament_flake8</test_depend>
-  <test_depend>ament_pep257</test_depend>
+  <test_depend>ament_cmake_gtest</test_depend>
+  <test_depend>ament_cmake_pytest</test_depend>
   <test_depend>python3-pytest</test_depend>
 
   <export>
-    <build_type>ament_python</build_type>
+    <build_type>ament_cmake</build_type>
   </export>
 </package>

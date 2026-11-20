@@ -99,7 +99,7 @@ controller_server:
     FollowPath:
       plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
       # —— 期望线速度 (m/s)。下水首试偏保守 (0.2)；稳定后可逐步放宽 ——
-      desired_linear_vel: 0.5
+      desired_linear_vel: 1.0
       # —— 角加速度上限 (rad/s²)，只用于原地旋转的爬坡：每周期 ω 最多变化 a×dt（2.0×0.05=0.1）。
       #    首步指令须越过船的物理静摩擦死区，否则配合反馈钳位会卡死（0.3 时实测死锁）；
       #    爬坡基准是里程计反馈角速度，故 min_theta_velocity_threshold 不可设大。
@@ -115,8 +115,8 @@ controller_server:
       #   max 过大：沿路径直行过久 → 转弯滞后、有效半径大，目标在船后时先冲很远再拐。
       lookahead_dist: 10.0                    # 静态Fallback距离，use_velocity_scaled_lookahead_dist: true时无效
       # —— 2026-09-21 改：16.0 → 13.0，max 8.0 → 6.5 ——
-      # v=0.5m/s 时 L=8.0m 越过了 7.28m 的窗口上限：船头顶点出图被当致命障碍，
-      # 湖中心空图上照样报碰撞急停。现在 L=0.5×13=6.5m，6.5+2.72=9.22m < 半窗 10m，余量 0.78m。
+      # v=1.0m/s 时按时间计算会到 13m，但为匹配 20m×20m 局部窗口仍由 max_lookahead_dist
+      # 钳到 6.5m；6.5+2.72=9.22m < 半窗 10m，余量 0.78m。
       lookahead_time: 13.0
       use_velocity_scaled_lookahead_dist: true
       min_lookahead_dist: 5.0
@@ -153,7 +153,7 @@ controller_server:
       # 弧上任何位姿 footprint 压到障碍 → 抛异常急停/恢复。RViz 看 /lookahead_collision_arc。
       # ⚠ footprint 顶点越出局部代价地图边界也按「致命障碍」处理（footprintCost 越界即返回 254），
       #   所以本检查逼着前瞻上限 ≤ 半窗 − 船头前伸；窗口与前瞻不匹配 = 无障碍物时的假急停。
-      # 水面惯量大、制动慢，时间窗宜 ≥ 3s；本参数×当前速度 = 实际检查距离（0.5m/s×5s=2.5m）还受carrot点距离的限制
+      # 水面惯量大、制动慢；实际检查弧长仍受 carrot 距离 6.5m 限制。
       use_collision_detection: true                 # 开启前向碰撞检测（预测弧压到障碍则急停）
       max_allowed_time_to_collision_up_to_carrot: 20.0  # 碰撞预测时间窗 (s)：最多向前看这么久，越大越保守
       use_interpolation: true                       # 路径点稀疏时插值补点，跟踪更平滑
@@ -462,7 +462,7 @@ velocity_smoother:
     feedback: "OPEN_LOOP"
 
     # —— [vx, vy, wz] 速度/加速度限幅，水面惯量大取小值抑制 cmd_vel 抖动 ——
-    max_velocity: [0.5, 0.0, 0.5]
+    max_velocity: [1.0, 0.0, 0.5]
     min_velocity: [0.0, 0.0, -0.5]
     # —— 加速度上限 ([ax, ay, awz])。水面惯量大，小值抑制 cmd_vel 抖动 ——
     max_accel: [0.5, 0.0, 0.5]
