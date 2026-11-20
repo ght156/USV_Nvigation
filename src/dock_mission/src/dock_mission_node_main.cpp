@@ -6,6 +6,7 @@
 #include <chrono>
 #include <csignal>
 #include <memory>
+#include <thread>
 
 namespace
 {
@@ -23,10 +24,13 @@ int main(int argc, char ** argv)
   auto node = std::make_shared<dock_mission::DockMissionNode>();
   rclcpp::executors::MultiThreadedExecutor executor(rclcpp::ExecutorOptions(), 2);
   executor.add_node(node);
+  std::thread executor_thread([&executor]() {executor.spin();});
   while (rclcpp::ok() && !stop_requested) {
-    executor.spin_once(std::chrono::milliseconds(100));
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
   }
-  node->shutdown();
+  if (rclcpp::ok()) node->shutdown();
+  executor.cancel();
+  if (executor_thread.joinable()) executor_thread.join();
   executor.remove_node(node);
   node.reset();
   rclcpp::shutdown();
