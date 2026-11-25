@@ -140,7 +140,7 @@ string message
 | `distance_remaining_m` | **当前船位到当前目标航点的距离**（已按对接说明 §9.3 落实，见 `mission_bridge.py` `_nt_publish_feedback`） |
 | `message` | 辅助字符串，勿解析 |
 
-> **过近跳过无单点事件**：下发时船距某航点 ≤ `waypoint_tolerance_m` 时，该点被**静默跳过**（`mission_bridge.py` `_send_next_waypoint`），不对外产生"单点到达/跳过"事件；跳过的点与正常到达的点在所有上报中**无法区分**，仅表现为 Feedback `current_seq`/`reached_seq`、`/nav_status.current_waypoint`/`progress_percent` 等计数间接 +1。例外：跳过的是最后一个航点时走正常完成路径（`RESULT_SUCCESS`）。反过来，Nav2 内部判定 **missed**（规划/控制失败）的航点不静默：`mission_bridge` 将其升级为任务失败（`MISSION_FAILED`，NavigateTask 返回 `RESULT_PLANNING_FAILED`）。
+> **过近跳过无单点事件**：下发时船距某航点 ≤ `waypoint_tolerance_m` 时，该点被**静默跳过**，不对外产生"单点到达/跳过"事件；跳过的点与正常到达的点在所有上报中**无法区分**，仅表现为 Feedback `current_seq`/`reached_seq`、`/nav_status.current_waypoint`/`progress_percent` 等计数间接 +1。例外：跳过的是最后一个航点时走正常完成路径（`RESULT_SUCCESS`）。反过来，Nav2 内部判定 **missed** 的航点不静默：mission_bridge 读取全局代价图，起点受阻或持续无路返回 `RESULT_STUCK`，目标在图外或致命障碍格返回 `RESULT_PLANNING_FAILED`。
 >
 > `waypoint_tolerance_m <= 0`（默认 `0.0`）表示**自动取 Nav2 参数文件里 goal checker 的 `xy_goal_tolerance`**（当前 2.0 m），与 Nav2 的到达判定同源，避免两处各改一次；显式给正数则仍以显式值优先。
 
@@ -157,15 +157,16 @@ string message
 |---|---|---|
 | `RESULT_SUCCESS` (0) | `""` | 全部航点到达 |
 | `RESULT_CANCELED` (4) | `CANCELED` | Decision 标准 Cancel，或老通道取消波及 |
-| `RESULT_PLANNING_FAILED` (5) | — | Nav2 规划类失败（见下方注意） |
-| `RESULT_CONTROLLER_FAILED` (6) | — | Nav2 控制/跟随类失败（见下方注意） |
-| `RESULT_LOCALIZATION_LOST` (8) | — | 定位丢失看门狗终止任务 |
+| `RESULT_PLANNING_FAILED` (5) | `PLANNER_TARGET_INVALID` | 目标在地图外或致命障碍格等不可恢复规划失败 |
+| `RESULT_CONTROLLER_FAILED` (6) | `CONTROLLER_OUTPUT_FAILED` | 控制输出持续异常，人工移船不能恢复控制链 |
+| `RESULT_STUCK` (7) | `VESSEL_NO_PROGRESS` / `PLANNER_START_BLOCKED` / `PLANNER_NO_PATH` | 船体受困、起点受阻或持续无路；Decision 应转为 `PAUSED/2007` 并保留任务断点（待 Decision 配合） |
+| `RESULT_LOCALIZATION_LOST` (8) | `LOC_LOST` | 定位丢失看门狗终止导航 Action；Decision 转为 `PAUSED/2009` |
 | `RESULT_NOT_READY` (3) / `RESULT_BUSY` (2) | `STATE_*` / `BUSY` | 接受后竞态下无法启动 |
 | `RESULT_INTERNAL_ERROR` (99) | `INTERNAL_ERROR` | 其他无法归类的失败 |
 
-`RESULT_INVALID_GOAL` (1)、`RESULT_STUCK` (7)、`RESULT_GEOFENCE_VIOLATION` (9)、`RESULT_EMERGENCY_STOP` (10) 在定义中保留（接口兼容），但导航侧不再产生后两个终态：越界只发 `safety_event` 告警（§5.2），越界期间的任务要么被 Decision 暂停后恢复，要么被取消（`RESULT_CANCELED`）。
+`RESULT_INVALID_GOAL` (1)、`RESULT_GEOFENCE_VIOLATION` (9)、`RESULT_EMERGENCY_STOP` (10) 在定义中保留（接口兼容），但导航侧不再产生后两个终态：越界只发 `safety_event` 告警（§5.2），越界期间的任务要么被 Decision 暂停后恢复，要么被取消（`RESULT_CANCELED`）。`RESULT_STUCK` 虽然以 Action `ABORTED` 返回，但业务语义是可恢复阻断而非任务失败；Decision 收到后应进入 Paused，人工处理后再派发剩余航点。
 
-> **注意：** `PLANNING_FAILED` 与 `CONTROLLER_FAILED` 的区分依赖 Nav2 错误消息关键词（Humble 的 FollowWaypoints Result 没有 error_code 字段，恒为 0；见 `_map_nav2_failure`）。**Decision 不要依赖这两者的精确区分**，需要精确原因时看 `message` 和 `/nav_status.last_error`。
+> **注意：** missed 航点使用上述结构化分类；其他 Nav2 非成功结果的规划/控制区分仍可能依赖错误消息关键词（Humble 的 FollowWaypoints Result 没有 error_code 字段）。Decision 的业务分支只使用 `result` 和 `error_code`，不要解析 `message`。
 
 ### 3.5 Cancel 语义（标准 Action Cancel）
 
@@ -295,7 +296,7 @@ ros2 service call /mission_bridge/get_geofence m_common/srv/GetGeoFence
 | `task_id` / `command_id` | 对应下发 ID（老通道 Service 携带；NavigateTask 通道为空） |
 | `nav_phase` | 辅助显示（`IDLE`/`TRACKING`/`STUCK`/`RECOVERY`/`PAUSED`），勿做业务分支 |
 | `current_waypoint` / `total_waypoints` / `progress_percent` / `elapsed_sec` / `distance_to_goal_m` / `eta_sec` | 任务进度（`eta_sec` 未知为 -1） |
-| `planner_status` / `controller_status` | `OK`/`FAILED`、`OK`/`STUCK`；RUNNING 中 planner 可能短暂 FAILED（Nav2 内部重试），**勿据此判终态** |
+| `planner_status` / `controller_status` | `OK`/`FAILED`、`OK`/`STUCK`；RUNNING 中 planner 可能短暂 FAILED（Nav2 内部重试），**勿据此判终态**；`controller_last_error=VESSEL_NO_PROGRESS` 表示船体持续无进展 |
 | `localization_overall` | `GOOD` / `DEGRADED` / `LOST` |
 | `pose_x/y/yaw/v/w` | 当前 map 系位姿与速度 |
 | `alerts_*` | 快速告警布尔（odom/gps 超时、planner/controller 错误、暂停等；`alerts_emergency_active`、`flags_emergency_stop` 字段保留但恒为 `false`） |
@@ -330,7 +331,7 @@ RUNNING ──(set_pause true)──► PAUSED ──(set_pause false)──► 
 PAUSED  ──(Action Cancel / cancel_mission)──► IDLE
 ```
 
-注意：**NavigateTask 通道不抢占**——`RUNNING`/`PAUSED` 时新 Goal 直接拒绝，须先 Cancel 旧 Goal。（`send_waypoints` 老通道仍有抢占语义，见 §8.2。）
+注意：**NavigateTask 通道不抢占**——`RUNNING`/`PAUSED` 时新 Goal 直接拒绝，须先 Cancel 旧 Goal。（`send_waypoints` 老通道仍有抢占语义，见 §8.2。）可恢复阻断时 mission_bridge 自身释放回 IDLE，但 Action 返回 `RESULT_STUCK`；Decision 任务态应进入 `PAUSED`，恢复时重新派发剩余航点，而不是调用 `set_pause(false)`。
 
 ### 7.2 时序示例（Action 流程）
 
@@ -434,7 +435,7 @@ Decision ──Service──► set_pause {pause: true}     # 收到告警后的
 | `send_waypoints` 服务、GCS `/waypoint` 话题 | 保留兼容 | 老通道行为不变（含抢占语义）；Decision 新链路不用 |
 | 硬边界（不闭合折线） | 本平台扩展 | 对接说明未定义；经 `/nav_zones` JSON 或旧接口下发；不做航点预校验（规划器绕行） |
 | 任务执行期间围栏热更新 | 与对接说明 §6.3「任务内固定快照」不同 | 本实现围栏即代价地图，更新立即对当前任务生效（更安全）；如需严格快照语义需再改 |
-| `PLANNING_FAILED` / `CONTROLLER_FAILED` 精确区分 | 尽力而为 | 依赖 Nav2 错误消息关键词（Humble FollowWaypoints Result 无 error_code 字段），Decision 勿依赖精确区分 |
+| 可恢复阻断 | 导航侧已实现，Decision 待配合 | `RESULT_STUCK` 覆盖船体受困、起点受阻和持续无路；Decision 需转 `PAUSED/2007` 并保留断点 |
 
 ### 9.3 待 Decision / 云平台确认
 
@@ -487,7 +488,7 @@ Decision ──Service──► set_pause {pause: true}     # 收到告警后的
 | 6 | 越界只收到 `safety_event` 告警（任务不会被终止）；需要停船时由 Decision 调 `set_pause {pause: true}`，之后可恢复/取消/换航线 |
 | 7 | 航点只发 `latitude/longitude/yaw/seq`；不指定朝向时 yaw 填超范围值（如 65536）；不发 map x/y |
 | 8 | 围栏开机初始化一次、云平台更新时再发全量快照；空数组=清除；校验失败旧值仍在 |
-| 9 | 不依赖 `PLANNING_FAILED`/`CONTROLLER_FAILED` 的精确区分；不解析 Feedback `message` 或日志字符串做分支 |
+| 9 | 用 Action `result` 区分可恢复阻断与失败；不解析 Feedback `message` 或日志字符串做分支 |
 | 10 | 勿调用 `ReturnDock` / `set_pre_dock_point`（不在本项目，保留待实现） |
 
 ---
@@ -505,7 +506,7 @@ Decision ──Service──► set_pause {pause: true}     # 收到告警后的
 | 不指定朝向时把 yaw 填 0 | 0 是合法航向（朝东）；不指定请用超范围值（如 65536） |
 | 修改/重编航点 `seq` 的预期 | `seq` 由 Decision 定义，导航原样透传 |
 | 增量更新围栏 | 每次全量快照；空数组清除 |
-| 依赖 `PLANNING_FAILED`/`CONTROLLER_FAILED` 精确区分 | 区分依赖 Nav2 错误消息关键词，仅供参考；需要原因看 `message` |
+| 把所有 `ABORTED` 都当成任务失败 | `RESULT_STUCK`/`RESULT_LOCALIZATION_LOST` 是可恢复阻断，Decision 应进入 `PAUSED` |
 | `/nav_status` 用默认 VOLATILE 订阅 | TRANSIENT_LOCAL + RELIABLE |
 | 用 `planner_status==FAILED` 判任务失败 | RUNNING 中可能短暂 FAILED；终态只看 Result |
 | 解析 Feedback `message` / 日志做业务分支 | 用 `phase`、`result`、`error_code` 等结构化字段 |

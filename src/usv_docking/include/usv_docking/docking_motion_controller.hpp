@@ -2,11 +2,12 @@
 #define USV_DOCKING__DOCKING_MOTION_CONTROLLER_HPP_
 
 #include "usv_docking/motion_control_core.hpp"
+#include "usv_docking/yaw_rate_estimator.hpp"
 
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <geometry_msgs/msg/twist.hpp>
+#include <nav_msgs/msg/odometry.hpp>
 #include <rclcpp/rclcpp.hpp>
-#include <sensor_msgs/msg/imu.hpp>
 #include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/string.hpp>
 
@@ -27,7 +28,7 @@ private:
   void pose_callback(const geometry_msgs::msg::PoseStamped::SharedPtr message);
   void source_callback(const std_msgs::msg::String::SharedPtr message);
   void safety_callback(const std_msgs::msg::Bool::SharedPtr message);
-  void imu_callback(const sensor_msgs::msg::Imu::SharedPtr message);
+  void odom_callback(const nav_msgs::msg::Odometry::SharedPtr message);
   MotionParams load_params() const;
   bool fresh(const std::optional<rclcpp::Time> & stamp, double timeout);
   void control_loop();
@@ -38,7 +39,7 @@ private:
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr pose_sub_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr source_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr safety_sub_;
-  rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub_;
+  rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
   rclcpp::TimerBase::SharedPtr timer_;
   std::string mode_{MODE_HOLD};
   std::optional<Pose2D> pose_;
@@ -48,7 +49,7 @@ private:
   std::optional<rclcpp::Time> mode_msg_time_;
   std::optional<rclcpp::Time> safety_msg_time_;
   bool safety_stop_{false};
-  std::optional<double> yaw_rate_;
+  YawRateEstimator yaw_rate_estimator_;
 };
 
 }  // namespace usv_docking

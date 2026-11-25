@@ -2,6 +2,7 @@
 #include "usv_docking/docking_common.hpp"
 #include "usv_docking/motion_control_core.hpp"
 #include "usv_docking/safety_core.hpp"
+#include "usv_docking/yaw_rate_estimator.hpp"
 
 #include <gtest/gtest.h>
 
@@ -96,6 +97,36 @@ TEST(AnchorFilter, RelocationYawDistanceAndDualTagGuards)
   EXPECT_NEAR(single->x, 0.0, 1e-12);
   auto dual = filter.update({1.0, 0.0, 0.0}, 2.0, 0.2, 2);
   EXPECT_GT(dual->x, 0.0);
+}
+
+TEST(YawRateEstimator, UsesWrappedOdometryDerivativeAndLowPass)
+{
+  YawRateParams params;
+  params.ema_alpha = 0.35;
+  YawRateEstimator estimator(params);
+  EXPECT_FALSE(estimator.update(0.0, 0.0).has_value());
+  EXPECT_NEAR(estimator.update(0.1, 0.1).value(), 1.0, 1e-12);
+  EXPECT_NEAR(estimator.update(0.1, 0.2).value(), 0.65, 1e-12);
+}
+
+TEST(YawRateEstimator, DerivativeWrapsAtPiBoundary)
+{
+  YawRateEstimator estimator;
+  estimator.update(kPi - 0.05, 0.0);
+  EXPECT_NEAR(estimator.update(-kPi + 0.05, 0.1).value(), 1.0, 1e-12);
+}
+
+TEST(YawRateEstimator, TimeoutAndInvalidGapRejectStaleRate)
+{
+  YawRateParams params;
+  params.timeout_sec = 0.3;
+  YawRateEstimator estimator(params);
+  estimator.update(0.0, 0.0);
+  estimator.update(0.1, 0.1);
+  EXPECT_TRUE(estimator.value(0.35).has_value());
+  EXPECT_FALSE(estimator.value(0.41).has_value());
+  EXPECT_FALSE(estimator.update(0.1, 0.7).has_value());
+  EXPECT_FALSE(estimator.value(0.71).has_value());
 }
 
 class MotionCoreTest : public ::testing::Test

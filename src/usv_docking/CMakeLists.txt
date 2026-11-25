@@ -12,7 +12,6 @@ find_package(rclcpp_components REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(nlohmann_json REQUIRED)
-find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_ros REQUIRED)
@@ -23,7 +22,8 @@ add_library(docking_core
   src/anchor_filter.cpp
   src/docking_common.cpp
   src/motion_control_core.cpp
-  src/safety_core.cpp)
+  src/safety_core.cpp
+  src/yaw_rate_estimator.cpp)
 target_compile_features(docking_core PUBLIC cxx_std_17)
 target_include_directories(docking_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -42,7 +42,7 @@ target_include_directories(docking_components PUBLIC
   $<INSTALL_INTERFACE:include>)
 target_link_libraries(docking_components docking_core m_common::mlogger nlohmann_json::nlohmann_json)
 ament_target_dependencies(docking_components
-  geometry_msgs m_common nav_msgs rclcpp rclcpp_action rclcpp_components sensor_msgs
+  geometry_msgs m_common nav_msgs rclcpp rclcpp_action rclcpp_components
   std_msgs tf2 tf2_ros usv_rs485_driver)
 rclcpp_components_register_nodes(docking_components
   "usv_docking::DockingPoseEstimator"

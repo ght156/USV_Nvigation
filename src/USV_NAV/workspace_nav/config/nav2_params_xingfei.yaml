@@ -439,9 +439,9 @@ global_costmap:
         inflate_around_unknown: false
         # —— 全局膨胀半径 (m)：规划器按 base_link 点搜索，此值≈船离静态障碍多远 ——
         #    ⚠ 硬禁区只到内切半径(≈0.6m)，填 2.0 这类小值等于让规划贴着障碍走、船头(2.8m)插进去。
-        #    外接半径(含 padding 0.1)≈2.95；2026-11-19 恢复为 5.0。
+        #    外接半径(含 padding 0.1)≈2.95；2026-11-19 恢复为 5.0，2026-11-24 现场调整为 3.0。
         #    全局膨胀用于规划代价，RPP 仍按实际 padded footprint 做碰撞检查。
-        inflation_radius: 5.0
+        inflation_radius: 3.0
       # —— false：首帧发完整全局代价地图，之后只在变化时发 costmap_updates 增量 ——
       #    全局图 1795×1455，全量一帧约 2.6 MB；正常运行时 /global_costmap/costmap
       #    无订阅者（网页端只看 /local_costmap/costmap，RViz 未接），关掉省带宽/CPU。

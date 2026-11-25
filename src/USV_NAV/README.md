@@ -78,7 +78,7 @@ ros2 launch workspace_nav nav2_boat.launch.py \
 | 位置 | 现基线值 | 说明 |
 |---|---|---|
 | `local_costmap` / `global_costmap` 的 `footprint`（各一处） | `[[2.72, 0.95], [2.72, -0.95], [-0.4, -0.95], [-0.4, 0.95]]` | 船体尺寸（前 2.72 / 后 0.4 / 半宽 0.95） |
-| `inflation_radius` | local `5.0` / global `4.0` | 与 footprint 匹配 |
+| `inflation_radius` | local `5.0` / global `3.0` | 与 footprint 匹配 |
 | RPP `min_lookahead_dist` / `max_lookahead_dist` / `lookahead_time` | `5.0` / `8.0` / `16.0` | 与兴飞最小转弯半径、最高速匹配 |
 | `desired_linear_vel`、`regulated_linear_scaling_min_speed` | `0.5` / `0.1` | 现场按实测运动能力（原船实测转向封顶 ~0.13 rad/s） |
 | `velocity_smoother` 的 `max_velocity` / `max_accel` | `[0.5, 0.0, 0.5]` | 与 `ardupilot_velocity_bridge` 的 `max_linear_x` / `max_angular_z` 同量级 |
@@ -145,8 +145,9 @@ ros2 run workspace_ros target_buoy
 
 - 进入 DEGRADED → `/task_event` 报 `ALARM_RAISED LOC_DEGRADED`（WARN）；
 - 进入 LOST → `ALARM_RAISED LOC_LOST`（ERROR），`last_error=LOC_LOST`；恢复 GOOD 时报 `ALARM_CLEARED`。
-- RUNNING 中位移不足判 `CTRL_STUCK`：**阈值默认自动同步 Nav2 `controller_server` 的 progress_checker**（`required_movement_radius`/`movement_time_allowance`，当前 2.0m/30.0s，每 10s 轮询，改 Nav2 参数即生效）；Nav2 不可达时回退本地 `stuck_movement_radius_m`/`stuck_progress_timeout`。planner ABORTED → `PLAN_FAILED`（事件驱动，无阈值）。
-- **aggregator 只上报、不停车**；真正影响执行的是 mission_bridge：RUNNING 中 TF/FollowWaypoints 不可用或 odom 超过 `localization_timeout_sec`（默认 3s）无新帧，会主动中止任务回 WAITING_SYSTEM（NavigateTask 返回 `RESULT_LOCALIZATION_LOST`，`error_code=LOC_LOST`）；恢复后回 IDLE。`localization_startup_grace_sec`（默认 5s）是任务启动等首帧 odom 的宽限。
+- RUNNING 中位移不足判 `VESSEL_NO_PROGRESS`；兴飞默认连续 15s 位移不足 0.3m（`stuck_progress_timeout`/`stuck_movement_radius_m`，`sync_stuck_from_nav2=false`）。控制输出断流仍报 `CTRL_STUCK`，planner ABORTED 报 `PLAN_FAILED`。
+- **aggregator 只检测、不直接操作任务**；mission_bridge 收到持续受困状态后取消 Nav2 goal，NavigateTask 返回 `RESULT_STUCK` + `VESSEL_NO_PROGRESS`。Nav2 missed 时按全局代价图分类：起点受阻/持续无路返回 `RESULT_STUCK`，目标非法返回 `RESULT_PLANNING_FAILED`；控制输出故障仍返回 `RESULT_CONTROLLER_FAILED/FAILED`。**Decision 需另行将 `RESULT_STUCK` 映射为 `PAUSED/2007` 并保留断点；当前导航仓不修改 Decision。**
+- RUNNING 中 TF/FollowWaypoints 不可用或 odom 超过 `localization_timeout_sec`（默认 3s）无新帧，会主动中止任务回 WAITING_SYSTEM（NavigateTask 返回 `RESULT_LOCALIZATION_LOST`，`error_code=LOC_LOST`）；恢复后回 IDLE。`localization_startup_grace_sec`（默认 5s）是任务启动等首帧 odom 的宽限。
 - 已知判据问题：GPS fix 用 `status.status < 3` 判 DEGRADED，而 mavros 按标准填 0/-1，**当前会恒判 DEGRADED**（见 `mission_stack.chengfeng.yaml` 注释，待改判据或换 fix_type 源）。
 
 mission_bridge 全部参数的逐条生效核对见 [`docs/mission_bridge与上层对接.md`](docs/mission_bridge与上层对接.md) §4。

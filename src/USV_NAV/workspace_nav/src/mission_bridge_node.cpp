@@ -113,6 +113,7 @@ void MissionBridgeNode::declare_parameters()
   declare_parameter("localization_startup_grace_sec", 5.0);
   declare_parameter("ctrl_stuck_timeout_sec", 30.0);
   declare_parameter("nav_status_topic", "/nav_status");
+  declare_parameter("global_costmap_topic", "/global_costmap/costmap_raw");
   declare_parameter("waypoint_tolerance_m", 0.0);
   declare_parameter("nav2_params_path", "");
   declare_parameter("tf_check_period_sec", 1.0);
@@ -332,6 +333,10 @@ void MissionBridgeNode::setup_interfaces()
     get_parameter("nav_status_topic").as_string(), 10,
     std::bind(&MissionBridgeNode::nav_status_callback, this, std::placeholders::_1),
     watchdog_options);
+  global_costmap_subscription_ = create_subscription<nav_msgs::msg::OccupancyGrid>(
+    get_parameter("global_costmap_topic").as_string(), 1,
+    std::bind(&MissionBridgeNode::global_costmap_callback, this, std::placeholders::_1),
+    watchdog_options);
   watchdog_timer_ = create_wall_timer(
     std::chrono::milliseconds(500),
     std::bind(&MissionBridgeNode::tick_ctrl_stuck_watchdog, this), watchdog_group_);
@@ -420,6 +425,8 @@ void MissionBridgeNode::transition_state(MissionState state, const std::string &
     if (changed) {
       state_ = state;
       ctrl_stuck_watchdog_.reset();
+      vessel_no_progress_pending_ = false;
+      vessel_no_progress_last_mono_ = 0.0;
     }
   }
   if (changed) {
@@ -529,30 +536,73 @@ std::pair<double, double> MissionBridgeNode::robot_xy() const
   return current_pose_xy_;
 }
 
+void MissionBridgeNode::global_costmap_callback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg)
+{
+  std::lock_guard<std::recursive_mutex> lock(state_mutex_);
+  global_costmap_ = msg;
+}
+
+PlannerFailure MissionBridgeNode::classify_missed_waypoint() const
+{
+  const auto robot = robot_xy();
+  std::lock_guard<std::recursive_mutex> lock(state_mutex_);
+  if (current_index_ >= nav_xy_.size()) return PlannerFailure::NoPath;
+  const auto & target = nav_xy_[current_index_];
+  if (!global_costmap_) {
+    return classify_planner_failure({robot.first, robot.second}, {target.x, target.y}, nullptr);
+  }
+  CostmapView view;
+  view.width = global_costmap_->info.width;
+  view.height = global_costmap_->info.height;
+  view.resolution = global_costmap_->info.resolution;
+  view.origin_x = global_costmap_->info.origin.position.x;
+  view.origin_y = global_costmap_->info.origin.position.y;
+  view.data = global_costmap_->data;
+  return classify_planner_failure({robot.first, robot.second}, {target.x, target.y}, &view);
+}
+
 void MissionBridgeNode::nav_status_callback(const m_common::msg::NavStatus::SharedPtr msg)
 {
-  if (ctrl_stuck_timeout_sec_ <= 0.0) return;
-  const bool stuck = msg->task_state == "RUNNING" &&
-    (msg->last_error == "CTRL_STUCK" || msg->controller_status == "STUCK");
+  const double now = monotonic_seconds();
+  const bool running = msg->task_state == "RUNNING";
+  const bool vessel_no_progress = running &&
+    (msg->last_error == "VESSEL_NO_PROGRESS" ||
+    msg->controller_last_error == "VESSEL_NO_PROGRESS");
+  const bool controller_fault = running && !vessel_no_progress &&
+    (msg->last_error == "CTRL_STUCK" || msg->last_error == "CONTROLLER_OUTPUT_FAILED" ||
+    msg->controller_status == "FAILED" || msg->controller_status == "STUCK");
   std::lock_guard<std::recursive_mutex> lock(state_mutex_);
-  ctrl_stuck_watchdog_.update(state_, stuck, monotonic_seconds());
+  vessel_no_progress_pending_ = vessel_no_progress;
+  vessel_no_progress_last_mono_ = vessel_no_progress ? now : 0.0;
+  ctrl_stuck_watchdog_.update(state_, controller_fault, now);
 }
 
 void MissionBridgeNode::tick_ctrl_stuck_watchdog()
 {
-  if (ctrl_stuck_timeout_sec_ <= 0.0) return;
+  const double now = monotonic_seconds();
+  bool recoverable = false;
+  bool controller_failed = false;
   {
     std::lock_guard<std::recursive_mutex> lock(state_mutex_);
-    if (state_ != MissionState::Running || !ctrl_stuck_watchdog_.should_fail(monotonic_seconds())) {
-      return;
-    }
+    if (state_ != MissionState::Running) return;
+    recoverable = vessel_no_progress_pending_ && now - vessel_no_progress_last_mono_ <= 2.0;
+    controller_failed = !recoverable && ctrl_stuck_watchdog_.should_fail(now);
+    if (!recoverable && !controller_failed) return;
     ++mission_token_;
     ctrl_stuck_watchdog_.reset();
+    vessel_no_progress_pending_ = false;
+    vessel_no_progress_last_mono_ = 0.0;
   }
   cancel_active_nav2_goal();
-  on_nav_fatal(
-    "CTRL_STUCK", 0, "CTRL_STUCK persisted beyond configured timeout",
-    NavigateTask::Result::RESULT_CONTROLLER_FAILED);
+  if (recoverable) {
+    on_nav_fatal(
+      "VESSEL_NO_PROGRESS", 0, "Vessel made insufficient progress within the configured interval",
+      NavigateTask::Result::RESULT_STUCK);
+  } else if (controller_failed) {
+    on_nav_fatal(
+      "CONTROLLER_OUTPUT_FAILED", 0, "Controller output fault persisted beyond configured timeout",
+      NavigateTask::Result::RESULT_CONTROLLER_FAILED);
+  }
 }
 
 }  // namespace workspace_nav::mission_bridge
@@ -1166,7 +1216,19 @@ void MissionBridgeNode::goal_result(const FollowGoalHandle::WrappedResult & resu
     return;
   }
   if (!result.result->missed_waypoints.empty()) {
-    on_nav_fatal("MISSION_FAILED", 0, "waypoint missed", NavigateTask::Result::RESULT_PLANNING_FAILED);
+    const auto failure = classify_missed_waypoint();
+    if (failure == PlannerFailure::TargetInvalid) {
+      on_nav_fatal(
+        "PLANNER_TARGET_INVALID", 0, "Waypoint target is outside the map or in a lethal costmap cell",
+        NavigateTask::Result::RESULT_PLANNING_FAILED);
+    } else {
+      const bool start_blocked = failure == PlannerFailure::StartBlocked;
+      on_nav_fatal(
+        start_blocked ? "PLANNER_START_BLOCKED" : "PLANNER_NO_PATH", 0,
+        start_blocked ? "Waypoint missed because the start pose is blocked" :
+        "Waypoint missed because no path is currently available",
+        NavigateTask::Result::RESULT_STUCK);
+    }
     return;
   }
   bool done = false;

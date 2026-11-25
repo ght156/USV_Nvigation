@@ -68,10 +68,24 @@ def test_core_nodes_share_container_and_estimator_stays_independent():
     assert "plugin=\"usv_docking::DockingPoseEstimator\"" not in launch
 
 
+def workspace_script(name):
+    for root in (PKG.parents[1], PKG.parents[2]):
+        candidate = root / "scripts" / name
+        if candidate.is_file():
+            return candidate
+    raise FileNotFoundError(name)
+
+
 def test_stack_stop_patterns_include_core_container():
-    root = PKG.parents[1]
-    script = (root / "scripts" / "start_usv_nav.sh").read_text(encoding="utf-8")
+    script = workspace_script("start_usv_nav.sh").read_text(encoding="utf-8")
     assert '"docking_core_container"' in script
+
+
+def test_gui_exposes_cone_switch_as_boolean():
+    script = workspace_script("dock_tune_gui.py").read_text(encoding="utf-8")
+    assert '"approach_cone_enabled"' in script
+    assert '"bool"' in script
+    assert "PARAMETER_BOOL" in script
 
 
 def test_native_nodes_use_ros_clock_timers():

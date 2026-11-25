@@ -24,8 +24,8 @@ mission_bridge:
     # （RESULT_LOCALIZATION_LOST，上层 2009），避免 Nav2 卡死而任务挂 RUNNING。
     localization_timeout_sec: 3.0
     localization_startup_grace_sec: 5.0    # 任务启动后等首帧 odom 的宽限
-    # CTRL_STUCK 持续该秒数后，mission_bridge 主动取消 FollowWaypoints 并上报
-    # TASK_FAILED（error_code=CTRL_STUCK，RESULT_CONTROLLER_FAILED）。<=0 关闭。
+    # 控制输出异常持续该秒数后终止任务（RESULT_CONTROLLER_FAILED）；<=0 关闭。
+    # VESSEL_NO_PROGRESS 达到下方位移/时间门槛后直接返回 RESULT_STUCK，不经过此延时。
     ctrl_stuck_timeout_sec: 30.0
     nav_status_topic: "/nav_status"
     global_frame: "map"
@@ -63,11 +63,11 @@ nav_status_aggregator:
     vehicle_id: "usv_real_001"             # 上报到上层的平台编号
     odom_timeout: 2.0                      # 定位 odom 超过 2s 没更新 → LOST
     gps_timeout: 5.0                       # GNSS 超过 5s 没更新 → DEGRADED (alerts_gps_stale=true)
-    stuck_progress_timeout: 12.0           # CTRL_STUCK 兜底：Nav2 不可达时才用；默认自动同步 Nav2 progress_checker
-    stuck_movement_radius_m: 0.3           # CTRL_STUCK 兜底位移阈值（m），同上
-    sync_stuck_from_nav2: true             # true=从 controller_server progress_checker 读取
-                                           #   required_movement_radius / movement_time_allowance（当前 2.0m/60.0s），
-                                           #   每 nav2_param_poll_period_sec 秒轮询，调 Nav2 参数即生效，无需改这里
+    # 船体受困：连续 15s 内平面位移不足 0.3m → VESSEL_NO_PROGRESS → Action RESULT_STUCK。
+    # 与 Nav2 progress_checker 解耦，避免其 2m/60s 参数覆盖业务恢复门槛。
+    stuck_progress_timeout: 15.0
+    stuck_movement_radius_m: 0.3
+    sync_stuck_from_nav2: false
     nav2_param_poll_period_sec: 10.0
     # 控制输出看门狗：有效运动命令期间，超过位移阈值不再单独视为控制进展，
     # 防止“控制器卡死 + 船随流漂移”误清 CTRL_STUCK；输出中断超过 2s 直接告警。

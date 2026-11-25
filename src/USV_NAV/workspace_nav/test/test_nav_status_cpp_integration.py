@@ -49,6 +49,7 @@ def test_nav_status_aggregates_health_events_and_mission():
          "-p", "planner_status_topic:=/test_planner_status",
          "-p", "follow_path_status_topic:=/test_fp_status",
          "-p", "sync_stuck_from_nav2:=false",
+         "-p", "stuck_progress_timeout:=1.0",
          "-p", "auto_recover_costmap_current:=false"],
         env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
 
@@ -126,6 +127,16 @@ def test_nav_status_aggregates_health_events_and_mission():
         wait_until(
             lambda: any(e["event"] == "ALARM_CLEARED" and e["detail"]["alarm_code"] == "PLAN_FAILED" for e in events),
             message="PLAN_FAILED clear")
+
+        wait_until(
+            lambda: any(s.controller_status == "STUCK" and
+                        s.controller_last_error == "VESSEL_NO_PROGRESS" and
+                        s.last_error == "VESSEL_NO_PROGRESS" for s in statuses),
+            message="VESSEL_NO_PROGRESS after the configured no-progress interval")
+        wait_until(
+            lambda: any(e["event"] == "ALARM_RAISED" and
+                        e["detail"]["alarm_code"] == "VESSEL_NO_PROGRESS" for e in events),
+            message="VESSEL_NO_PROGRESS alarm")
 
         detail_pub.publish(String(data=json.dumps({
             "state": "COMPLETED", "task_id": "task-cpp", "command_id": "cmd-cpp",

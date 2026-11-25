@@ -11,7 +11,7 @@ from ament_index_python.packages import get_package_prefix
 from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import TransformStamped
 from m_common.action import NavigateTask
-from m_common.msg import MissionWaypoint
+from m_common.msg import MissionWaypoint, NavStatus
 from m_common.srv import CancelMission, PlanMission, SendWaypoints, SetPause
 from nav2_msgs.action import ComputePathThroughPoses, FollowWaypoints
 from nav_msgs.msg import Odometry, Path as NavPath
@@ -264,3 +264,37 @@ def test_cpp_bridge_plan_pause_resume_cancel_and_action(running_bridge):
         message="green target buoy",
     )
     assert any(detail.get("state") == "COMPLETED" for detail in running_bridge["details"])
+
+
+def test_cpp_bridge_returns_recoverable_stuck_result(running_bridge):
+    observer = running_bridge["observer"]
+    nav2 = running_bridge["nav2"]
+    nav2.release_follow_goals = False
+    status_pub = observer.create_publisher(NavStatus, "/nav_status", 10)
+    action_client = ActionClient(observer, NavigateTask, "/mission_bridge/navigate")
+    _wait_until(action_client.wait_for_server, message="NavigateTask server")
+
+    goal = NavigateTask.Goal()
+    goal.waypoints = [_waypoint(51)]
+    goal_future = action_client.send_goal_async(goal)
+    _wait_until(goal_future.done, message="NavigateTask goal response")
+    goal_handle = goal_future.result()
+    assert goal_handle.accepted
+    result_future = goal_handle.get_result_async()
+    _wait_until(lambda: nav2.follow_goal_count >= 1, message="FollowWaypoints goal")
+
+    status = NavStatus()
+    status.task_state = "RUNNING"
+    status.controller_status = "STUCK"
+    status.last_error = "VESSEL_NO_PROGRESS"
+    status.controller_last_error = "VESSEL_NO_PROGRESS"
+    status_timer = observer.create_timer(0.05, lambda: status_pub.publish(status))
+    try:
+        _wait_until(result_future.done, message="recoverable NavigateTask result")
+    finally:
+        observer.destroy_timer(status_timer)
+    wrapped_result = result_future.result()
+    assert wrapped_result.status == GoalStatus.STATUS_ABORTED
+    assert wrapped_result.result.result == NavigateTask.Result.RESULT_STUCK
+    assert wrapped_result.result.error_code == "VESSEL_NO_PROGRESS"
+    _wait_until(lambda: running_bridge["states"][-1] == "IDLE", message="recoverable block releases bridge")

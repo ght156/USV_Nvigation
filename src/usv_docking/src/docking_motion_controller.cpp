@@ -33,7 +33,9 @@ DockingMotionController::DockingMotionController(const rclcpp::NodeOptions & opt
   declare_parameter("max_yaw_rate", 0.12);
   declare_parameter("max_linear_accel", 0.30);
   declare_parameter("max_angular_accel", 0.50);
-  declare_parameter("yaw_rate_topic", "/mavros/imu/data");
+  declare_parameter("yaw_rate_topic", "/mavros/gps_input/local");
+  declare_parameter("yaw_rate_lpf_alpha", 0.35);
+  declare_parameter("yaw_rate_timeout_sec", 0.30);
   declare_parameter("kd_yaw", 0.7);
   declare_parameter("approach_reexit_margin", 0.35);
   declare_parameter("approach_axis_y_far", 0.8);
@@ -83,6 +85,11 @@ DockingMotionController::DockingMotionController(const rclcpp::NodeOptions & opt
   declare_parameter("kx_final", 0.25);
   declare_parameter("back_in_max_yaw_rate", 0.12);
 
+  YawRateParams yaw_rate_params;
+  yaw_rate_params.ema_alpha = get_parameter("yaw_rate_lpf_alpha").as_double();
+  yaw_rate_params.timeout_sec = get_parameter("yaw_rate_timeout_sec").as_double();
+  yaw_rate_estimator_ = YawRateEstimator(yaw_rate_params);
+
   const bool test_only = get_parameter("test_only").as_bool();
   const std::string output_topic = test_only ?
     get_parameter("cmd_vel_test_topic").as_string() : get_parameter("cmd_vel_topic").as_string();
@@ -100,9 +107,9 @@ DockingMotionController::DockingMotionController(const rclcpp::NodeOptions & opt
   safety_sub_ = create_subscription<std_msgs::msg::Bool>(
     get_parameter("safety_stop_topic").as_string(), qos,
     std::bind(&DockingMotionController::safety_callback, this, std::placeholders::_1));
-  imu_sub_ = create_subscription<sensor_msgs::msg::Imu>(
-    get_parameter("yaw_rate_topic").as_string(), rclcpp::QoS(10).best_effort(),
-    std::bind(&DockingMotionController::imu_callback, this, std::placeholders::_1));
+  odom_sub_ = create_subscription<nav_msgs::msg::Odometry>(
+    get_parameter("yaw_rate_topic").as_string(), rclcpp::SensorDataQoS(),
+    std::bind(&DockingMotionController::odom_callback, this, std::placeholders::_1));
   const double rate = get_parameter("control_rate").as_double();
   timer_ = rclcpp::create_timer(
     this, get_clock(), rclcpp::Duration::from_seconds(1.0 / rate),
@@ -152,9 +159,11 @@ void DockingMotionController::safety_callback(const std_msgs::msg::Bool::SharedP
   safety_msg_time_ = get_clock()->now();
 }
 
-void DockingMotionController::imu_callback(const sensor_msgs::msg::Imu::SharedPtr message)
+void DockingMotionController::odom_callback(const nav_msgs::msg::Odometry::SharedPtr message)
 {
-  yaw_rate_ = message->angular_velocity.z;
+  const auto & q = message->pose.pose.orientation;
+  const double yaw = yaw_from_quat(q.z, q.w);
+  yaw_rate_estimator_.update(yaw, get_clock()->now().seconds());
 }
 
 bool DockingMotionController::fresh(
@@ -240,7 +249,7 @@ void DockingMotionController::control_loop()
   input.safety_fresh = fresh(
     safety_msg_time_, get_parameter("safety_msg_timeout_sec").as_double());
   input.safety_stop = safety_stop_;
-  input.yaw_rate = yaw_rate_;
+  input.yaw_rate = yaw_rate_estimator_.value(get_clock()->now().seconds());
   const auto output = core_.step(input, load_params());
   if (!is_hold_mode(mode_) && output.linear == 0.0 && output.angular == 0.0 &&
     (safety_stop_ || !input.safety_fresh || !input.mode_fresh))

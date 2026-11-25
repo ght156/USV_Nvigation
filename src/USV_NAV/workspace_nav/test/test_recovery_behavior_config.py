@@ -76,12 +76,12 @@ def test_xingfei_heading_alignment_threshold_and_padding():
     assert params["global_costmap"]["global_costmap"]["ros__parameters"]["footprint_padding"] == 0.1
 
 
-def test_xingfei_global_inflation_is_five_metres():
+def test_xingfei_global_inflation_is_three_metres():
     params_path = PACKAGE_ROOT / "config" / "nav2_params_xingfei.yaml"
     params = yaml.safe_load(params_path.read_text())
     global_layer = params["global_costmap"]["global_costmap"]["ros__parameters"]["inflation_layer"]
     local_layer = params["local_costmap"]["local_costmap"]["ros__parameters"]["inflation_layer"]
-    assert global_layer["inflation_radius"] == 5.0
+    assert global_layer["inflation_radius"] == 3.0
     assert local_layer["inflation_radius"] == 5.0
 
 

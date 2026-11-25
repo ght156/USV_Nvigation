@@ -498,15 +498,18 @@ void NavStatusAggregator::update_stuck_detection()
     last_cmd_stamp_, cmd_linear_active_);
   if (event == nav_status::StuckEvent::Progress) {
     clear_alarm("CTRL_STUCK");
-    if (last_error_ == "CTRL_STUCK") last_error_.clear();
-  } else if (event == nav_status::StuckEvent::StuckNoProgress ||
-    event == nav_status::StuckEvent::StuckCommandStale)
-  {
-    last_error_ = "CTRL_STUCK";
+    clear_alarm("VESSEL_NO_PROGRESS");
+    if (last_error_ == "CTRL_STUCK" || last_error_ == "VESSEL_NO_PROGRESS") last_error_.clear();
+  } else if (event == nav_status::StuckEvent::StuckNoProgress) {
+    clear_alarm("CTRL_STUCK");
+    last_error_ = "VESSEL_NO_PROGRESS";
     fire_alarm(
-      "CTRL_STUCK", "ERROR",
-      event == nav_status::StuckEvent::StuckCommandStale ?
-      "controller command stream stale" : "controller made no progress");
+      "VESSEL_NO_PROGRESS", "ERROR",
+      "vessel made insufficient progress within the configured movement interval");
+  } else if (event == nav_status::StuckEvent::StuckCommandStale) {
+    clear_alarm("VESSEL_NO_PROGRESS");
+    last_error_ = "CTRL_STUCK";
+    fire_alarm("CTRL_STUCK", "ERROR", "controller command stream stale");
   }
 }
 
@@ -529,6 +532,7 @@ void NavStatusAggregator::detect_mission_transition(
   if (previous == "IDLE" && current == "RUNNING") {
     reset_stuck_tracking();
     clear_alarm("CTRL_STUCK");
+    clear_alarm("VESSEL_NO_PROGRESS");
     last_error_.clear();
     fire_event("TASK_STARTED", {{"task_id", task_id_}, {"total_waypoints", waypoint_total_}});
   } else if (current == "COMPLETED") {
@@ -556,7 +560,8 @@ void NavStatusAggregator::detect_mission_transition(
   } else if (previous == "PAUSED" && current == "RUNNING") {
     reset_stuck_tracking();
     clear_alarm("CTRL_STUCK");
-    if (last_error_ == "CTRL_STUCK") last_error_.clear();
+    clear_alarm("VESSEL_NO_PROGRESS");
+    if (last_error_ == "CTRL_STUCK" || last_error_ == "VESSEL_NO_PROGRESS") last_error_.clear();
     fire_event("TASK_RESUMED", {{"task_id", task_id_}, {"waypoint_index", waypoint_current_index_}});
   }
 }
@@ -658,7 +663,8 @@ std::string NavStatusAggregator::suggested_action(const std::string & code)
   static const std::map<std::string, std::string> suggestions{
     {"LOC_LOST", "检查 GPS/EKF 状态，确认传感器数据正常"},
     {"LOC_DEGRADED", "检查 GPS 信号强度，确认定位数据质量"},
-    {"CTRL_STUCK", "检查推进器状态，确认无障碍物卡死"},
+    {"CTRL_STUCK", "检查控制器与控制输出链路"},
+    {"VESSEL_NO_PROGRESS", "人工脱困或清除障碍后恢复任务"},
     {"CTRL_OUTPUT_SILENT", "已自动触发代价图重膨胀；未恢复请检查 controller_server 与 local_costmap"},
     {"PLAN_FAILED", "检查目标航点坐标，确认不在障碍层内"},
     {"MISSION_FAILED", "检查导航系统状态，确认任务参数正确"}};
@@ -683,7 +689,8 @@ std::string NavStatusAggregator::derive_planner_status() const
 
 std::string NavStatusAggregator::derive_controller_status() const
 {
-  return stuck_tracker_->stuck() || last_error_ == "CTRL_STUCK" ? "STUCK" : "OK";
+  return stuck_tracker_->stuck() || last_error_ == "CTRL_STUCK" ||
+         last_error_ == "VESSEL_NO_PROGRESS" ? "STUCK" : "OK";
 }
 
 void NavStatusAggregator::publish_nav_status()
@@ -717,7 +724,8 @@ void NavStatusAggregator::publish_nav_status()
     ((last_error_ == "PLAN_FAILED" || last_error_ == "MISSION_FAILED") ? last_error_ : "");
   msg.controller_status = controller_status;
   msg.controller_tracking_error_m = 0.0;
-  msg.controller_last_error = last_error_ == "CTRL_STUCK" ? last_error_ : "";
+  msg.controller_last_error =
+    (last_error_ == "CTRL_STUCK" || last_error_ == "VESSEL_NO_PROGRESS") ? last_error_ : "";
   msg.localization_overall = nav_status::to_string(loc_health_);
   msg.localization_position_cov_max = std::round(position_cov_max_ * 10000.0) / 10000.0;
   msg.localization_orientation_cov_max = std::round(orientation_cov_max_ * 10000.0) / 10000.0;

@@ -13,6 +13,7 @@
 #include <nav2_msgs/action/compute_path_through_poses.hpp>
 #include <nav2_msgs/action/follow_waypoints.hpp>
 #include <nav2_msgs/srv/clear_entire_costmap.hpp>
+#include <nav_msgs/msg/occupancy_grid.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <rcl_interfaces/srv/get_parameters.hpp>
 #include <rcl_interfaces/srv/set_parameters.hpp>
@@ -109,7 +110,9 @@ private:
   bool tf_ok();
   bool odom_fresh() const;
   void odom_callback(const nav_msgs::msg::Odometry::SharedPtr msg);
+  void global_costmap_callback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg);
   std::pair<double, double> robot_xy() const;
+  PlannerFailure classify_missed_waypoint() const;
   void nav_status_callback(const m_common::msg::NavStatus::SharedPtr msg);
   void tick_ctrl_stuck_watchdog();
   void on_system_not_ready(const std::string & reason = "SYSTEM_NOT_READY");
@@ -254,6 +257,9 @@ private:
   rclcpp::TimerBase::SharedPtr navigate_feedback_timer_;
 
   CtrlStuckWatchdog ctrl_stuck_watchdog_;
+  bool vessel_no_progress_pending_{false};
+  double vessel_no_progress_last_mono_{0.0};
+  nav_msgs::msg::OccupancyGrid::SharedPtr global_costmap_;
   std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
   std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
   rclcpp_action::Client<FollowWaypoints>::SharedPtr waypoint_client_;
@@ -261,6 +267,7 @@ private:
   rclcpp::Client<nav2_msgs::srv::ClearEntireCostmap>::SharedPtr clear_local_client_;
   rclcpp::Client<nav2_msgs::srv::ClearEntireCostmap>::SharedPtr clear_global_client_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_subscription_;
+  rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr global_costmap_subscription_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr waypoint_subscription_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr color_subscription_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr zones_subscription_;

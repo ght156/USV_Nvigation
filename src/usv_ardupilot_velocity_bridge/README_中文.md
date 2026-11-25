@@ -315,14 +315,14 @@ min_in_place_angular_z    # 原地旋转角速度下限 (rad/s)，0=关闭（兴
 in_place_floor_trigger    # 下限触发门槛（默认 0.08）：|wz| 低于此值视为
                           # 闭环微调指令（如归港对角度），原样透传不抬升
 
-imu_topic                 # 旋转刹车所用 IMU（默认 /mavros/imu/data）
+# 偏航角速度固定由 pose_topic 的里程计 yaw 差分获得，不使用飞控 IMU
 enable_yaw_brake          # 旋转刹车开关（兴飞 launch 默认 true）
 yaw_brake_kd              # 阻尼增益：wz_out = -kd × ω_meas（默认 1.0）
 yaw_brake_max             # 刹车角速度上限（默认 0.2 rad/s）
 yaw_brake_engage_rate     # 残转超过此值触发刹车（默认 0.03 rad/s）
 yaw_brake_release_rate    # 低于此值退出刹车（默认 0.02 rad/s）
 yaw_brake_cmd_deadband    # |wz 指令|低于此值视为空闲（默认 0.01 rad/s）
-imu_timeout_sec           # IMU 超时（默认 0.5 s）
+yaw_rate_timeout_sec        # 里程计角速度超时（默认 0.30 s），超时退化为纯 P
 
 pose_topic                # 位置保持所用位姿反馈（默认 /mavros/local_position/odom，ENU；
                           # 本船 mavros 不发布 local_position/pose，故用 odom）

@@ -17,7 +17,6 @@ find_package(spdlog REQUIRED)
 find_package(mavros_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
-find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 
 add_executable(ardupilot_velocity_bridge src/ardupilot_velocity_bridge.cpp)
@@ -29,7 +28,6 @@ ament_target_dependencies(
   mavros_msgs
   geometry_msgs
   nav_msgs
-  sensor_msgs
   std_msgs
 )
 target_link_libraries(ardupilot_velocity_bridge m_common::mlogger)

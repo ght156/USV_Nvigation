@@ -13,7 +13,6 @@
 #include <mavros_msgs/msg/state.hpp>
 #include <mlogger/mlogger.hpp>
 #include <nav_msgs/msg/odometry.hpp>
-#include <sensor_msgs/msg/imu.hpp>
 #include <rclcpp/rclcpp.hpp>
 
 using namespace std::chrono_literals;
@@ -82,7 +81,6 @@ public:
     last_cmd_time_(this->now()),
     last_output_time_(this->now()),
     last_pose_time_(this->now()),
-    last_imu_time_(this->now()),
     hold_engage_time_(this->now())
   {
     state_topic_ = this->declare_parameter<std::string>("state_topic", "/mavros/state");
@@ -173,10 +171,9 @@ public:
 
     // Yaw brake (rate damper). The hull keeps rotating 25-35 deg for ~10s
     // after the yaw-rate command returns to zero (measured 2026-10-05). When
-    // the upstream command is idle (|vx|~0, |wz|~0) but the IMU still reports
-    // rotation, actively counter-command wz = -kd*w_meas to kill the residual
-    // spin. Never fights upstream: any real motion command disables it.
-    imu_topic_ = this->declare_parameter<std::string>("imu_topic", "/mavros/imu/data");
+    // the upstream command is idle (|vx|~0, |wz|~0) but the measured yaw rate
+    // still shows rotation, actively counter-command wz = -kd*w_meas to kill
+    // the residual spin. Never fights upstream: any real motion command disables it.
     enable_yaw_brake_ = this->declare_parameter<bool>("enable_yaw_brake", false);
     yaw_brake_kd_ = this->declare_parameter<double>("yaw_brake_kd", 1.0);
     yaw_brake_max_ = this->declare_parameter<double>("yaw_brake_max", 0.2);
@@ -185,23 +182,12 @@ public:
       this->declare_parameter<double>("yaw_brake_release_rate", 0.02);
     yaw_brake_cmd_deadband_ =
       this->declare_parameter<double>("yaw_brake_cmd_deadband", 0.01);
-    imu_timeout_sec_ = this->declare_parameter<double>("imu_timeout_sec", 0.5);
 
-    // 偏航角速度来源（2026-10-29）：飞控 /mavros/imu/data 的 angular_velocity.z
-    // 在本船出现过静止报 -0.49 rad/s 的坏值，会把 yaw brake 打成满舵。
-    //   "odom"：用 pose_topic 的里程计求导（与原地保持同一个话题，切定位源时
-    //           yaw 源自动跟着换；33 Hz，比飞控 IMU 的 7 Hz 新鲜）
-    //   "imu" ：旧行为，直接读 imu_topic 的 angular_velocity.z
-    yaw_rate_source_ = this->declare_parameter<std::string>("yaw_rate_source", "imu");
+    // 偏航角速度固定使用 pose_topic 的里程计 yaw 差分，避免飞控 IMU 坏值。
     yaw_rate_lpf_alpha_ =
       this->declare_parameter<double>("yaw_rate_lpf_alpha", 0.35);
     yaw_rate_timeout_sec_ =
       this->declare_parameter<double>("yaw_rate_timeout_sec", 0.30);
-    if (yaw_rate_source_ != "odom" && yaw_rate_source_ != "imu") {
-      MLOGGER_WARN(
-        "Unknown yaw_rate_source '{}', falling back to 'imu'", yaw_rate_source_);
-      yaw_rate_source_ = "imu";
-    }
 
     // Conservative LUTs derived from the 100-point sea-trial dataset, updated
     // with the 2026-10-05 on-water bridge calibration (env_probe phase):
@@ -243,9 +229,6 @@ public:
       pose_topic_, rclcpp::SensorDataQoS(),
       std::bind(&OffboardController::pose_cb, this, std::placeholders::_1));
 
-    imu_sub_ = this->create_subscription<sensor_msgs::msg::Imu>(
-      imu_topic_, rclcpp::SensorDataQoS(),
-      std::bind(&OffboardController::imu_cb, this, std::placeholders::_1));
 
     rclcpp::QoS input_qos = rclcpp::QoS(rclcpp::KeepLast(10)).best_effort();
     if (input_cmd_qos_ == "reliable") {
@@ -287,8 +270,7 @@ public:
       topics_oss.str(), input_cmd_qos_, output_cmd_topic_,
       enable_velocity_envelope_ ? "ON" : "OFF", envelope_safety_factor_,
       enable_in_place_hold_ ? "ON" : "OFF",
-      enable_yaw_brake_ ? "ON" : "OFF",
-      yaw_rate_source_,
+      enable_yaw_brake_ ? "ON" : "OFF", "odom",
       publish_zero_on_timeout_ ? "ON" : "OFF");
   }
 
@@ -306,7 +288,7 @@ private:
       2.0 * (q.w * q.z + q.x * q.y),
       1.0 - 2.0 * (q.y * q.y + q.z * q.z));
 
-    // odom 求导角速度（yaw_rate_source="odom" 时给 yaw brake 用）。
+    // 相邻两帧差分 + EMA 低通；dt 不合理（重连/时间跳变）时重置，避免假角速度。
     // 相邻两帧差分 + EMA 低通；dt 不合理（重连/时间跳变）时重置，避免假角速度。
     if (has_pose_) {
       const double dt = (now - last_pose_time_).seconds();
@@ -332,13 +314,6 @@ private:
     pose_yaw_ = yaw;
     last_pose_time_ = now;
     has_pose_ = true;
-  }
-
-  void imu_cb(const sensor_msgs::msg::Imu::SharedPtr msg)
-  {
-    imu_wz_ = msg->angular_velocity.z;
-    last_imu_time_ = this->now();
-    has_imu_ = true;
   }
 
   void cmd_cb(const geometry_msgs::msg::Twist::SharedPtr msg)
@@ -516,29 +491,19 @@ private:
     }
   }
 
-  // 当前选用的偏航角速度及其新鲜度（yaw_rate_source: odom / imu）
+  // 偏航角速度固定来自里程计求导，并检查新鲜度。
   double measured_yaw_rate(bool & fresh)
   {
     fresh = false;
     const rclcpp::Time now = this->now();
-    if (yaw_rate_source_ == "odom") {
-      if (!has_yaw_rate_) {
-        return 0.0;
-      }
-      if ((now - last_yaw_rate_time_).seconds() > yaw_rate_timeout_sec_) {
-        return 0.0;
-      }
-      fresh = true;
-      return yaw_rate_odom_;
-    }
-    if (!has_imu_) {
+    if (!has_yaw_rate_) {
       return 0.0;
     }
-    if ((now - last_imu_time_).seconds() > imu_timeout_sec_) {
+    if ((now - last_yaw_rate_time_).seconds() > yaw_rate_timeout_sec_) {
       return 0.0;
     }
     fresh = true;
-    return imu_wz_;
+    return yaw_rate_odom_;
   }
 
   void apply_yaw_brake(geometry_msgs::msg::Twist & target)
@@ -566,7 +531,7 @@ private:
       if (std::abs(w_meas) >= yaw_brake_engage_rate_) {
         brake_active_ = true;
         MLOGGER_INFO("Yaw brake engaged at w_meas {:.3f} rad/s (src={})",
-                     w_meas, yaw_rate_source_);
+                     w_meas, "odom");
       } else {
         return;
       }
@@ -584,7 +549,7 @@ private:
     if (log_throttled(last_brake_debug_log_, 500)) {
       MLOGGER_DEBUG(
         "Yaw brake: w_meas {:.3f} (src={}) -> wz {:.3f}",
-        w_meas, yaw_rate_source_, target.angular.z);
+        w_meas, "odom", target.angular.z);
     }
   }
 
@@ -694,21 +659,15 @@ private:
   double min_in_place_angular_z_{0.0};
   double in_place_floor_trigger_{0.08};
 
-  std::string imu_topic_;
   bool enable_yaw_brake_{false};
   double yaw_brake_kd_{1.0};
   double yaw_brake_max_{0.2};
   double yaw_brake_engage_rate_{0.03};
   double yaw_brake_release_rate_{0.02};
   double yaw_brake_cmd_deadband_{0.01};
-  double imu_timeout_sec_{0.5};
-
-  bool has_imu_{false};
-  double imu_wz_{0.0};
   bool brake_active_{false};
 
-  // 偏航角速度来源与 odom 求导状态
-  std::string yaw_rate_source_{"imu"};
+  // odom 求导状态
   double yaw_rate_lpf_alpha_{0.35};
   double yaw_rate_timeout_sec_{0.30};
   double yaw_rate_odom_{0.0};
@@ -749,7 +708,6 @@ private:
   rclcpp::Time last_cmd_time_;
   rclcpp::Time last_output_time_;
   rclcpp::Time last_pose_time_;
-  rclcpp::Time last_imu_time_;
   rclcpp::Time hold_engage_time_;
   std::chrono::steady_clock::time_point last_floor_debug_log_;
   std::chrono::steady_clock::time_point last_envelope_debug_log_;
@@ -759,7 +717,6 @@ private:
 
   rclcpp::Subscription<mavros_msgs::msg::State>::SharedPtr state_sub_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr pose_sub_;
-  rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub_;
   std::vector<rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr> cmd_subs_;
   rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_pub_;
   rclcpp::TimerBase::SharedPtr timer_;

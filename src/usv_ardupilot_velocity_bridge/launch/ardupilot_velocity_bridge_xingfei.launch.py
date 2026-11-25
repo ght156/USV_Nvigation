@@ -82,15 +82,12 @@ def _setup(context, *_args, **_kwargs):
                 "hold_decay_start_sec": pf("hold_decay_start_sec"),
                 "hold_decay_full_sec": pf("hold_decay_full_sec"),
                 "hold_min_correction": pf("hold_min_correction"),
-                "imu_topic": ps("imu_topic"),
                 "enable_yaw_brake": pb("enable_yaw_brake"),
                 "yaw_brake_kd": pf("yaw_brake_kd"),
                 "yaw_brake_max": pf("yaw_brake_max"),
                 "yaw_brake_engage_rate": pf("yaw_brake_engage_rate"),
                 "yaw_brake_release_rate": pf("yaw_brake_release_rate"),
                 "yaw_brake_cmd_deadband": pf("yaw_brake_cmd_deadband"),
-                "imu_timeout_sec": pf("imu_timeout_sec"),
-                "yaw_rate_source": ps("yaw_rate_source"),
                 "yaw_rate_lpf_alpha": pf("yaw_rate_lpf_alpha"),
                 "yaw_rate_timeout_sec": pf("yaw_rate_timeout_sec"),
             }],
@@ -165,19 +162,13 @@ def generate_launch_description():
         DeclareLaunchArgument("hold_min_correction", default_value="0.05"), #衰减后修正下限m/s
 
         # Yaw brake: 2026-10-05 水测停车残转 25~35°，τ≈4s，需要主动刹车。
-        DeclareLaunchArgument("imu_topic", default_value="/mavros/imu/data"),
         DeclareLaunchArgument("enable_yaw_brake", default_value="true"), #旋转刹车开关
         DeclareLaunchArgument("yaw_brake_kd", default_value="1.0"), #阻尼增益 wz=-kd*w_meas
         DeclareLaunchArgument("yaw_brake_max", default_value="0.2"), #刹车角速度上限rad/s
         DeclareLaunchArgument("yaw_brake_engage_rate", default_value="0.03"), #残转超过此值触发
         DeclareLaunchArgument("yaw_brake_release_rate", default_value="0.02"), #低于此值退出
         DeclareLaunchArgument("yaw_brake_cmd_deadband", default_value="0.01"), #|wz指令|低于此值算空闲
-        DeclareLaunchArgument("imu_timeout_sec", default_value="0.5"), #IMU超时s
-
-        # 偏航角速度来源（2026-10-29）：兴飞改用里程计求导，避开飞控 IMU 的坏值。
-        # "odom" = 用 pose_topic 的里程计差分（切定位源时自动跟着换）；
-        # "imu"  = 旧行为，读 imu_topic 的 angular_velocity.z。
-        DeclareLaunchArgument("yaw_rate_source", default_value="odom"),
+        # 偏航角速度固定由 pose_topic 的里程计 yaw 差分计算，不使用飞控 IMU。
         DeclareLaunchArgument("yaw_rate_lpf_alpha", default_value="0.35"), #odom 求导 EMA 系数
         DeclareLaunchArgument("yaw_rate_timeout_sec", default_value="0.30"), #odom 求导超时s
 

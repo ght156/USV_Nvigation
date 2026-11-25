@@ -105,6 +105,40 @@ TEST(MissionBridgeCore, MapsNav2FailuresToNavigateTaskResultCodes) {
   EXPECT_EQ(mb::map_nav2_failure(0, "unknown"), 99);
 }
 
+TEST(MissionBridgeCore, ClassifiesRecoverablePlannerBlocksAndInvalidTargets) {
+  mb::CostmapView costmap;
+  costmap.width = 10;
+  costmap.height = 10;
+  costmap.resolution = 1.0;
+  costmap.origin_x = 0.0;
+  costmap.origin_y = 0.0;
+  costmap.data.assign(100, 0);
+
+  EXPECT_EQ(
+    mb::classify_planner_failure({1.0, 1.0}, {5.0, 5.0}, &costmap),
+    mb::PlannerFailure::NoPath);
+  EXPECT_EQ(
+    mb::classify_planner_failure({1.0, 1.0}, {5.0, 5.0}, nullptr),
+    mb::PlannerFailure::NoPath);
+
+  costmap.data[11] = -2;
+  EXPECT_EQ(
+    mb::classify_planner_failure({1.0, 1.0}, {5.0, 5.0}, &costmap),
+    mb::PlannerFailure::StartBlocked);
+  costmap.data[11] = 0;
+  costmap.data[55] = -3;
+  EXPECT_EQ(
+    mb::classify_planner_failure({1.0, 1.0}, {5.0, 5.0}, &costmap),
+    mb::PlannerFailure::TargetInvalid);
+  EXPECT_EQ(
+    mb::classify_planner_failure({1.0, 1.0}, {15.0, 5.0}, &costmap),
+    mb::PlannerFailure::TargetInvalid);
+  costmap.data[55] = 0;
+  EXPECT_EQ(
+    mb::classify_planner_failure({-1.0, 1.0}, {5.0, 5.0}, &costmap),
+    mb::PlannerFailure::StartBlocked);
+}
+
 int main(int argc, char ** argv) {
   testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();

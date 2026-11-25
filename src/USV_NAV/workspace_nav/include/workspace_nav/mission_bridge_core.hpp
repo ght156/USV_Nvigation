@@ -1,6 +1,7 @@
 #ifndef WORKSPACE_NAV__MISSION_BRIDGE_CORE_HPP_
 #define WORKSPACE_NAV__MISSION_BRIDGE_CORE_HPP_
 
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <vector>
@@ -32,6 +33,23 @@ struct Point
 {
   double x;
   double y;
+};
+
+struct CostmapView
+{
+  std::size_t width{0};
+  std::size_t height{0};
+  double resolution{0.0};
+  double origin_x{0.0};
+  double origin_y{0.0};
+  std::vector<int8_t> data;
+};
+
+enum class PlannerFailure
+{
+  StartBlocked,
+  TargetInvalid,
+  NoPath,
 };
 
 struct ParsedWaypointMessage
@@ -73,6 +91,8 @@ UtmCoordinate lat_lon_to_utm(double latitude, double longitude);
 std::optional<std::size_t> fence_violation_index(
   const Point & point, const std::vector<Fence> & fences);
 int map_nav2_failure(int nav2_error_code, const std::string & nav2_error_msg);
+PlannerFailure classify_planner_failure(
+  const Point & start, const Point & target, const CostmapView * costmap);
 
 class CtrlStuckWatchdog
 {

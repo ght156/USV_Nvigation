@@ -358,6 +358,36 @@ std::optional<std::size_t> fence_violation_index(
   return std::nullopt;
 }
 
+PlannerFailure classify_planner_failure(
+  const Point & start, const Point & target, const CostmapView * costmap)
+{
+  if (costmap == nullptr || costmap->width == 0 || costmap->height == 0 ||
+    costmap->resolution <= 0.0 || costmap->data.size() < costmap->width * costmap->height)
+  {
+    return PlannerFailure::NoPath;
+  }
+  const auto index = [costmap](const Point & point) -> std::optional<std::size_t> {
+      const double grid_x = (point.x - costmap->origin_x) / costmap->resolution;
+      const double grid_y = (point.y - costmap->origin_y) / costmap->resolution;
+      if (grid_x < 0.0 || grid_y < 0.0 ||
+        grid_x >= static_cast<double>(costmap->width) ||
+        grid_y >= static_cast<double>(costmap->height))
+      {
+        return std::nullopt;
+      }
+      return static_cast<std::size_t>(grid_y) * costmap->width +
+             static_cast<std::size_t>(grid_x);
+    };
+  const auto blocked = [costmap](std::size_t index) {
+      return static_cast<uint8_t>(costmap->data[index]) >= 253;
+    };
+  const auto target_index = index(target);
+  if (!target_index || blocked(*target_index)) return PlannerFailure::TargetInvalid;
+  const auto start_index = index(start);
+  if (!start_index || blocked(*start_index)) return PlannerFailure::StartBlocked;
+  return PlannerFailure::NoPath;
+}
+
 int map_nav2_failure(int nav2_error_code, const std::string & nav2_error_msg)
 {
   const std::string message = lower(nav2_error_msg);
