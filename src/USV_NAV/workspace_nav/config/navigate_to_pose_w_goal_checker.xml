@@ -18,6 +18,10 @@
   <BehaviorTree ID="MainTree">
     <RecoveryNode number_of_retries="6" name="NavigateRecovery">
       <PipelineSequence name="NavigateWithReplanning">
+        <!-- RateController 的 hz 控制任务内全局路径重规划周期；当前 1.0 Hz = 1 s。
+             如需 5 min 一次，设置 hz=1/300≈0.0033333333。
+             planner_server.expected_planner_frequency 只控制单次规划耗时告警，
+             不控制 ComputePathToPose 的调用周期。 -->
         <RateController hz="1.0">
           <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased"/>
         </RateController>

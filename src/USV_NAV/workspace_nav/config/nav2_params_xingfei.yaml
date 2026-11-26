@@ -464,6 +464,10 @@ map_saver:
 
 planner_server:
   ros__parameters:
+    # —— 单次规划耗时告警阈值（Hz），不是全局路径重规划频率 ——
+    # 2.0 表示单次规划超过 0.5 s 时打印 warning，不会每 0.5 s 主动重算路径。
+    # 任务内的重规划周期由 config/navigate_to_pose_w_goal_checker.xml 中
+    # RateController 的 hz 决定；5 min 一次对应 hz=1/300≈0.0033333333。
     expected_planner_frequency: 2.0
     use_sim_time: false
     planner_plugins: ["GridBased"]
